@@ -620,6 +620,9 @@ if run_button and selected_ticker:
 
             status.update(label=f"✓ Analyse abgeschlossen — {result.get('company', ticker)}", state="complete", expanded=False)
 
+        st.session_state.result = result
+        st.rerun()
+
     except Exception as e:
         st.error(f"Fehler bei der Analyse: {str(e)}")
         st.info("Tipp: Prüfen Sie ob der Ticker korrekt ist (z.B. HOLN.SW für Holcim)")
