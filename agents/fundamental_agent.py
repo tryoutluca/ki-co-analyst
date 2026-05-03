@@ -75,6 +75,19 @@ KGV-VALIDIERUNG:
      Forward P/E [Wert]x und EV/EBITDA [Wert]x als primäre Multiples"
 - Wenn pe_validation.status = "plausibel": Trailing P/E kann normal verwendet werden
 
+EMPFEHLUNGS-LOGIK FÜR FUNDAMENTAL-AGENT (5-stufige Skala):
+  Basiere Empfehlung primär auf DCF Fair Value vs. Kurs:
+    > +15%:          KAUFEN
+    +5% bis +15%:    ÜBERGEWICHTEN
+    -5% bis +5%:     HALTEN
+    -15% bis -5%:    UNTERGEWICHTEN
+    < -15%:          VERKAUFEN
+
+  Adjustiere um ±1 Stufe wenn:
+  - Bewertung mehrheitlich ELEVATED → eine Stufe schlechter
+  - Bewertung mehrheitlich DISCOUNT → eine Stufe besser
+  - FCF Conversion ausserhalb 70–130% → eine Stufe schlechter
+
 CASHFLOW-ANALYSE:
 - Nehme FCF-Kennzahlen immer in key_metrics auf:
   FCF Yield, FCF Conversion, Net Debt/EBITDA, EV/FCF

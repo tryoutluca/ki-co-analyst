@@ -38,6 +38,13 @@ MAKRO/INDUSTRIE-INTEGRATION:
 - Prüfe explizit: Hat die Fundamentalanalyse diese in DCF-Discount-Rate / Wachstumsannahmen / Margenprojektionen eingepreist?
 - Wenn nein: trage es in macro_risks_ignored ein
 
+EMPFEHLUNGS-SKALA (5-stufig — verwende für original_recommendation):
+  KAUFEN | ÜBERGEWICHTEN | HALTEN | UNTERGEWICHTEN | VERKAUFEN
+
+CONVICTION KILLERS → automatisch 2 Stufen schlechter:
+  Original KAUFEN + 2 Conviction Killers → HALTEN
+  Original ÜBERGEWICHTEN + 2 Conviction Killers → UNTERGEWICHTEN
+
 SZENARIEN (genau 3, Wahrscheinlichkeiten müssen 100 ergeben):
 - Bear Case: Was wenn die 2-3 wichtigsten Annahmen der Bullanalyse falsch sind?
 - Base Case: Konsenserwartung, mittleres Szenario

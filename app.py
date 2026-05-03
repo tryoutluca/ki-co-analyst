@@ -232,12 +232,22 @@ st.markdown("""
 
 def get_badge_html(recommendation: str) -> str:
     rec = recommendation.upper()
-    css_class = {
-        "KAUFEN": "badge-kaufen",
-        "HALTEN": "badge-halten",
-        "VERKAUFEN": "badge-verkaufen",
-    }.get(rec, "badge-halten")
-    return f'<span class="{css_class}">{rec}</span>'
+    styles = {
+        "KAUFEN":
+            "background:#0d4f2e; color:#4ade80; border:1px solid #4ade80;",
+        "ÜBERGEWICHTEN":
+            "background:#1a3d1a; color:#86efac; border:1px solid #86efac;",
+        "HALTEN":
+            "background:#3d3200; color:#fbbf24; border:1px solid #fbbf24;",
+        "UNTERGEWICHTEN":
+            "background:#3d1f00; color:#fb923c; border:1px solid #fb923c;",
+        "VERKAUFEN":
+            "background:#4f0d0d; color:#f87171; border:1px solid #f87171;",
+    }
+    style = styles.get(rec, styles["HALTEN"])
+    return (f'<span style="padding:0.4rem 1.2rem; border-radius:20px; '
+            f'font-weight:600; font-size:1rem; display:inline-block; '
+            f'letter-spacing:1px; {style}">{rec}</span>')
 
 
 def get_ampel_icon(signal: str) -> str:

@@ -43,6 +43,49 @@ GEWICHTUNG (dynamisch anpassen):
   → Erhöhe auf 40% wenn Conviction Killers überzeugend
   → Reduziere auf 20% wenn Gegenargumente schwach oder spekulativ
 
+EMPFEHLUNGS-SKALA (5-stufig — Buy-Side Standard):
+
+  Basis-Schwellenwerte (Upside/Downside zum Price Target):
+    KAUFEN         > +15%  UND Conviction hoch
+    ÜBERGEWICHTEN  +5% bis +15%  ODER Conviction mittel mit positivem Makro
+    HALTEN         -5% bis +5%   ODER widersprüchliche Agenten-Signale
+    UNTERGEWICHTEN -15% bis -5%  ODER Conviction niedrig mit negativem Makro
+    VERKAUFEN      < -15%  ODER aktive Conviction Killers + negatives Makro
+
+  WICHTIG — Upside ist NICHT alleiniger Faktor:
+  Gewichtete Formel:
+    Score = (Upside_Pct × 0.40)
+           + (Sentiment_Score/10 × 100 × 0.20)
+           + (Risk_Adjustment × 0.40)
+
+  Risk_Adjustment:
+    Keine Conviction Killers aktiv:     +10
+    1 Conviction Killer aktiv:           0
+    2+ Conviction Killers aktiv:        -15
+    Makro headwind:                      -5
+    Makro tailwind:                      +5
+
+  Beispiel bei 11% Upside:
+    Keine Conviction Killers + neutrales Makro + Sentiment 6/10:
+    Score = (11 × 0.40) + (60 × 0.20) + (10 × 0.40)
+           = 4.4 + 12 + 4 = 20.4 → ÜBERGEWICHTEN
+
+    Mit 2 Conviction Killern:
+    Score = (11 × 0.40) + (60 × 0.20) + (-15 × 0.40)
+           = 4.4 + 12 - 6 = 10.4 → HALTEN (korrekt wegen Risiko)
+
+  Score → Empfehlung Mapping:
+    Score > 25:          KAUFEN
+    Score 15 bis 25:     ÜBERGEWICHTEN
+    Score 5 bis 15:      HALTEN
+    Score -5 bis 5:      UNTERGEWICHTEN
+    Score < -5:          VERKAUFEN
+
+  CONVICTION LEVEL bei 5-stufiger Skala:
+    hoch:    KAUFEN oder VERKAUFEN (klare Richtung)
+    mittel:  ÜBERGEWICHTEN oder UNTERGEWICHTEN
+    niedrig: HALTEN (maximale Unsicherheit)
+
 CONVICTION LEVEL Regeln:
 - hoch: Alle drei Agenten zeigen dieselbe Richtung UND keine Conviction Killers
 - mittel: Zwei von drei Agenten einig ODER ein Conviction Killer vorhanden

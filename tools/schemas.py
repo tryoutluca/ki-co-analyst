@@ -117,7 +117,7 @@ class FundamentalAgentOutput(BaseModel):
     ticker: str
     company: str
     sector: str
-    recommendation: Literal["KAUFEN", "HALTEN", "VERKAUFEN"]
+    recommendation: Literal["KAUFEN", "ÜBERGEWICHTEN", "HALTEN", "UNTERGEWICHTEN", "VERKAUFEN"]
     fair_value_estimate: float = Field(description="Geschätzter fairer Wert in USD/CHF")
     current_price: float
     upside_downside_pct: float = Field(description="Upside/Downside in % zum fairen Wert")
@@ -198,7 +198,7 @@ class ConvictionKiller(BaseModel):
 class RiskAgentOutput(BaseModel):
     ticker: str
     company: str
-    original_recommendation: Literal["KAUFEN", "HALTEN", "VERKAUFEN"]
+    original_recommendation: Literal["KAUFEN", "ÜBERGEWICHTEN", "HALTEN", "UNTERGEWICHTEN", "VERKAUFEN"]
     counter_position: str = Field(description="1-2 Sätze Gegenposition")
     risk_arguments: list[RiskArgument] = Field(
         description="5 critical arguments, one per category"
@@ -273,7 +273,7 @@ class SupervisorOutput(BaseModel):
     company: str
     sector: str
     date: str
-    final_recommendation: Literal["KAUFEN", "HALTEN", "VERKAUFEN"]
+    final_recommendation: Literal["KAUFEN", "ÜBERGEWICHTEN", "HALTEN", "UNTERGEWICHTEN", "VERKAUFEN"]
     conviction_level: Literal["hoch", "mittel", "niedrig"]
     price_target: float
     current_price: float
