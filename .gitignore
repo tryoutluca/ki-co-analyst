@@ -1,0 +1,26 @@
+# Environment Variables — NIEMALS pushen
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# IR Cache (kann gross werden)
+ir_cache/
+
+# Output Files (können sensitive Daten enthalten)
+output_memo*.json
+output_memo*.txt
+output_memo*.docx
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
