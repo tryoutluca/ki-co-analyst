@@ -534,53 +534,95 @@ if run_button and selected_ticker:
     ticker = selected_ticker.upper().strip()
     st.session_state.ticker = ticker
 
-    with st.spinner(""):
-        # Progress-Anzeige
-        progress_placeholder = st.empty()
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from agents.fundamental_agent import run_fundamental_agent
+    from agents.news_agent import run_news_agent
+    from agents.risk_agent import run_risk_agent
+    from graph.supervisor import synthesize_memo
 
-        steps = [
-            ("🔍", "Unternehmensdaten abrufen (yfinance, Finnhub)..."),
-            ("📄", "IR-Dokumente analysieren (RAG-Pipeline)..."),
-            ("📰", "News & Makro-Indikatoren auswerten..."),
-            ("⚖️", "Advocatus Diaboli — Risiken hinterfragen..."),
-            ("✍️", "Supervisor synthetisiert finales Memo..."),
-        ]
+    try:
+        with st.status(f"Analyse läuft für **{ticker}**…", expanded=True) as status:
 
-        for i, (icon, msg) in enumerate(steps):
-            with progress_placeholder.container():
-                st.markdown(f"""
-                <div style="background:#f8f9fa; border-radius:10px; padding:1.5rem; 
-                            border-left:4px solid #c9a84c; margin:1rem 0;">
-                  <div style="font-size:1.1rem; font-weight:500; color:#1a2f45;">
-                    {icon} {msg}
-                  </div>
-                  <div style="margin-top:0.8rem;">
-                    {"".join([
-                        f'<span style="display:inline-block;width:12px;height:12px;'
-                        f'border-radius:50%;margin-right:4px;'
-                        f'background:{"#c9a84c" if j <= i else "#dee2e6"};"></span>'
-                        for j in range(len(steps))
-                    ])}
-                  </div>
-                  <div style="font-size:0.8rem; color:#8a9bb0; margin-top:0.5rem;">
-                    Schritt {i+1} von {len(steps)}
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
+            # ── Schritt 1: Fundamental-Agent ─────────────────────────────────
+            st.write("🔍 **Fundamental-Agent** — Daten abrufen & DCF-Bewertung…")
+            fundamental_output = run_fundamental_agent(ticker)
+            rec   = fundamental_output.get("recommendation", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "recommendation", "n/v")
+            fv    = fundamental_output.get("fair_value_estimate", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "fair_value_estimate", "n/v")
+            updn  = fundamental_output.get("upside_downside_pct", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "upside_downside_pct", "n/v")
+            val   = fundamental_output.get("valuation_assessment", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "valuation_assessment", "n/v")
+            st.write(f"   ✅ Empfehlung: **{rec}** | Fair Value: {fv} | Upside: {updn}% | Bewertung: {val}")
 
-            if i < len(steps) - 1:
-                time.sleep(0.3)
+            # Investment Case Bullets
+            ic = fundamental_output.get("investment_case", []) if isinstance(fundamental_output, dict) else getattr(fundamental_output, "investment_case", [])
+            if ic:
+                for pt in ic[:3]:
+                    point_txt = pt.get("point", str(pt)) if isinstance(pt, dict) else str(pt)
+                    st.write(f"   • {point_txt}")
 
-        try:
-            result = run_analysis(ticker)
-            st.session_state.result = result
-            progress_placeholder.empty()
-            st.success(f"✓ Analyse abgeschlossen: {result.get('company', ticker)}")
-        except Exception as e:
-            progress_placeholder.empty()
-            st.error(f"Fehler bei der Analyse: {str(e)}")
-            st.info("Tipp: Prüfen Sie ob der Ticker korrekt ist (z.B. HOLN.SW für Holcim)")
-            st.session_state.result = None
+            # ── Schritt 2: News/Sentiment-Agent ──────────────────────────────
+            st.write("📰 **News/Sentiment-Agent** — Makro & Nachrichten auswerten…")
+            fundamental_context = (
+                f"Empfehlung: {rec}, Fair Value: {fv}, Bewertung: {val}"
+            )
+            news_output = run_news_agent(ticker, fundamental_context)
+            sentiment    = news_output.get("overall_sentiment_score", "n/v") if isinstance(news_output, dict) else getattr(news_output, "overall_sentiment_score", "n/v")
+            st_outlook   = news_output.get("short_term_outlook", "n/v") if isinstance(news_output, dict) else getattr(news_output, "short_term_outlook", "n/v")
+            macro_dir    = news_output.get("overall_macro_direction", "n/v") if isinstance(news_output, dict) else getattr(news_output, "overall_macro_direction", "n/v")
+            st.write(f"   ✅ Sentiment: **{sentiment}/10** | Kurzfrist-Outlook: {st_outlook} | Makro: {macro_dir}")
+
+            # Top-News
+            news_items = news_output.get("news_items", []) if isinstance(news_output, dict) else getattr(news_output, "news_items", [])
+            for ni in news_items[:2]:
+                headline = ni.get("headline", "") if isinstance(ni, dict) else getattr(ni, "headline", "")
+                src      = ni.get("source", "") if isinstance(ni, dict) else getattr(ni, "source", "")
+                impact   = ni.get("sentiment_impact", "") if isinstance(ni, dict) else getattr(ni, "sentiment_impact", "")
+                if headline:
+                    st.write(f"   • [{impact}] {headline} — *{src}*")
+
+            # ── Schritt 3: Risk/Advocatus-Agent ──────────────────────────────
+            st.write("⚖️ **Risk-Agent** — Advocatus Diaboli & Szenarien…")
+            risk_output  = run_risk_agent(ticker, fundamental_output, news_output)
+            risk_rec     = risk_output.get("original_recommendation", "n/v") if isinstance(risk_output, dict) else getattr(risk_output, "original_recommendation", "n/v")
+            counter      = risk_output.get("counter_position", "") if isinstance(risk_output, dict) else getattr(risk_output, "counter_position", "")
+            st.write(f"   ✅ Gegenposition zu **{risk_rec}**: {counter}")
+
+            scenarios = risk_output.get("scenarios", []) if isinstance(risk_output, dict) else getattr(risk_output, "scenarios", [])
+            for sc in scenarios:
+                sname  = sc.get("name", "") if isinstance(sc, dict) else sc.name
+                sprob  = sc.get("probability_pct", "") if isinstance(sc, dict) else sc.probability_pct
+                spt    = sc.get("price_target", "") if isinstance(sc, dict) else sc.price_target
+                st.write(f"   • {sname}: {sprob}% Wahrscheinlichkeit | Kursziel: {spt}")
+
+            ck_list = risk_output.get("conviction_killers", []) if isinstance(risk_output, dict) else getattr(risk_output, "conviction_killers", [])
+            for ck in ck_list:
+                desc = ck.get("description", "") if isinstance(ck, dict) else getattr(ck, "description", "")
+                st.write(f"   🚨 Conviction Killer: {desc}")
+
+            # ── Schritt 4: Qualitätsprüfung ───────────────────────────────────
+            st.write("🔎 **Qualitätsprüfung** — Konsistenz der drei Analysen…")
+            from graph.supervisor import _build_quality_checks
+            quality_checks = _build_quality_checks(fundamental_output, news_output, risk_output)
+            ok  = sum(1 for c in quality_checks if c["result"] == "bestanden")
+            wrn = sum(1 for c in quality_checks if c["result"] == "Warnung")
+            err = sum(1 for c in quality_checks if c["result"] == "fehlgeschlagen")
+            st.write(f"   ✅ {ok} bestanden · ⚠️ {wrn} Warnungen · ❌ {err} fehlgeschlagen")
+            for c in quality_checks:
+                icon_map = {"bestanden": "✅", "Warnung": "⚠️", "fehlgeschlagen": "❌"}
+                st.write(f"   {icon_map.get(c['result'], 'ℹ️')} {c['check']}: {c['comment']}")
+
+            # ── Schritt 5: Supervisor-Synthese ────────────────────────────────
+            st.write("✍️ **Supervisor** — Finales Investment Memo wird synthetisiert…")
+            result = synthesize_memo(ticker, fundamental_output, news_output, risk_output)
+            final_rec = result.get("final_recommendation", "n/v")
+            conviction = result.get("conviction_level", "n/v")
+            pt         = result.get("price_target", "n/v")
+            st.write(f"   ✅ Finale Empfehlung: **{final_rec}** | Conviction: {conviction} | Kursziel: {pt}")
+
+            status.update(label=f"✓ Analyse abgeschlossen — {result.get('company', ticker)}", state="complete", expanded=False)
+
+    except Exception as e:
+        st.error(f"Fehler bei der Analyse: {str(e)}")
+        st.info("Tipp: Prüfen Sie ob der Ticker korrekt ist (z.B. HOLN.SW für Holcim)")
 
 
 # ── Ergebnis anzeigen ─────────────────────────────────────────────────────────
@@ -1007,14 +1049,17 @@ if st.session_state.result:
         )
 
     with dl_col3:
-        docx_bytes = _build_word_memo(data, ticker, date, ccy)
-        st.download_button(
-            label="⬇️ Word herunterladen",
-            data=docx_bytes,
-            file_name=f"investment_memo_{ticker}_{date}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
+        try:
+            docx_bytes = _build_word_memo(data, ticker, date, ccy)
+            st.download_button(
+                label="⬇️ Word herunterladen",
+                data=docx_bytes,
+                file_name=f"investment_memo_{ticker}_{date}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        except ImportError:
+            st.warning("python-docx nicht installiert — `pip install python-docx`")
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     st.markdown(f"""

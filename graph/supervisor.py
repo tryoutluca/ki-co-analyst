@@ -173,6 +173,113 @@ def _build_quality_checks(fundamental_output, news_output, risk_output) -> list[
     return checks
 
 
+def synthesize_memo(
+    ticker: str,
+    fundamental_output,
+    news_output,
+    risk_output,
+) -> dict:
+    """
+    Führt nur die Supervisor-Synthese durch — Agenten-Outputs bereits vorhanden.
+    Wird von app.py genutzt damit die UI jeden Schritt live anzeigen kann.
+    """
+    quality_checks = _build_quality_checks(fundamental_output, news_output, risk_output)
+
+    macro_indicators = _extract(news_output, "macro_indicators", [])
+    industry_factors = _extract(news_output, "industry_factors", [])
+    macro_risks_ignored = _extract(risk_output, "macro_risks_ignored", [])
+    conviction_killers = _extract(risk_output, "conviction_killers", [])
+
+    macro_context = ""
+    if macro_indicators:
+        macro_context = "\n### MAKRO-INDIKATOREN (News-Agent):\n"
+        for m in macro_indicators:
+            if isinstance(m, dict):
+                macro_context += f"  • [{m.get('impact_on_company')}] {m.get('indicator')}: {m.get('mechanism')}\n"
+            else:
+                macro_context += f"  • [{m.impact_on_company}] {m.indicator}: {m.mechanism}\n"
+
+    industry_context = ""
+    if industry_factors:
+        industry_context = "\n### INDUSTRIE-FAKTOREN (News-Agent):\n"
+        for f in industry_factors:
+            if isinstance(f, dict):
+                industry_context += f"  • [{f.get('direction')}] {f.get('topic')}: {f.get('mechanism')}\n"
+            else:
+                industry_context += f"  • [{f.direction}] {f.topic}: {f.mechanism}\n"
+
+    risk_context = ""
+    if macro_risks_ignored:
+        risk_context = "\n### VOM FUNDAMENTAL-AGENT IGNORIERTE MAKRO-RISIKEN:\n"
+        for r in macro_risks_ignored:
+            risk_context += f"  • {r}\n"
+
+    killer_context = ""
+    if conviction_killers:
+        killer_context = "\n### CONVICTION KILLERS (Risk-Agent):\n"
+        for k in conviction_killers:
+            if isinstance(k, dict):
+                killer_context += f"  [!]{k.get('description')} → Monitor: {k.get('monitoring_indicator')}\n"
+            else:
+                killer_context += f"  [!]{k.description} → Monitor: {k.monitoring_indicator}\n"
+
+    quality_context = "\n### QUALITÄTSPRÜFUNG ERGEBNISSE:\n"
+    for c in quality_checks:
+        quality_context += f"  [{c['result']}] {c['check']}: {c['comment']}\n"
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SUPERVISOR_PROMPT),
+        ("human", """Synthetisiere das finale Investment Memo für {ticker} ({company}).
+
+## FUNDAMENTAL-ANALYSE (Gewicht: 50%):
+{fundamental_json}
+
+## NEWS/SENTIMENT-ANALYSE (Gewicht: 20%):
+{news_json}
+
+## RISK/ADVOCATUS-DIABOLI-ANALYSE (Gewicht: 30%):
+{risk_json}
+
+{macro_context}
+{industry_context}
+{risk_context}
+{killer_context}
+{quality_context}
+
+AUFGABEN:
+1. Übernimm die quality_checks aus dem Qualitätsprüfungs-Kontext oben (ergänze ggf.)
+2. Baue die valuation_table aus den key_metrics der Fundamentalanalyse
+3. Baue consensus_estimates: 2 Jahre Actual aus key_metrics + 3 Jahre Estimate aus consensus_estimates/Finanzkennzahlen
+4. Übernimm scenarios aus dem Risk-Agent (Bear/Base/Bull, Summe=100%)
+5. Baue macro_ampel mit genau 4 Einträgen: Makro, Branche, Unternehmen, Konkurrenz
+6. Übernimm conviction_killers aus dem Risk-Agent
+7. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
+8. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
+
+Datum heute: {today}
+Gib das Ergebnis als JSON zurück."""),
+    ])
+
+    chain = prompt | llm | parser
+
+    result = chain.invoke({
+        "ticker": ticker,
+        "company": _extract(fundamental_output, "company", ticker),
+        "fundamental_json": json.dumps(fundamental_output, indent=2, ensure_ascii=False),
+        "news_json": json.dumps(news_output, indent=2, ensure_ascii=False),
+        "risk_json": json.dumps(risk_output, indent=2, ensure_ascii=False),
+        "macro_context": macro_context,
+        "industry_context": industry_context,
+        "risk_context": risk_context,
+        "killer_context": killer_context,
+        "quality_context": quality_context,
+        "today": date.today().isoformat(),
+        "format_instructions": parser.get_format_instructions(),
+    })
+
+    return result
+
+
 def run_supervisor(ticker: str) -> dict:
     """
     Orchestriert alle drei Agenten und synthetisiert das finale Investment Memo.
