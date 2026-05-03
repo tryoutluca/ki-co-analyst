@@ -6,6 +6,7 @@ Start: streamlit run app.py
 """
 
 import streamlit as st
+import pandas as pd
 import json
 import os
 import sys
@@ -632,61 +633,39 @@ if st.session_state.result:
 
         vt = data.get("valuation_table", [])
         if vt:
-            # Tabelle als HTML für bessere Formatierung
-            table_html = """
-            <table style="width:100%; border-collapse:collapse; font-size:0.88rem;">
-              <thead>
-                <tr style="background:#1a2f45; color:white;">
-                  <th style="padding:0.7rem 1rem; text-align:left;">Kennzahl</th>
-                  <th style="padding:0.7rem 1rem; text-align:right;">Aktuell</th>
-                  <th style="padding:0.7rem 1rem; text-align:right;">Peer Ø</th>
-                  <th style="padding:0.7rem 1rem; text-align:right;">Hist. Ø</th>
-                  <th style="padding:0.7rem 1rem; text-align:center;">Einschätzung</th>
-                  <th style="padding:0.7rem 1rem; text-align:left;">Quelle</th>
-                </tr>
-              </thead>
-              <tbody>
-            """
-            for i, row in enumerate(vt):
+            rows = []
+            for row in vt:
                 assessment = row.get("assessment", "FAIR")
-                assess_color = {
-                    "ELEVATED": "#fef3c7",
-                    "FAIR": "#f0fdf4",
-                    "DISCOUNT": "#eff6ff",
-                }.get(assessment, "white")
-                assess_badge = {
-                    "ELEVATED": '<span style="background:#d97706;color:white;'
-                                'padding:2px 8px;border-radius:10px;font-size:0.75rem;">ELEVATED</span>',
-                    "FAIR": '<span style="background:#16a34a;color:white;'
-                            'padding:2px 8px;border-radius:10px;font-size:0.75rem;">FAIR</span>',
-                    "DISCOUNT": '<span style="background:#2563eb;color:white;'
-                                'padding:2px 8px;border-radius:10px;font-size:0.75rem;">DISCOUNT</span>',
+                assess_label = {
+                    "ELEVATED": "🔴 ELEVATED",
+                    "FAIR":     "🟢 FAIR",
+                    "DISCOUNT": "🔵 DISCOUNT",
                 }.get(assessment, assessment)
-                bg = "#f8f9fa" if i % 2 == 0 else "white"
-                table_html += f"""
-                <tr style="background:{bg}; border-bottom:1px solid #e9ecef;">
-                  <td style="padding:0.6rem 1rem; font-weight:500; color:#1a2f45;">
-                    {row.get('metric', '')}
-                  </td>
-                  <td style="padding:0.6rem 1rem; text-align:right; font-weight:600;">
-                    {row.get('current_value', 'n/v')}
-                  </td>
-                  <td style="padding:0.6rem 1rem; text-align:right; color:#6c757d;">
-                    {row.get('peer_average', 'n/v')}
-                  </td>
-                  <td style="padding:0.6rem 1rem; text-align:right; color:#6c757d;">
-                    {row.get('historical_average', 'n/v')}
-                  </td>
-                  <td style="padding:0.6rem 1rem; text-align:center;">
-                    {assess_badge}
-                  </td>
-                  <td style="padding:0.6rem 1rem; font-size:0.78rem; color:#8a9bb0;">
-                    {row.get('source', '')}
-                  </td>
-                </tr>
-                """
-            table_html += "</tbody></table>"
-            st.markdown(table_html, unsafe_allow_html=True)
+                rows.append({
+                    "Kennzahl":     row.get("metric", ""),
+                    "Aktuell":      row.get("current_value", "n/v"),
+                    "Peer Ø":       row.get("peer_average", "n/v"),
+                    "Hist. Ø":      row.get("historical_average", "n/v"),
+                    "Einschätzung": assess_label,
+                    "Quelle":       row.get("source", ""),
+                })
+            df = pd.DataFrame(rows)
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Kennzahl":     st.column_config.TextColumn(width="medium"),
+                    "Aktuell":      st.column_config.TextColumn(width="small"),
+                    "Peer Ø":       st.column_config.TextColumn(width="small"),
+                    "Hist. Ø":      st.column_config.TextColumn(width="small"),
+                    "Einschätzung": st.column_config.TextColumn(width="small"),
+                    "Quelle":       st.column_config.TextColumn(width="medium"),
+                }
+            )
+            st.caption("🔴 ELEVATED = über Peer/Hist. Durchschnitt  |  "
+                       "🟢 FAIR = im normalen Bereich  |  "
+                       "🔵 DISCOUNT = unter Durchschnitt")
         else:
             st.info("Keine Bewertungsdaten verfügbar.")
 
@@ -695,39 +674,35 @@ if st.session_state.result:
                    unsafe_allow_html=True)
         ce = data.get("consensus_estimates", [])
         if ce:
-            ce_html = """
-            <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
-              <thead>
-                <tr style="background:#1a2f45; color:white;">
-                  <th style="padding:0.6rem 1rem; text-align:left;">Jahr</th>
-                  <th style="padding:0.6rem 1rem; text-align:right;">Umsatz (Mrd.)</th>
-                  <th style="padding:0.6rem 1rem; text-align:right;">EBITDA-%</th>
-                  <th style="padding:0.6rem 1rem; text-align:right;">EPS</th>
-                  <th style="padding:0.6rem 1rem; text-align:right;">EV/EBITDA</th>
-                  <th style="padding:0.6rem 1rem; text-align:right;">KGV</th>
-                </tr>
-              </thead>
-              <tbody>
-            """
-            for i, row in enumerate(ce):
+            rows = []
+            for row in ce:
                 is_estimate = row.get("type") == "E"
-                bg = "#fffbeb" if is_estimate else ("#f8f9fa" if i % 2 == 0 else "white")
-                year_label = row.get("year", "")
-                if is_estimate:
-                    year_label = f'<span style="color:#d97706;font-weight:600;">{year_label}</span>'
-                ce_html += f"""
-                <tr style="background:{bg}; border-bottom:1px solid #e9ecef;">
-                  <td style="padding:0.5rem 1rem;">{year_label}</td>
-                  <td style="padding:0.5rem 1rem; text-align:right;">{row.get('revenue_bn','n/v')}</td>
-                  <td style="padding:0.5rem 1rem; text-align:right;">{row.get('ebitda_margin_pct','n/v')}</td>
-                  <td style="padding:0.5rem 1rem; text-align:right;">{row.get('eps','n/v')}</td>
-                  <td style="padding:0.5rem 1rem; text-align:right;">{row.get('ev_ebitda','n/v')}</td>
-                  <td style="padding:0.5rem 1rem; text-align:right;">{row.get('pe_ratio','n/v')}</td>
-                </tr>
-                """
-            ce_html += "</tbody></table>"
-            st.caption("🟡 Gelb = Schätzwerte (E)")
-            st.markdown(ce_html, unsafe_allow_html=True)
+                year_label = f"📊 {row.get('year', '')}" if is_estimate else row.get("year", "")
+                rows.append({
+                    "Jahr":          year_label,
+                    "Umsatz (Mrd.)": row.get("revenue_bn", "n/v"),
+                    "EBITDA-%":      row.get("ebitda_margin_pct", "n/v"),
+                    "EPS":           row.get("eps", "n/v"),
+                    "EV/EBITDA":     row.get("ev_ebitda", "n/v"),
+                    "KGV":           row.get("pe_ratio", "n/v"),
+                    "# Analysten":   row.get("number_of_analysts", "n/v"),
+                })
+            df_ce = pd.DataFrame(rows)
+            st.dataframe(
+                df_ce,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Jahr":          st.column_config.TextColumn(width="small"),
+                    "Umsatz (Mrd.)": st.column_config.TextColumn(width="small"),
+                    "EBITDA-%":      st.column_config.TextColumn(width="small"),
+                    "EPS":           st.column_config.TextColumn(width="small"),
+                    "EV/EBITDA":     st.column_config.TextColumn(width="small"),
+                    "KGV":           st.column_config.TextColumn(width="small"),
+                    "# Analysten":   st.column_config.TextColumn(width="small"),
+                }
+            )
+            st.caption("📊 = Schätzwerte (E = Estimate)")
 
     # ────────────────────────────────────────────────────────────────────────
     # TAB 3: Makro & Sentiment

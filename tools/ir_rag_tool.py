@@ -85,11 +85,24 @@ CACHE_DIR = "./ir_cache"
 CACHE_MAX_AGE_HOURS = 24
 
 _KNOWN_IR_URLS: dict[str, str] = {
+    # Swiss
     "HOLN.SW": "https://www.holcim.com/investors/publications",
-    "NESN.SW": "https://www.nestle.com/investors",
-    "NOVN.SW": "https://www.novartis.com/investors",
-    "ROG.SW":  "https://www.roche.com/investors",
-    "UBSG.SW": "https://www.ubs.com/global/en/investor-relations",
+    "NESN.SW": "https://www.nestle.com/investors/reports-and-presentations",
+    "NOVN.SW": "https://www.novartis.com/investors/financial-data/annual-reports",
+    "ROG.SW":  "https://www.roche.com/investors/annual-reports",
+    "UBSG.SW": "https://www.ubs.com/global/en/investor-relations/financials",
+    "RIEN.SW": "https://www.rieter.com/investor-relations/results-and-presentations/financial-reports",
+    "ABBN.SW": "https://investors.abb.com/financial-information/annual-reports",
+    "GEBN.SW": "https://www.geberit.com/investors/financial-reports",
+    "SIKA.SW": "https://www.sika.com/en/group/investor-relations/financial-reports",
+    "GIVN.SW": "https://www.givaudan.com/investors/financial-reports",
+    "SCHN.SW": "https://www.schindler.com/com/internet/en/investor-relations/reports.html",
+    "LONN.SW": "https://www.lonza.com/investors/financial-reports",
+    "PGHN.SW": "https://www.partnersgroup.com/en/investors/shareholder-information/reports",
+    "SLHN.SW": "https://www.swisslife.com/en/home/investors/publications.html",
+    "BAER.SW": "https://www.juliusbaer.com/en/investor-relations/financial-reports",
+    "CFR.SW":  "https://www.richemont.com/investors/financial-reports",
+    "LISN.SW": "https://www.lindt-spruengli.com/investor-relations/reporting/annual-reports",
     "AAPL":    "https://investor.apple.com/financial-information/sec-filings/default.aspx",
     "MSFT":    "https://www.microsoft.com/en-us/investor/sec-filings.aspx",
     "GOOGL":   "https://abc.xyz/investor/",
@@ -108,6 +121,25 @@ _HTML_IR_KEYWORDS = [
     "presentation", "outlook", "guidance", "10-k", "10-q", "10k", "10q",
     "investor presentation", "financial results", "interim report",
 ]
+
+# URL path segments that indicate a report-index sub-page (EU/CH multi-level IR sites)
+_SUBPAGE_FOLLOW_PATTERNS = [
+    "financial-report", "annual-report", "half-year-report", "interim-report",
+    "results-and-presentations", "financial-results", "results",
+    "publications", "downloads", "filings", "reports",
+    "geschaeftsbericht", "jahresbericht", "halbjahresbericht", "berichte",
+    "rapport-annuel", "resultats", "publications-financieres",
+]
+
+# EU/CH PDF fallback classification when _PDF_TYPE_RULES don't match
+_EU_PDF_ANNUAL  = re.compile(
+    r"annual|full[_\-\s]year|geschaeft|jahres|rapport[_\-\s]annuel|full[_\-\s]report",
+    re.I,
+)
+_EU_PDF_INTERIM = re.compile(
+    r"half[_\-\s]year|interim|halbjahr|semest|six[_\-\s]month|h1[-_\s\.]|h2[-_\s\.]",
+    re.I,
+)
 
 # SEC EDGAR base URLs and constants
 SEC_USER_AGENT         = "KI-Portfolio-Manager research@bfh.ch"
@@ -656,6 +688,100 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
     if found:
         found.sort(key=lambda x: (x["priority"], -x["year"]))
         return found[:4]
+
+    # ── Stage 1b: Follow report sub-pages (EU/CH multi-level IR sites) ────────
+    # Many European IR sites have PDFs only 1-2 clicks below the landing page.
+    # We collect same-domain links whose path contains a report-index keyword,
+    # visit each sub-page, and search for PDFs there.
+    if not (ticker and _sec_is_us_ticker(ticker)):
+        subpage_candidates: list[str] = []
+        for a in soup.find_all("a", href=True):
+            href = _resolve(a["href"])
+            if urlparse(href).netloc != parsed.netloc:
+                continue
+            if href in seen or href == ir_url:
+                continue
+            path_lower = urlparse(href).path.lower().rstrip("/")
+            if any(kw in path_lower for kw in _SUBPAGE_FOLLOW_PATTERNS):
+                subpage_candidates.append(href)
+
+        seen_sub: set[str] = set()
+        for subpage_url in subpage_candidates[:8]:
+            if subpage_url in seen_sub:
+                continue
+            seen_sub.add(subpage_url)
+            print(f"      Suche PDFs auf Sub-Seite: {subpage_url[:80]}...")
+            try:
+                r2 = requests.get(subpage_url, headers=_HEADERS, timeout=12)
+                if r2.status_code != 200 or len(r2.content) < 500:
+                    continue
+                soup2 = BeautifulSoup(r2.text, "html.parser")
+
+                for a in soup2.find_all("a", href=True):
+                    raw_href = a["href"].strip()
+                    # Resolve relative to the sub-page URL (not the original ir_url)
+                    if raw_href.startswith("//"):
+                        href2 = parsed.scheme + ":" + raw_href
+                    elif raw_href.startswith("/"):
+                        href2 = base_dom + raw_href
+                    elif not raw_href.startswith("http"):
+                        href2 = urljoin(subpage_url, raw_href)
+                    else:
+                        href2 = raw_href
+
+                    if not href2.lower().endswith(".pdf"):
+                        continue
+                    if href2 in seen:
+                        continue
+                    seen.add(href2)
+
+                    filename  = href2.split("/")[-1].split("?")[0] or "document.pdf"
+                    link_text = a.get_text(" ", strip=True)
+                    label     = (link_text + " " + filename + " " + href2).lower()
+
+                    if any(kw in label for kw in EXCLUDE_KEYWORDS):
+                        continue
+
+                    pdf_type, priority = "other", 99
+                    for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
+                        hit_any = any(kw in label for kw in any_kws) if any_kws else True
+                        hit_all = all(kw in label for kw in all_kws) if all_kws else True
+                        if hit_any and hit_all:
+                            pdf_type, priority = t, p
+                            break
+
+                    # EU/CH fallback: classify by filename pattern
+                    if pdf_type == "other":
+                        if _EU_PDF_ANNUAL.search(label):
+                            pdf_type, priority = "annual_report", 3
+                        elif _EU_PDF_INTERIM.search(label):
+                            pdf_type, priority = "interim_report", 4
+                        else:
+                            continue
+
+                    year_match = re.search(r"20[12][0-9]", label)
+                    year = int(year_match.group()) if year_match else 0
+
+                    found.append({
+                        "url":      href2,
+                        "filename": filename,
+                        "type":     pdf_type,
+                        "priority": priority,
+                        "year":     year,
+                        "text":     link_text,
+                        "format":   "pdf",
+                        "source":   "IR sub-page PDF",
+                    })
+
+            except Exception:
+                continue
+
+            if found:
+                break  # stop after first sub-page that yields PDFs
+
+        if found:
+            found.sort(key=lambda x: (x["priority"], -x["year"]))
+            return found[:4]
 
     # ── Stage 2: HTML links with IR keyword anchors ───────────────────────────
     print(f"      Keine PDFs gefunden auf {ir_url[:60]} — suche HTML IR-Links...")
