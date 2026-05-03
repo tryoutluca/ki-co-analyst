@@ -148,6 +148,7 @@ st.markdown("""
     border-radius: 0 6px 6px 0;
     font-size: 0.9rem;
     line-height: 1.5;
+    color: #212529;
   }
 
   /* Scenario Cards */
@@ -156,18 +157,21 @@ st.markdown("""
     border: 1px solid #fca5a5;
     border-radius: 8px;
     padding: 1rem;
+    color: #212529;
   }
   .scenario-base {
     background: #fffbeb;
     border: 1px solid #fcd34d;
     border-radius: 8px;
     padding: 1rem;
+    color: #212529;
   }
   .scenario-bull {
     background: #f0fdf4;
     border: 1px solid #86efac;
     border-radius: 8px;
     padding: 1rem;
+    color: #212529;
   }
 
   /* Conviction Killer */
@@ -177,6 +181,7 @@ st.markdown("""
     border-radius: 8px;
     padding: 1rem;
     margin-bottom: 0.8rem;
+    color: #212529;
   }
 
   /* Sidebar */
@@ -266,6 +271,108 @@ def load_demo_output() -> dict | None:
             with open(fname, encoding="utf-8") as f:
                 return json.load(f)
     return None
+
+
+def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
+    """Erstellt ein Word-Dokument (.docx) aus den Investment-Memo-Daten."""
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    import io
+
+    doc = Document()
+
+    # Seitenränder
+    for section in doc.sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1.2)
+        section.right_margin = Inches(1.2)
+
+    def add_heading(text, level=1):
+        p = doc.add_heading(text, level=level)
+        p.runs[0].font.color.rgb = RGBColor(0x1a, 0x2f, 0x45)
+
+    def add_body(text):
+        p = doc.add_paragraph(text)
+        p.runs[0].font.size = Pt(10) if p.runs else None
+
+    # Titel
+    title = doc.add_heading(f"Investment Memo — {ticker}", 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph(f"Datum: {date} | KI-Co-Portfolio-Manager (BFH 2025/26, Luca Lüdi)").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph()
+
+    # Empfehlung & Kursziel
+    rec = data.get("recommendation", "n/v")
+    pt = data.get("price_target", 0)
+    cp = data.get("current_price", 0)
+    add_heading("Empfehlung & Kursziel", 1)
+    p = doc.add_paragraph()
+    p.add_run(f"Empfehlung: ").bold = True
+    p.runs[-1].bold = True
+    p.add_run(f"{rec}   |   Kursziel: {ccy} {pt:.2f}   |   Aktueller Kurs: {ccy} {cp:.2f}")
+
+    # Unternehmensbeschreibung
+    add_heading("Unternehmensbeschreibung", 1)
+    doc.add_paragraph(data.get("company_description", "n/v"))
+
+    # Investment Case
+    add_heading("Investment Case", 1)
+    for point in data.get("investment_case", []):
+        doc.add_paragraph(point, style="List Bullet")
+
+    # Finale Begründung
+    add_heading("Finale Begründung", 1)
+    doc.add_paragraph(data.get("final_reasoning", "n/v"))
+
+    # Szenarien
+    add_heading("Szenarien", 1)
+    scenarios = data.get("scenarios", [])
+    if scenarios:
+        table = doc.add_table(rows=1, cols=len(scenarios))
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        for i, s in enumerate(scenarios):
+            hdr[i].text = s.get("name", "")
+            hdr[i].paragraphs[0].runs[0].bold = True
+        row = table.add_row().cells
+        for i, s in enumerate(scenarios):
+            row[i].text = (
+                f"Kursziel: {ccy} {s.get('price_target', 0):.2f}\n"
+                f"Wahrsch.: {s.get('probability_pct', 0)}%\n"
+                f"Kernannahme: {s.get('key_assumption', '')}\n"
+                f"Trigger: {s.get('trigger', '')}"
+            )
+
+    # Quantifizierte Risiken
+    add_heading("Quantifizierte Risiken", 1)
+    for risk in data.get("key_risks", []):
+        doc.add_paragraph(f"⚠ {risk}", style="List Bullet")
+
+    # Conviction Killers
+    add_heading("Conviction Killers", 1)
+    for ck in data.get("conviction_killers", []):
+        desc = ck.get("description", "") if isinstance(ck, dict) else str(ck)
+        monitor = ck.get("monitoring_indicator", "") if isinstance(ck, dict) else ""
+        p = doc.add_paragraph(style="List Bullet")
+        p.add_run(desc).bold = True
+        if monitor:
+            p.add_run(f" → Monitor: {monitor}")
+
+    # Disclaimer
+    doc.add_paragraph()
+    disc = doc.add_paragraph(
+        "Disclaimer: Dieses Dokument wurde automatisch durch das KI-Co-Portfolio-Manager System "
+        "generiert und dient ausschliesslich zu Forschungs- und Demonstrationszwecken. "
+        "Es stellt keine Anlageberatung dar."
+    )
+    disc.runs[0].font.size = Pt(8)
+    disc.runs[0].font.color.rgb = RGBColor(0x6c, 0x75, 0x7d)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 # ── Pipeline Import (mit Fehlerbehandlung) ────────────────────────────────────
@@ -793,9 +900,9 @@ if st.session_state.result:
                    unsafe_allow_html=True)
         for risk in data.get("key_risks", []):
             st.markdown(f"""
-            <div style="background:#fff5f5; border-left:3px solid #f87171; 
+            <div style="background:#fff5f5; border-left:3px solid #f87171;
                         padding:0.7rem 1rem; margin-bottom:0.5rem; border-radius:0 6px 6px 0;
-                        font-size:0.88rem; line-height:1.5;">
+                        font-size:0.88rem; line-height:1.5; color:#212529;">
               ⚠️ {risk}
             </div>""", unsafe_allow_html=True)
 
@@ -862,7 +969,7 @@ if st.session_state.result:
     # ── Download Buttons ──────────────────────────────────────────────────────
     st.divider()
     st.markdown("### Export")
-    dl_col1, dl_col2, _ = st.columns([1, 1, 3])
+    dl_col1, dl_col2, dl_col3, _ = st.columns([1, 1, 1, 2])
 
     with dl_col1:
         json_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
@@ -886,6 +993,16 @@ if st.session_state.result:
             data=txt,
             file_name=f"investment_memo_{ticker}_{date}.txt",
             mime="text/plain",
+            use_container_width=True,
+        )
+
+    with dl_col3:
+        docx_bytes = _build_word_memo(data, ticker, date, ccy)
+        st.download_button(
+            label="⬇️ Word herunterladen",
+            data=docx_bytes,
+            file_name=f"investment_memo_{ticker}_{date}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
         )
 
