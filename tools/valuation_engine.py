@@ -379,6 +379,215 @@ def build_peer_forward_table(
     return rows
 
 
+# ── DCF Inputs (IR > yfinance) ────────────────────────────────────────────────
+
+def run_dcf(
+    ir_analysis: dict,
+    financials: dict,
+    cashflow_data: dict,
+    stock_info: dict,
+) -> dict:
+    """
+    Berechnet DCF-Eingabewerte mit Priorität IR-Dokument > yfinance.
+    Live-Werte (Kurs, MarktKap, Aktien) kommen aus stock_info — dort
+    bereits Finnhub-primär nach get_stock_info().
+
+    Returns:
+        Dict mit ebitda, fcf, eps, net_debt, book_value_per_share
+        plus je ein *_source-Feld zur Nachvollziehbarkeit.
+    """
+    _NF = {"not found", "n/v", "N/A", "nicht verfügbar", "", None}
+
+    def _ir(key):
+        v = ir_analysis.get(key)
+        return None if v in _NF else v
+
+    # Live-Werte aus stock_info (Finnhub-primär)
+    current_price      = _safe_float(stock_info.get("current_price"))
+    market_cap         = _safe_float(stock_info.get("market_cap"))
+    shares_outstanding = _safe_float(stock_info.get("shares_outstanding"))
+    currency           = stock_info.get("currency", "")
+
+    # ── EBITDA: IR (revenue × margin) → yfinance ─────────────────────────────
+    ebitda: float | None = None
+    ebitda_source = "n/v"
+    ir_margin  = _safe_float(_ir("ebitda_margin_pct"))
+    ir_revenue = _safe_float(_ir("revenue_bn"))
+    if ir_margin is not None and ir_revenue is not None:
+        ebitda = ir_revenue * ir_margin / 100 * 1e9
+        ebitda_source = f"IR-Dokument ({ir_revenue:.2f} Mrd. × {ir_margin:.1f}%)"
+    if ebitda is None:
+        ebitda = _safe_float(financials.get("ebitda_ttm"))
+        if ebitda is not None:
+            ebitda_source = "yfinance (EBITDA TTM)"
+
+    # ── FCF: IR → yfinance cashflow_data ─────────────────────────────────────
+    fcf: float | None = None
+    fcf_source = "n/v"
+    ir_fcf = _safe_float(_ir("free_cashflow_bn"))
+    if ir_fcf is not None:
+        fcf = ir_fcf * 1e9
+        fcf_source = f"IR-Dokument ({ir_fcf:.2f} Mrd.)"
+    if fcf is None:
+        fcf = _safe_float(cashflow_data.get("free_cashflow"))
+        if fcf is not None:
+            fcf_source = "yfinance (FCF)"
+
+    # ── EPS: IR adjusted → yfinance trailing ─────────────────────────────────
+    eps: float | None = None
+    eps_source = "n/v"
+    ir_eps = _safe_float(_ir("adjusted_eps"))
+    if ir_eps is not None:
+        eps = ir_eps
+        eps_source = f"IR-Dokument (adj. EPS {ir_eps:.2f} {currency})"
+    if eps is None:
+        eps = _safe_float(financials.get("eps_trailing"))
+        if eps is not None:
+            eps_source = f"yfinance (trailing EPS {eps:.2f} {currency})"
+
+    # ── Net Debt: IR → yfinance (Schulden − Kasse) ───────────────────────────
+    net_debt: float | None = None
+    net_debt_source = "n/v"
+    ir_nd = _safe_float(_ir("net_debt_bn"))
+    if ir_nd is not None:
+        net_debt = ir_nd * 1e9
+        net_debt_source = f"IR-Dokument ({ir_nd:.2f} Mrd.)"
+    if net_debt is None:
+        total_debt = _safe_float(financials.get("total_debt")) or 0.0
+        total_cash = _safe_float(financials.get("total_cash")) or 0.0
+        net_debt = total_debt - total_cash
+        net_debt_source = "yfinance (Schulden − Kasse)"
+
+    # ── Book Value: yfinance (IR selten verfügbar) ────────────────────────────
+    book_value_per_share = _safe_float(financials.get("book_value_per_share"))
+    bvps_source = f"yfinance ({book_value_per_share:.2f} {currency})" if book_value_per_share else "n/v"
+
+    return {
+        "current_price":        current_price,
+        "market_cap":           market_cap,
+        "shares_outstanding":   shares_outstanding,
+        "currency":             currency,
+        "ebitda":               ebitda,
+        "ebitda_source":        ebitda_source,
+        "fcf":                  fcf,
+        "fcf_source":           fcf_source,
+        "eps":                  eps,
+        "eps_source":           eps_source,
+        "net_debt":             net_debt,
+        "net_debt_source":      net_debt_source,
+        "book_value_per_share": book_value_per_share,
+        "bvps_source":          bvps_source,
+    }
+
+
+# ── Valuation Table (Live-Kurs + IR-Zahlen) ───────────────────────────────────
+
+def build_valuation_table(dcf_inputs: dict) -> list[dict]:
+    """
+    Berechnet Bewertungs-Multiples aus Live-Kurs (Finnhub) + IR-Zahlen.
+
+    Jede Zeile enthält ein 'calculation'-Feld mit transparenter Herleitung,
+    z.B. 'P/E = 148.50 CHF / 4.52 CHF (IR adj. EPS) = 32.9x'.
+    peer_average / historical_average sind als 'n/v' vorbelegt —
+    der LLM ergänzt sie aus historical_multiples / peer-Daten.
+
+    Returns:
+        Liste von dicts kompatibel mit ValuationTableRow + zusätzlichem
+        'calculation'-Feld.
+    """
+    price    = _safe_float(dcf_inputs.get("current_price"))
+    mktcap   = _safe_float(dcf_inputs.get("market_cap"))
+    net_debt = _safe_float(dcf_inputs.get("net_debt"))
+    ebitda   = _safe_float(dcf_inputs.get("ebitda"))
+    fcf      = _safe_float(dcf_inputs.get("fcf"))
+    eps      = _safe_float(dcf_inputs.get("eps"))
+    bvps     = _safe_float(dcf_inputs.get("book_value_per_share"))
+    ccy      = dcf_inputs.get("currency", "")
+
+    rows: list[dict] = []
+
+    # EV = MarktKap + Nettoverschuldung
+    ev: float | None = None
+    if mktcap is not None and net_debt is not None:
+        ev = mktcap + net_debt
+
+    # ── P/E ──────────────────────────────────────────────────────────────────
+    pe_val, pe_calc = None, "n/v"
+    if price and eps:
+        pe_val = price / eps
+        pe_calc = (
+            f"P/E = {price:.2f} {ccy} / {eps:.2f} {ccy} "
+            f"({dcf_inputs.get('eps_source', 'IR adj. EPS')}) = {pe_val:.1f}x"
+        )
+    rows.append({
+        "metric":             "P/E (KGV)",
+        "current_value":      f"{pe_val:.1f}x" if pe_val is not None else "n/v",
+        "calculation":        pe_calc,
+        "peer_average":       "n/v",
+        "historical_average": "n/v",
+        "assessment":         "FAIR",
+        "source":             dcf_inputs.get("eps_source", "n/v"),
+    })
+
+    # ── EV/EBITDA ─────────────────────────────────────────────────────────────
+    ev_ebitda_val, ev_ebitda_calc = None, "n/v"
+    if ev is not None and ebitda:
+        ev_ebitda_val = ev / ebitda
+        ev_ebitda_calc = (
+            f"EV/EBITDA = ({mktcap/1e9:.0f} Mrd. + {net_debt/1e9:.0f} Mrd.) / "
+            f"{ebitda/1e9:.1f} Mrd. ({dcf_inputs.get('ebitda_source', 'IR')}) "
+            f"= {ev_ebitda_val:.1f}x"
+        )
+    rows.append({
+        "metric":             "EV/EBITDA",
+        "current_value":      f"{ev_ebitda_val:.1f}x" if ev_ebitda_val is not None else "n/v",
+        "calculation":        ev_ebitda_calc,
+        "peer_average":       "n/v",
+        "historical_average": "n/v",
+        "assessment":         "FAIR",
+        "source":             dcf_inputs.get("ebitda_source", "n/v"),
+    })
+
+    # ── EV/FCF ────────────────────────────────────────────────────────────────
+    ev_fcf_val, ev_fcf_calc = None, "n/v"
+    if ev is not None and fcf:
+        ev_fcf_val = ev / fcf
+        ev_fcf_calc = (
+            f"EV/FCF = {ev/1e9:.1f} Mrd. EV / "
+            f"{fcf/1e9:.2f} Mrd. FCF ({dcf_inputs.get('fcf_source', 'IR')}) "
+            f"= {ev_fcf_val:.1f}x"
+        )
+    rows.append({
+        "metric":             "EV/FCF",
+        "current_value":      f"{ev_fcf_val:.1f}x" if ev_fcf_val is not None else "n/v",
+        "calculation":        ev_fcf_calc,
+        "peer_average":       "n/v",
+        "historical_average": "n/v",
+        "assessment":         "FAIR",
+        "source":             dcf_inputs.get("fcf_source", "n/v"),
+    })
+
+    # ── P/B ───────────────────────────────────────────────────────────────────
+    pb_val, pb_calc = None, "n/v"
+    if price and bvps:
+        pb_val = price / bvps
+        pb_calc = (
+            f"P/B = {price:.2f} {ccy} / {bvps:.2f} {ccy} "
+            f"({dcf_inputs.get('bvps_source', 'yfinance Buchwert')}) = {pb_val:.1f}x"
+        )
+    rows.append({
+        "metric":             "P/B (Kurs/Buchwert)",
+        "current_value":      f"{pb_val:.1f}x" if pb_val is not None else "n/v",
+        "calculation":        pb_calc,
+        "peer_average":       "n/v",
+        "historical_average": "n/v",
+        "assessment":         "FAIR",
+        "source":             dcf_inputs.get("bvps_source", "yfinance"),
+    })
+
+    return rows
+
+
 # ── Smoke test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

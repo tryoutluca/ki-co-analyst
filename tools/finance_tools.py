@@ -151,43 +151,89 @@ def search_ticker(query: str) -> list[dict]:
 
 @tool
 def get_stock_info(ticker: str) -> dict:
-    """Holt allgemeine Unternehmensinformationen und aktuelle Kennzahlen via yfinance."""
+    """Holt allgemeine Unternehmensinformationen und aktuelle Kennzahlen.
+    Kurs/Marktkapitalisierung/Aktien: primär Finnhub.
+    Alle anderen Felder (Sektor, Multiples, etc.): yfinance."""
+    NA_FINAL = "n/v — IR-Dokument empfohlen"
+
+    # ── Schritt 1: Finnhub für die drei Live-Werte ────────────────────────────
+    fh_price:      float | None = None
+    fh_prev_close: float | None = None
+    fh_market_cap: float | None = None
+    fh_shares:     float | None = None
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        pe_ratio  = info.get("trailingPE", "N/A")
-        forward_pe = info.get("forwardPE", "N/A")
-        pe_val = validate_pe_ratio(pe_ratio, forward_pe, ticker)
-        result = {
-            "ticker": ticker,
-            "name": info.get("longName", ticker),
-            "sector": info.get("sector", "N/A"),
-            "industry": info.get("industry", "N/A"),
-            "country": info.get("country", "N/A"),
-            "currency": info.get("currency", "N/A"),
-            "current_price": info.get("currentPrice") or info.get("regularMarketPrice", "N/A"),
-            "market_cap": info.get("marketCap", "N/A"),
-            "enterprise_value": info.get("enterpriseValue", "N/A"),
-            "pe_ratio": pe_ratio,
-            "forward_pe": forward_pe,
-            "price_to_book": info.get("priceToBook", "N/A"),
-            "price_to_sales": info.get("priceToSalesTrailing12Months", "N/A"),
-            "ev_to_ebitda": info.get("enterpriseToEbitda", "N/A"),
-            "ev_to_revenue": info.get("enterpriseToRevenue", "N/A"),
-            "dividend_yield": info.get("dividendYield", "N/A"),
-            "beta": info.get("beta", "N/A"),
-            "52_week_high": info.get("fiftyTwoWeekHigh", "N/A"),
-            "52_week_low": info.get("fiftyTwoWeekLow", "N/A"),
-            "analyst_target_price": info.get("targetMeanPrice", "N/A"),
-            "recommendation": info.get("recommendationKey", "N/A"),
-            "description": info.get("longBusinessSummary", "N/A"),
-            "pe_validation": pe_val,
-        }
-        if pe_val["status"] == "verzerrt":
-            result["pe_warning"] = "⚠ KGV nicht aussagekräftig — Forward P/E bevorzugen"
-        return result
-    except Exception as e:
-        return {"error": str(e), "ticker": ticker}
+        client  = get_finnhub_client()
+        quote   = client.quote(ticker) or {}
+        profile = client.company_profile2(symbol=ticker) or {}
+
+        fh_price      = quote.get("c")  or None
+        fh_prev_close = quote.get("pc") or None
+        mc = profile.get("marketCapitalization")
+        if mc:
+            fh_market_cap = float(mc) * 1_000_000   # Mio. USD → absolute
+        sh = profile.get("shareOutstanding")
+        if sh:
+            fh_shares = float(sh) * 1_000_000       # Mio. → absolute
+    except Exception:
+        pass
+
+    # ── Schritt 2: yfinance für alle anderen Felder (+ Fallback Live-Werte) ───
+    yf_info: dict = {}
+    try:
+        yf_info = yf.Ticker(ticker).info or {}
+    except Exception:
+        pass
+
+    # ── Schritt 3: Live-Werte mergen (Finnhub > yfinance > NA_FINAL) ──────────
+    yf_price = yf_info.get("currentPrice") or yf_info.get("regularMarketPrice")
+
+    current_price      = fh_price      if fh_price      is not None else (yf_price or NA_FINAL)
+    prev_close         = fh_prev_close if fh_prev_close is not None else (yf_info.get("regularMarketPreviousClose") or NA_FINAL)
+    market_cap         = fh_market_cap if fh_market_cap is not None else (yf_info.get("marketCap")          or NA_FINAL)
+    shares_outstanding = fh_shares     if fh_shares     is not None else (yf_info.get("sharesOutstanding")  or NA_FINAL)
+
+    data_source = (
+        "finnhub"  if fh_price is not None else
+        "yfinance" if yf_price is not None else
+        "mixed"
+    )
+
+    pe_ratio   = yf_info.get("trailingPE",  "N/A")
+    forward_pe = yf_info.get("forwardPE",   "N/A")
+    pe_val     = validate_pe_ratio(pe_ratio, forward_pe, ticker)
+
+    result = {
+        "ticker":               ticker,
+        "name":                 yf_info.get("longName",                          ticker),
+        "sector":               yf_info.get("sector",                            "N/A"),
+        "industry":             yf_info.get("industry",                          "N/A"),
+        "country":              yf_info.get("country",                           "N/A"),
+        "currency":             yf_info.get("currency",                          "N/A"),
+        "current_price":        current_price,
+        "prev_close":           prev_close,
+        "market_cap":           market_cap,
+        "shares_outstanding":   shares_outstanding,
+        "enterprise_value":     yf_info.get("enterpriseValue",                   "N/A"),
+        "pe_ratio":             pe_ratio,
+        "forward_pe":           forward_pe,
+        "price_to_book":        yf_info.get("priceToBook",                       "N/A"),
+        "price_to_sales":       yf_info.get("priceToSalesTrailing12Months",      "N/A"),
+        "ev_to_ebitda":         yf_info.get("enterpriseToEbitda",                "N/A"),
+        "ev_to_revenue":        yf_info.get("enterpriseToRevenue",               "N/A"),
+        "dividend_yield":       yf_info.get("dividendYield",                     "N/A"),
+        "beta":                 yf_info.get("beta",                              "N/A"),
+        "52_week_high":         yf_info.get("fiftyTwoWeekHigh",                  "N/A"),
+        "52_week_low":          yf_info.get("fiftyTwoWeekLow",                   "N/A"),
+        "analyst_target_price": yf_info.get("targetMeanPrice",                   "N/A"),
+        "recommendation":       yf_info.get("recommendationKey",                 "N/A"),
+        "description":          yf_info.get("longBusinessSummary",               "N/A"),
+        "pe_validation":        pe_val,
+        "data_source":          data_source,
+    }
+
+    if pe_val["status"] == "verzerrt":
+        result["pe_warning"] = "⚠ KGV nicht aussagekräftig — Forward P/E bevorzugen"
+    return result
 
 
 @tool
