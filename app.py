@@ -866,6 +866,106 @@ if st.session_state.result:
             )
             st.caption("📊 = Schätzwerte (E = Estimate)")
 
+        # ── SEKTION A: Vollständige Finanzübersicht ───────────────────────────
+        st.markdown('<div class="section-header">Finanzübersicht (6 Jahre)</div>',
+                   unsafe_allow_html=True)
+
+        full_fin = data.get("full_financials", [])
+        if full_fin:
+            rows_fin = []
+            for yr in full_fin:
+                is_est = yr.get("type") == "E"
+                rows_fin.append({
+                    "Jahr":           ("📊 " if is_est else "") + str(yr.get("year", "")),
+                    "Umsatz (Mrd.)":  yr.get("revenue_bn",        "n/v"),
+                    "EBITDA (Mrd.)":  yr.get("ebitda_bn",         "n/v"),
+                    "EBITDA-%":       yr.get("ebitda_margin_pct", "n/v"),
+                    "EBIT-%":         yr.get("ebit_margin_pct",   "n/v"),
+                    "EPS (adj.)":     yr.get("eps_adj",           "n/v"),
+                    "DPS":            yr.get("dps",               "n/v"),
+                    "FCF (Mrd.)":     yr.get("fcf_bn",            "n/v"),
+                    "ND/EBITDA":      yr.get("nd_ebitda",         "n/v"),
+                    "ROIC-%":         yr.get("roic_pct",          "n/v"),
+                    "Quelle":         yr.get("source",            ""),
+                })
+            df_fin = pd.DataFrame(rows_fin)
+            st.dataframe(df_fin, use_container_width=True, hide_index=True)
+            st.caption(
+                "📊 = Schätzwert (E) | "
+                "Istzahlen aus IR-Dokument / yfinance | "
+                "Schätzungen: Consensus / Guidance / LLM-Ableitung | "
+                "Kein Ersatz für Bloomberg/FactSet Konsensdaten"
+            )
+        else:
+            st.info("Vollständige Finanzübersicht nicht verfügbar — Analyse erneut ausführen.")
+
+        # ── SEKTION B: Peer-Vergleich ─────────────────────────────────────────
+        st.markdown('<div class="section-header">Peer-Vergleich</div>',
+                   unsafe_allow_html=True)
+
+        pc       = data.get("peer_comparison") or {}
+        peers    = pc.get("peers", [])
+        avg_peer = pc.get("sector_averages", {})
+        subject  = pc.get("subject_company", {})
+
+        if peers:
+            relevant = pc.get("sector_relevant_multiples",
+                              ["EV/EBITDA", "Forward P/E", "EBIT-%", "ND/EBITDA", "Div.-Yield"])
+            st.caption(
+                f"Relevante Kennzahlen für **{pc.get('sector', '')}**: "
+                + ", ".join(relevant)
+            )
+
+            rows_peer = []
+            for p in [*peers, avg_peer, subject]:
+                if not p:
+                    continue
+                is_subj = p.get("ticker") == ticker
+                is_avg  = p.get("ticker") == "AVG"
+                rows_peer.append({
+                    "Unternehmen":        ("⭐ " if is_subj else "Ø " if is_avg else "")
+                                         + str(p.get("company", "")),
+                    "Land":              p.get("country", ""),
+                    "EV/EBITDA":         p.get("ev_ebitda", "n/v"),
+                    "Fwd. P/E":          p.get("forward_pe", "n/v"),
+                    "EBIT-%":            p.get("ebit_margin_pct", "n/v"),
+                    "ND/EBITDA":         p.get("nd_ebitda", "n/v"),
+                    "Div.-Yield":        p.get("dividend_yield_pct", "n/v"),
+                    "Umsatz-Wachstum":   p.get("revenue_growth_pct", "n/v"),
+                })
+
+            df_peer = pd.DataFrame(rows_peer)
+            st.dataframe(df_peer, use_container_width=True, hide_index=True)
+
+            # Subject vs. Sektor-Ø Delta-Badges
+            vs_avg = pc.get("subject_vs_avg", {})
+            if vs_avg:
+                st.markdown("**Subject vs. Sektor-Ø:**")
+                badge_items = list(vs_avg.items())
+                cols_b = st.columns(min(len(badge_items), 7))
+                for i, (metric, delta) in enumerate(badge_items):
+                    try:
+                        val = float(str(delta).replace("%", "").replace("+", ""))
+                    except (ValueError, TypeError):
+                        val = 0
+                    color = "#4ade80" if val < -10 else ("#f87171" if val > 10 else "#fbbf24")
+                    with cols_b[i % len(cols_b)]:
+                        st.markdown(
+                            f'<div style="text-align:center; padding:0.5rem; '
+                            f'border-radius:6px; background:#f8f9fa; margin-bottom:0.4rem;">'
+                            f'<div style="font-size:0.72rem; color:#6c757d;">{metric}</div>'
+                            f'<div style="font-size:1.05rem; font-weight:600; color:{color};">'
+                            f'{delta}</div></div>',
+                            unsafe_allow_html=True
+                        )
+
+            st.caption(
+                f"Quelle: yfinance | Peer-Identifikation: Finnhub + Sektor-Fallback | "
+                f"Methodik: {pc.get('methodology', 'n/v')}"
+            )
+        else:
+            st.info("Peer-Vergleich nicht verfügbar — Analyse erneut ausführen.")
+
     # ────────────────────────────────────────────────────────────────────────
     # TAB 3: Makro & Sentiment
     # ────────────────────────────────────────────────────────────────────────

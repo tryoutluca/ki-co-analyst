@@ -12,6 +12,7 @@ Hauptfunktionen:
 from __future__ import annotations
 
 import re
+from datetime import datetime
 import yfinance as yf
 
 
@@ -586,6 +587,336 @@ def build_valuation_table(dcf_inputs: dict) -> list[dict]:
     })
 
     return rows
+
+
+# ── Full Financial Overview (3A + 3E) ────────────────────────────────────────
+
+def build_full_financials(
+    ticker: str,
+    stock_info: dict,
+    financials: dict,
+    cashflow_data: dict,
+    ir_analysis: dict,
+    forward_estimates: dict,
+    historical_multiples: dict,
+) -> list[dict]:
+    """
+    Erstellt eine 6-Jahres P&L-Übersicht (3 historisch + 3 Forward).
+
+    Priorität historisch: IR-Dokument > yfinance income_stmt > yfinance info
+    Priorität Forward:    IR-Consensus > Guidance + LLM-Ableitung
+
+    Fehlende Werte werden als "n/v — Bloomberg/FactSet empfohlen" markiert.
+    Returns liste von dicts kompatibel mit FullFinancialYear.
+    """
+    NV = "n/v — Bloomberg/FactSet empfohlen"
+    current_year = datetime.now().year
+    historical_years = [current_year - 3, current_year - 2, current_year - 1]
+
+    # ── Historische Basisdaten aus yfinance info (TTM-Näherung) ──────────────
+    try:
+        stock = yf.Ticker(ticker)
+        yf_info = stock.info or {}
+    except Exception:
+        yf_info = {}
+
+    # Versuche Jahresabschlüsse aus yfinance annual income statement
+    annual_revenue: dict[int, float] = {}
+    annual_net_income: dict[int, float] = {}
+    annual_ebit: dict[int, float] = {}
+    try:
+        inc = stock.income_stmt
+        if inc is not None and not inc.empty:
+            for col in inc.columns:
+                try:
+                    yr = col.year
+                    rev_row = None
+                    ni_row  = None
+                    ebit_row = None
+                    for key in ["Total Revenue", "Revenue"]:
+                        if key in inc.index:
+                            rev_row = inc.loc[key, col]
+                            break
+                    for key in ["Net Income", "Net Income Common Stockholders"]:
+                        if key in inc.index:
+                            ni_row = inc.loc[key, col]
+                            break
+                    for key in ["EBIT", "Operating Income"]:
+                        if key in inc.index:
+                            ebit_row = inc.loc[key, col]
+                            break
+                    if rev_row is not None:
+                        annual_revenue[yr]    = float(rev_row)
+                    if ni_row is not None:
+                        annual_net_income[yr] = float(ni_row)
+                    if ebit_row is not None:
+                        annual_ebit[yr]       = float(ebit_row)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Dividenden-Historie für DPS
+    annual_dps: dict[int, float] = {}
+    try:
+        divs = stock.dividends
+        if divs is not None and not divs.empty:
+            if hasattr(divs, "squeeze"):
+                divs = divs.squeeze()
+            for idx, val in divs.items():
+                try:
+                    yr = idx.year
+                    annual_dps[yr] = round(annual_dps.get(yr, 0.0) + float(val), 4)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Cashflow-Daten aus yfinance annual
+    annual_fcf: dict[int, float]   = {}
+    annual_capex: dict[int, float] = {}
+    try:
+        cf = stock.cashflow
+        if cf is not None and not cf.empty:
+            for col in cf.columns:
+                try:
+                    yr = col.year
+                    ocf_val = capex_val = None
+                    for key in ["Operating Cash Flow", "Total Cash From Operating Activities"]:
+                        if key in cf.index:
+                            ocf_val = float(cf.loc[key, col])
+                            break
+                    for key in ["Capital Expenditure", "Capital Expenditures",
+                                "Purchase Of Property Plant And Equipment"]:
+                        if key in cf.index:
+                            capex_val = float(cf.loc[key, col])
+                            break
+                    if ocf_val is not None and capex_val is not None:
+                        annual_fcf[yr]   = ocf_val - abs(capex_val)
+                        annual_capex[yr] = capex_val
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # IR-Daten für das aktuellste historische Jahr
+    ir_revenue    = _safe_float(ir_analysis.get("revenue_bn"))
+    ir_ebitda_m   = _safe_float(ir_analysis.get("ebitda_margin_pct"))
+    ir_ebit_m     = _safe_float(ir_analysis.get("recurring_ebit_margin_pct"))
+    ir_eps        = _safe_float(ir_analysis.get("adjusted_eps"))
+    ir_fcf        = _safe_float(ir_analysis.get("free_cashflow_bn"))
+    ir_net_debt   = _safe_float(ir_analysis.get("net_debt_bn"))
+    ir_year       = historical_years[-1]  # IR-Daten = aktuellstes Jahr
+
+    # Payout-Ratio für DPS-Ableitung
+    payout_ratio = _safe_float(yf_info.get("payoutRatio"))
+
+    # Net Debt aus cashflow_data
+    total_debt = _safe_float(yf_info.get("totalDebt")) or 0.0
+    total_cash = _safe_float(yf_info.get("totalCash")) or 0.0
+    net_debt_current = total_debt - total_cash
+
+    result = []
+
+    # ── 3 historische Jahre ────────────────────────────────────────────────────
+    for yr in historical_years:
+        is_ir_year = (yr == ir_year)
+        source = "IR-Dokument" if (is_ir_year and ir_revenue) else "yfinance"
+
+        # Revenue
+        if is_ir_year and ir_revenue:
+            rev_bn = round(ir_revenue, 2)
+        elif yr in annual_revenue:
+            rev_bn = round(annual_revenue[yr] / 1e9, 2)
+        else:
+            rev_bn = NV
+
+        # EBITDA
+        if is_ir_year and ir_ebitda_m and ir_revenue:
+            ebitda_bn  = round(ir_revenue * ir_ebitda_m / 100, 2)
+            ebitda_m   = round(ir_ebitda_m, 1)
+        elif isinstance(rev_bn, float) and yr in annual_ebit:
+            ebit_f    = annual_ebit[yr] / 1e9
+            dep_amort = _safe_float(yf_info.get("ebitda")) or 0.0
+            ebitda_bn  = round(ebit_f + (dep_amort / 1e9 * 0.25), 2)
+            ebitda_m   = round(ebitda_bn / rev_bn * 100, 1) if rev_bn else NV
+        else:
+            ebitda_bn = NV
+            ebitda_m  = NV
+
+        # EBIT
+        if is_ir_year and ir_ebit_m and ir_revenue:
+            ebit_bn  = round(ir_revenue * ir_ebit_m / 100, 2)
+            ebit_m   = round(ir_ebit_m, 1)
+        elif yr in annual_ebit:
+            ebit_bn  = round(annual_ebit[yr] / 1e9, 2)
+            ebit_m   = round(annual_ebit[yr] / annual_revenue[yr] * 100, 1) if yr in annual_revenue else NV
+        else:
+            ebit_bn = NV
+            ebit_m  = NV
+
+        # Net Income
+        ni_bn = round(annual_net_income[yr] / 1e9, 2) if yr in annual_net_income else NV
+
+        # EPS
+        if is_ir_year and ir_eps:
+            eps_adj = round(ir_eps, 2)
+        else:
+            eps_trailing = _safe_float(yf_info.get("trailingEps"))
+            eps_adj = round(eps_trailing, 2) if (eps_trailing and is_ir_year) else NV
+
+        # DPS
+        dps = round(annual_dps[yr], 2) if yr in annual_dps else NV
+
+        # FCF
+        if is_ir_year and ir_fcf:
+            fcf_bn = round(ir_fcf, 2)
+        elif yr in annual_fcf:
+            fcf_bn = round(annual_fcf[yr] / 1e9, 2)
+        else:
+            fcf_bn = NV
+
+        # Net Debt
+        if is_ir_year and ir_net_debt:
+            nd_bn = round(ir_net_debt, 2)
+        elif is_ir_year:
+            nd_bn = round(net_debt_current / 1e9, 2)
+        else:
+            nd_bn = NV
+
+        # ND/EBITDA
+        nd_ebitda = NV
+        if isinstance(nd_bn, float) and isinstance(ebitda_bn, float) and ebitda_bn != 0:
+            nd_ebitda = round(nd_bn / ebitda_bn, 2)
+
+        # ROIC — yfinance returnOnEquity als Proxy
+        roic = NV
+        if is_ir_year:
+            roe = _safe_float(yf_info.get("returnOnEquity"))
+            roic = round(roe * 100, 1) if roe is not None else NV
+
+        # CapEx
+        if yr in annual_capex:
+            capex_bn = round(abs(annual_capex[yr]) / 1e9, 2)
+        else:
+            capex_bn = NV
+
+        result.append({
+            "year":             f"{yr}A",
+            "type":             "A",
+            "revenue_bn":       rev_bn,
+            "ebitda_bn":        ebitda_bn,
+            "ebitda_margin_pct": ebitda_m,
+            "ebit_bn":          ebit_bn,
+            "ebit_margin_pct":  ebit_m,
+            "net_income_bn":    ni_bn,
+            "eps_adj":          eps_adj,
+            "dps":              dps,
+            "fcf_bn":           fcf_bn,
+            "net_debt_bn":      nd_bn,
+            "nd_ebitda":        nd_ebitda,
+            "roic_pct":         roic,
+            "capex_bn":         capex_bn,
+            "source":           source,
+        })
+
+    # ── 3 Forward-Jahre ────────────────────────────────────────────────────────
+    estimates = forward_estimates.get("estimates", {})
+    fwd_source_base = forward_estimates.get("method", "LLM-Ableitung")
+
+    # Historische Ausschüttungsquote für DPS-Ableitung
+    hist_dps_vals = [v for v in annual_dps.values() if v > 0]
+    hist_eps_vals = []
+    for yr2 in historical_years:
+        if yr2 in annual_net_income and yr2 in annual_revenue:
+            shares = _safe_float(yf_info.get("sharesOutstanding"))
+            if shares and shares > 0:
+                hist_eps_vals.append(annual_net_income[yr2] / shares)
+
+    avg_payout = payout_ratio if payout_ratio else (
+        (sum(hist_dps_vals) / sum(hist_eps_vals)) if hist_dps_vals and hist_eps_vals else 0.4
+    )
+
+    for fwd_year in ["2026E", "2027E", "2028E"]:
+        est = estimates.get(fwd_year, {})
+        if not est:
+            result.append({
+                "year": fwd_year, "type": "E",
+                "revenue_bn": NV, "ebitda_bn": NV, "ebitda_margin_pct": NV,
+                "ebit_bn": NV, "ebit_margin_pct": NV, "net_income_bn": NV,
+                "eps_adj": NV, "dps": NV, "fcf_bn": NV,
+                "net_debt_bn": NV, "nd_ebitda": NV, "roic_pct": NV, "capex_bn": NV,
+                "source": "LLM-Ableitung — kein Bloomberg/FactSet Konsens verfügbar",
+            })
+            continue
+
+        rev_f      = _safe_float(est.get("revenue_bn"))
+        ebitda_m_f = _safe_float(est.get("ebitda_margin_pct"))
+        ebit_m_f   = _safe_float(est.get("ebit_margin_pct"))
+        eps_f      = _safe_float(est.get("eps"))
+        fcf_f      = _safe_float(est.get("fcf_bn"))
+
+        ebitda_f  = round(rev_f * ebitda_m_f / 100, 2) if (rev_f and ebitda_m_f) else NV
+        ebit_f    = round(rev_f * ebit_m_f / 100, 2)   if (rev_f and ebit_m_f)   else NV
+
+        # Net Income-Näherung aus EPS × Aktien
+        ni_f = NV
+        shares = _safe_float(yf_info.get("sharesOutstanding"))
+        if eps_f and shares:
+            ni_f = round(eps_f * shares / 1e9, 2)
+
+        # DPS aus Payout-Ratio × EPS
+        dps_f = NV
+        if eps_f and avg_payout:
+            dps_f = round(eps_f * float(avg_payout), 2)
+
+        # ND/EBITDA — letzte bekannte ND + FCF-Reduktion
+        nd_f      = NV
+        nd_eb_f   = NV
+        if isinstance(ebitda_f, float) and ebitda_f != 0:
+            last_nd = ir_net_debt if ir_net_debt else (net_debt_current / 1e9)
+            if fcf_f and isinstance(fcf_f, float):
+                offset = (list(estimates.keys()).index(fwd_year) + 1)
+                nd_f    = round(last_nd - fcf_f * offset * 0.5, 2)
+                nd_eb_f = round(nd_f / ebitda_f, 2)
+
+        # CapEx-Näherung: historisches CapEx/Revenue-Verhältnis
+        capex_f = NV
+        last_capex_ratio = None
+        if annual_capex and annual_revenue:
+            ratios = [abs(annual_capex[y]) / annual_revenue[y]
+                      for y in historical_years if y in annual_capex and y in annual_revenue]
+            if ratios:
+                last_capex_ratio = sum(ratios) / len(ratios)
+        if rev_f and last_capex_ratio:
+            capex_f = round(rev_f * last_capex_ratio, 2)
+
+        est_src = est.get("source", "LLM-Ableitung")
+        src_label = (
+            f"{fwd_source_base} | {est_src} | "
+            "LLM-basierte Approximation. Kein Ersatz für Bloomberg/FactSet Konsensdaten"
+        )
+
+        result.append({
+            "year":             fwd_year,
+            "type":             "E",
+            "revenue_bn":       _round2(rev_f),
+            "ebitda_bn":        ebitda_f,
+            "ebitda_margin_pct": _round1(ebitda_m_f),
+            "ebit_bn":          ebit_f,
+            "ebit_margin_pct":  _round1(ebit_m_f),
+            "net_income_bn":    ni_f,
+            "eps_adj":          _round2(eps_f),
+            "dps":              dps_f,
+            "fcf_bn":           _round2(fcf_f),
+            "net_debt_bn":      nd_f,
+            "nd_ebitda":        nd_eb_f,
+            "roic_pct":         NV,
+            "capex_bn":         capex_f,
+            "source":           src_label,
+        })
+
+    return result
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────

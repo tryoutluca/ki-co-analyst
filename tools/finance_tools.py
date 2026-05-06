@@ -834,6 +834,213 @@ def get_industry_indicators(sector: str, industry: str) -> dict:
     return {"sector": sector, "industry": industry, "topics": topics, "news_per_topic": news_per_topic}
 
 
+def get_peer_financials(ticker: str) -> dict:
+    """
+    Erstellt einen Peer-Vergleich mit sektorspezifischen Kennzahlen.
+
+    Schritt 1: Peer-Liste via Finnhub (Fallback: Sektor-Defaults)
+    Schritt 2: Sektor-relevante Multiples via LLM bestimmen
+    Schritt 3: Kennzahlen pro Peer via yfinance holen
+    Schritt 4: Sektor-Durchschnitte berechnen (Ausreisser bereinigen)
+    Schritt 5: Subject vs. Durchschnitt Abweichung berechnen
+
+    Returns dict kompatibel mit PeerComparisonTable.model_dump()
+    """
+    import statistics
+
+    _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    SECTOR_FALLBACK_PEERS = {
+        "Basic Materials":      ["CRH", "HDELY", "SGPYY", "SWK"],
+        "Technology":           ["MSFT", "GOOGL", "META", "AMZN"],
+        "Healthcare":           ["LLY", "AZN", "NVO", "ABBV"],
+        "Financial Services":   ["JPM", "BAC", "GS", "MS"],
+        "Consumer Defensive":   ["UL", "MDLZ", "GIS", "KHC"],
+        "Industrials":          ["HON", "MMM", "ETN", "EMR"],
+        "Energy":               ["XOM", "CVX", "SHEL", "TTE"],
+        "Utilities":            ["NEE", "DUK", "SO", "D"],
+        "Real Estate":          ["PLD", "AMT", "CCI", "EQIX"],
+    }
+
+    SECTOR_MULTIPLES = {
+        "Financial Services":   ["P/B", "ROE", "CET1-Ratio", "Net Interest Margin", "Cost-Income-Ratio"],
+        "Real Estate":          ["P/FFO", "NAV-Discount", "LTV", "Dividend-Yield", "EV/EBITDA"],
+        "Healthcare":           ["EV/EBITDA", "EV/Sales", "R&D/Sales", "Forward P/E", "FCF-Yield"],
+        "Energy":               ["EV/EBITDA", "FCF-Yield", "Dividend-Yield", "ND/EBITDA", "EV/Sales"],
+        "Technology":           ["EV/Sales", "EV/EBITDA", "FCF-Marge", "Umsatzwachstum", "Forward P/E"],
+        "Basic Materials":      ["EV/EBITDA", "Forward P/E", "EBIT-Marge", "ND/EBITDA", "Dividend-Yield"],
+    }
+
+    DEFAULT_MULTIPLES = ["EV/EBITDA", "Forward P/E", "EBIT-Marge", "ND/EBITDA", "Dividend-Yield"]
+
+    # ── Schritt 1: Sektor und Peer-Liste bestimmen ────────────────────────────
+    sector = "N/A"
+    try:
+        subject_info = yf.Ticker(ticker).info
+        sector = subject_info.get("sector", "N/A")
+    except Exception:
+        subject_info = {}
+
+    peer_tickers: list[str] = []
+    try:
+        client = get_finnhub_client()
+        raw_peers = client.company_peers(ticker) or []
+        peer_tickers = [p for p in raw_peers if p != ticker][:5]
+    except Exception:
+        pass
+
+    if not peer_tickers:
+        peer_tickers = SECTOR_FALLBACK_PEERS.get(sector, ["MSFT", "GOOGL", "META", "AMZN"])[:5]
+
+    # ── Schritt 2: Sektor-relevante Multiples ─────────────────────────────────
+    relevant_multiples = SECTOR_MULTIPLES.get(sector, DEFAULT_MULTIPLES)
+    try:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Du bist Senior-Aktienanalyst. Antworte NUR mit einem JSON-Array."),
+            ("human", (
+                "Welche 5 Kennzahlen sind für Peer-Vergleich im Sektor '{sector}' am relevantesten? "
+                "Antworte NUR mit JSON-Array, z.B. [\"EV/EBITDA\", \"Forward P/E\"]. Kein Text."
+            )),
+        ])
+        raw = (prompt | _llm | StrOutputParser()).invoke({"sector": sector})
+        s, e = raw.find("["), raw.rfind("]") + 1
+        if s != -1 and e > 0:
+            parsed = json.loads(raw[s:e])
+            if isinstance(parsed, list) and len(parsed) >= 3:
+                relevant_multiples = [str(m) for m in parsed[:5]]
+    except Exception:
+        pass
+
+    # ── Schritt 3: Kennzahlen pro Peer holen ─────────────────────────────────
+    def _fetch_peer_data(t: str) -> dict | None:
+        try:
+            info = yf.Ticker(t).info
+            total_debt = info.get("totalDebt") or 0
+            total_cash = info.get("totalCash") or 0
+            ebitda     = info.get("ebitda") or 0
+            nd_ebitda  = "n/v"
+            if ebitda and ebitda != 0:
+                nd_ebitda = round((total_debt - total_cash) / ebitda, 2)
+
+            op_margin = info.get("operatingMargins")
+            ebit_margin = round(op_margin * 100, 1) if op_margin is not None else "n/v"
+
+            div_yield = info.get("dividendYield")
+            div_pct = round((div_yield or 0) * 100, 2)
+
+            rev_growth = info.get("revenueGrowth")
+            rev_growth_pct = round((rev_growth or 0) * 100, 1)
+
+            roe = info.get("returnOnEquity")
+            roic = round(roe * 100, 1) if roe is not None else "n/v"
+
+            ev_ebitda = info.get("enterpriseToEbitda", "n/v")
+            if ev_ebitda is not None and ev_ebitda != "n/v":
+                try:
+                    ev_ebitda = round(float(ev_ebitda), 1)
+                except (TypeError, ValueError):
+                    ev_ebitda = "n/v"
+
+            fwd_pe = info.get("forwardPE", "n/v")
+            if fwd_pe is not None and fwd_pe != "n/v":
+                try:
+                    fwd_pe = round(float(fwd_pe), 1)
+                except (TypeError, ValueError):
+                    fwd_pe = "n/v"
+
+            return {
+                "company":            info.get("longName", t),
+                "ticker":             t,
+                "country":            info.get("country", "N/A"),
+                "ev_ebitda":          ev_ebitda,
+                "forward_pe":         fwd_pe,
+                "ebit_margin_pct":    ebit_margin,
+                "nd_ebitda":          nd_ebitda,
+                "dividend_yield_pct": div_pct,
+                "revenue_growth_pct": rev_growth_pct,
+                "roic_pct":           roic,
+            }
+        except Exception:
+            return None
+
+    peers_data = []
+    for pt in peer_tickers:
+        d = _fetch_peer_data(pt)
+        if d:
+            peers_data.append(d)
+
+    # Subject company data
+    subject_data = _fetch_peer_data(ticker)
+    if subject_data is None:
+        subject_data = {
+            "company": subject_info.get("longName", ticker),
+            "ticker": ticker,
+            "country": subject_info.get("country", "N/A"),
+            "ev_ebitda": "n/v", "forward_pe": "n/v", "ebit_margin_pct": "n/v",
+            "nd_ebitda": "n/v", "dividend_yield_pct": "n/v",
+            "revenue_growth_pct": "n/v", "roic_pct": "n/v",
+        }
+
+    # ── Schritt 4: Sektor-Durchschnitte (Ausreisser entfernen) ───────────────
+    numeric_fields = [
+        "ev_ebitda", "forward_pe", "ebit_margin_pct",
+        "nd_ebitda", "dividend_yield_pct", "revenue_growth_pct", "roic_pct",
+    ]
+
+    def _avg_clean(values: list) -> float | str:
+        nums = [float(v) for v in values if v not in ("n/v", None, "") and str(v) != "n/v"]
+        if not nums:
+            return "n/v"
+        try:
+            med = statistics.median(nums)
+            clean = [v for v in nums if abs(v) <= abs(med) * 3 + 1]
+            return round(sum(clean) / len(clean), 2) if clean else "n/v"
+        except Exception:
+            return "n/v"
+
+    avg: dict = {}
+    for field in numeric_fields:
+        vals = [p[field] for p in peers_data]
+        avg[field] = _avg_clean(vals)
+
+    sector_averages = {
+        "company":            "Sektor-Durchschnitt",
+        "ticker":             "AVG",
+        "country":            "",
+        **avg,
+    }
+
+    # ── Schritt 5: Subject vs. Durchschnitt ──────────────────────────────────
+    subject_vs_avg: dict = {}
+    for field in numeric_fields:
+        s_val = subject_data.get(field)
+        a_val = avg.get(field)
+        try:
+            sv = float(s_val)
+            av = float(a_val)
+            if av != 0:
+                pct = round((sv - av) / abs(av) * 100, 1)
+                subject_vs_avg[field] = f"+{pct}%" if pct >= 0 else f"{pct}%"
+            else:
+                subject_vs_avg[field] = "n/v"
+        except (TypeError, ValueError):
+            subject_vs_avg[field] = "n/v"
+
+    return {
+        "sector":                    sector,
+        "sector_relevant_multiples": relevant_multiples,
+        "peers":                     peers_data,
+        "sector_averages":           sector_averages,
+        "subject_company":           subject_data,
+        "subject_vs_avg":            subject_vs_avg,
+        "methodology":               (
+            "Peer-Daten via yfinance | Ausreisser (>3x Median) entfernt | "
+            "Sektor-Ø = arithmetisches Mittel bereinigter Werte | "
+            "Quelle: yfinance, Stand: aktuell"
+        ),
+    }
+
+
 @tool
 def get_strategic_milestones(ticker: str, company_name: str) -> list:
     """Fetches major strategic developments (leadership changes, M&A, regulatory events)

@@ -9,10 +9,11 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.finance_tools import (
     get_stock_info, get_financial_statements, get_price_history,
-    get_cashflow_data, get_historical_multiples,
+    get_cashflow_data, get_historical_multiples, get_peer_financials,
 )
 from tools.ir_rag_tool import get_ir_analysis, consensus_estimates_from_ir
 from tools.schemas import FundamentalAgentOutput
+from tools.valuation_engine import build_full_financials
 
 load_dotenv()
 
@@ -192,6 +193,32 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         "ir_context":           ir_context,
         "format_instructions":  parser.get_format_instructions(),
     })
+
+    # ── Vollständige Finanzübersicht (3A + 3E) ────────────────────────────────
+    print(f"      Erstelle vollständige Finanzübersicht...")
+    full_financials = build_full_financials(
+        ticker, stock_info, financials, cashflow_data,
+        ir_analysis, forward_estimates, historical_multiples
+    )
+
+    # ── Peer-Vergleich ────────────────────────────────────────────────────────
+    print(f"      Erstelle Peer-Vergleich...")
+    peer_comparison = get_peer_financials(ticker)
+
+    # ── Valuation Engine Inputs (DCF + Multiples) ─────────────────────────────
+    from tools.valuation_engine import run_dcf, build_valuation_table
+    valuation = {
+        "dcf_inputs":      run_dcf(ir_analysis, financials, cashflow_data, stock_info),
+        "valuation_table": build_valuation_table(
+            run_dcf(ir_analysis, financials, cashflow_data, stock_info)
+        ),
+    }
+
+    # Anhängen an result für Supervisor
+    if isinstance(result, dict):
+        result["_full_financials"]  = full_financials
+        result["_peer_comparison"]  = peer_comparison
+        result["_valuation_engine"] = valuation
 
     return result
 

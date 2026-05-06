@@ -387,6 +387,149 @@ function buildConvictionKillers(killers) {
   return result;
 }
 
+// ── Section 7a: Full Financial Overview ──────────────────────────────────────
+
+function buildFullFinancialsTable(years) {
+  if (!years || !years.length) return bodyText("Keine Finanzübersicht verfügbar.");
+
+  const FIELDS = [
+    { label: "Umsatz (Mrd.)",  key: "revenue_bn" },
+    { label: "EBITDA (Mrd.)",  key: "ebitda_bn" },
+    { label: "EBITDA-%",       key: "ebitda_margin_pct" },
+    { label: "EBIT-%",         key: "ebit_margin_pct" },
+    { label: "EPS (adj.)",     key: "eps_adj" },
+    { label: "DPS",            key: "dps" },
+    { label: "FCF (Mrd.)",     key: "fcf_bn" },
+    { label: "ND/EBITDA",      key: "nd_ebitda" },
+    { label: "ROIC-%",         key: "roic_pct" },
+    { label: "CapEx (Mrd.)",   key: "capex_bn" },
+    { label: "Quelle",         key: "source" },
+  ];
+
+  const labelColW = 1400;
+  const dataColW  = Math.floor((9360 - labelColW) / years.length);
+  const colWidths = [labelColW, ...Array(years.length).fill(dataColW)];
+
+  function isEstimate(y) { return y.type === "E"; }
+
+  const headerCells = [
+    hCell("Kennzahl", labelColW, C.secondary),
+    ...years.map((y, i) => hCell(
+      y.year,
+      dataColW,
+      isEstimate(y) ? C.lightYellow : C.lightGray,
+      isEstimate(y) ? C.accentHold  : C.darkGray,
+    )),
+  ];
+
+  const dataRows = FIELDS.map((f, ri) =>
+    new TableRow({ children: [
+      vCell(f.label, labelColW, { align: AlignmentType.LEFT, bold: ri === 0, bg: ri % 2 ? C.white : C.lightGray }),
+      ...years.map(y => {
+        const bg = isEstimate(y) ? C.lightYellow : (ri % 2 ? C.white : C.lightGray);
+        const val = y[f.key] ?? "n/v";
+        return vCell(String(val), dataColW, { bg, bold: f.key === "revenue_bn" });
+      }),
+    ]}),
+  );
+
+  const footnote = new Paragraph({
+    spacing: { before: 60, after: 0 },
+    children: [new TextRun({
+      text: "A = Istzahlen (IR / yfinance)  |  📊 E = Schätzung (Consensus / Guidance / LLM-Ableitung)  |  Kein Ersatz für Bloomberg/FactSet",
+      size: 14, italics: true, color: C.midGray, font: "Arial",
+    })],
+  });
+
+  return [
+    new Table({
+      width: { size: 9360, type: WidthType.DXA },
+      columnWidths: colWidths,
+      rows: [new TableRow({ children: headerCells }), ...dataRows],
+    }),
+    footnote,
+  ];
+}
+
+// ── Section 7b: Peer Comparison ───────────────────────────────────────────────
+
+function buildPeerComparisonTable(pc) {
+  if (!pc || !pc.peers || !pc.peers.length) return bodyText("Kein Peer-Vergleich verfügbar.");
+
+  const allRows = [
+    ...(pc.peers || []),
+    pc.sector_averages,
+    pc.subject_company,
+  ].filter(Boolean);
+
+  const W = [2200, 600, 1000, 900, 900, 900, 900, 900, 960];
+
+  const header = new TableRow({ children: [
+    hCell("Unternehmen",      W[0], C.secondary),
+    hCell("Land",             W[1], C.secondary),
+    hCell("EV/EBITDA",        W[2], C.secondary),
+    hCell("Fwd. P/E",         W[3], C.secondary),
+    hCell("EBIT-%",           W[4], C.secondary),
+    hCell("ND/EBITDA",        W[5], C.secondary),
+    hCell("Div.-Yield",       W[6], C.secondary),
+    hCell("Umsatz-Wachst.",   W[7], C.secondary),
+    hCell("ROIC-%",           W[8], C.secondary),
+  ]});
+
+  const today = new Date().toLocaleDateString("de-CH");
+  const subjectTicker = pc.subject_company && pc.subject_company.ticker;
+
+  const dataRows = allRows.map(p => {
+    const isSubject = p.ticker === subjectTicker;
+    const isAvg     = p.ticker === "AVG";
+    const bg = isSubject ? C.lightBlue : (isAvg ? C.lightGray : C.white);
+    const label = (isSubject ? "⭐ " : isAvg ? "Ø " : "") + (p.company || "");
+
+    return new TableRow({ children: [
+      vCell(label,                      W[0], { align: AlignmentType.LEFT, bold: isSubject || isAvg, bg }),
+      vCell(p.country || "",            W[1], { bg }),
+      vCell(String(p.ev_ebitda ?? "n/v"),     W[2], { bg, bold: isSubject }),
+      vCell(String(p.forward_pe ?? "n/v"),    W[3], { bg }),
+      vCell(String(p.ebit_margin_pct ?? "n/v"), W[4], { bg }),
+      vCell(String(p.nd_ebitda ?? "n/v"),     W[5], { bg }),
+      vCell(String(p.dividend_yield_pct ?? "n/v"), W[6], { bg }),
+      vCell(String(p.revenue_growth_pct ?? "n/v"), W[7], { bg }),
+      vCell(String(p.roic_pct ?? "n/v"),      W[8], { bg }),
+    ]});
+  });
+
+  const footnote = new Paragraph({
+    spacing: { before: 60, after: 0 },
+    children: [new TextRun({
+      text: `⭐ = analysiertes Unternehmen  |  Ø = Sektor-Durchschnitt (Ausreisser >3× Median bereinigt)  |  Quelle: yfinance  |  Stand: ${today}`,
+      size: 14, italics: true, color: C.midGray, font: "Arial",
+    })],
+  });
+
+  const vsAvg = pc.subject_vs_avg || {};
+  const vsEntries = Object.entries(vsAvg).filter(([, v]) => v !== "n/v");
+  const vsPara = vsEntries.length ? new Paragraph({
+    spacing: { before: 60, after: 0 },
+    children: [
+      new TextRun({ text: "Subject vs. Sektor-Ø: ", bold: true, size: 16, font: "Arial", color: C.primary }),
+      new TextRun({
+        text: vsEntries.map(([k, v]) => `${k}: ${v}`).join("  |  "),
+        size: 16, font: "Arial", color: C.darkGray,
+      }),
+    ],
+  }) : null;
+
+  return [
+    new Table({
+      width: { size: 9360, type: WidthType.DXA },
+      columnWidths: W,
+      rows: [header, ...dataRows],
+    }),
+    footnote,
+    ...(vsPara ? [vsPara] : []),
+  ];
+}
+
 // ── Section 7: Sources table ──────────────────────────────────────────────────
 
 function buildSourcesTable(sources) {
@@ -432,6 +575,8 @@ async function buildMemo(data) {
   const scenarioList      = Array.isArray(data.scenarios)          ? data.scenarios          : [];
   const macroAmpelList    = Array.isArray(data.macro_ampel)        ? data.macro_ampel        : [];
   const convKillers       = Array.isArray(data.conviction_killers) ? data.conviction_killers : [];
+  const fullFinancials    = Array.isArray(data.full_financials)    ? data.full_financials    : [];
+  const peerComparison    = data.peer_comparison                   || null;
 
   function headerParagraph() {
     return [
@@ -520,6 +665,16 @@ async function buildMemo(data) {
     // 5. Konsensschätzungen
     sectionHeader("Konsensschätzungen"),
     buildConsensusTable(consensusYears),
+    emptyLine(60),
+
+    // 5a. Vollständige Finanzübersicht
+    sectionHeader("Finanzübersicht (6 Jahre)"),
+    ...buildFullFinancialsTable(fullFinancials),
+    emptyLine(60),
+
+    // 5b. Peer-Vergleich
+    sectionHeader("Peer-Vergleich"),
+    ...buildPeerComparisonTable(peerComparison),
     emptyLine(60),
   ];
 

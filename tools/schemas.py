@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, Optional
 
 # ── News Agent ──────────────────────────────────────────────────────────────
 
@@ -230,6 +230,50 @@ class RiskAgentOutput(BaseModel):
     )
 
 
+# ── Full Financial Overview ──────────────────────────────────────────────────
+
+class FullFinancialYear(BaseModel):
+    year: str                              # z.B. "2023A", "2026E"
+    type: Literal["A", "E"]               # A=Actual, E=Estimate
+    revenue_bn: float | str
+    ebitda_bn: float | str
+    ebitda_margin_pct: float | str
+    ebit_bn: float | str
+    ebit_margin_pct: float | str
+    net_income_bn: float | str
+    eps_adj: float | str
+    dps: float | str                       # Dividende pro Aktie
+    fcf_bn: float | str
+    net_debt_bn: float | str
+    nd_ebitda: float | str                 # Net Debt / EBITDA
+    roic_pct: float | str
+    capex_bn: float | str
+    source: str                            # Datenquelle pro Jahr
+
+
+class PeerCompanyData(BaseModel):
+    company: str
+    ticker: str
+    country: str
+    ev_ebitda: float | str
+    forward_pe: float | str
+    ebit_margin_pct: float | str
+    nd_ebitda: float | str
+    dividend_yield_pct: float | str
+    revenue_growth_pct: float | str
+    roic_pct: float | str
+
+
+class PeerComparisonTable(BaseModel):
+    sector: str
+    sector_relevant_multiples: list[str]   # LLM-bestimmt pro Sektor
+    peers: list[PeerCompanyData]
+    sector_averages: PeerCompanyData       # Durchschnitt aller Peers
+    subject_company: PeerCompanyData       # Das analysierte Unternehmen
+    subject_vs_avg: dict                   # Abweichung in % je Kennzahl
+    methodology: str
+
+
 # ── Supervisor / Final Memo ──────────────────────────────────────────────────
 
 class ConsensusEstimateYear(BaseModel):
@@ -334,6 +378,20 @@ class SupervisorOutput(BaseModel):
             "3-5 specific indicators/events the PM must monitor. "
             "E.g. 'Q3 Services Marge: Zielwert >28% — darunter kippt Bull Case'"
         )
+    )
+
+    # ── Erweiterte Finanzdaten ────────────────────────────────
+    full_financials: list[FullFinancialYear] = Field(
+        default_factory=list,
+        description=(
+            "Vollständige P&L-Übersicht: 3 historische Jahre (A) "
+            "und 3 Forward-Jahre (E). Historisch aus IR-Dokument, "
+            "Forward aus Consensus/Guidance/LLM-Ableitung."
+        )
+    )
+    peer_comparison: Optional[PeerComparisonTable] = Field(
+        default=None,
+        description="Peer-Vergleich mit sektorspezifischen Kennzahlen"
     )
 
     # ── Footer ────────────────────────────────────────────────

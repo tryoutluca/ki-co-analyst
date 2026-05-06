@@ -102,6 +102,21 @@ CONSENSUS ESTIMATES Tabelle:
 - 3 Vorwärtsjahre (E=Estimate) aus Konsensschätzungen
 - Falls Schätzungen fehlen: markiere als "n/v — Bloomberg/FactSet empfohlen"
 
+VOLLSTÄNDIGE FINANZÜBERSICHT (full_financials):
+- Übernehme die 6-Jahres-Tabelle (3A + 3E) exakt aus dem Fundamental-Agent Output
+- Kennzeichne Schätzjahre explizit als (E) im year-Feld
+- Die Felder source müssen den Disclaimer enthalten:
+  "A = Istzahlen | E = Schätzung (Quelle: [source]) | kein Ersatz für Bloomberg/FactSet"
+- Falls full_financials fehlen: leere Liste zurückgeben
+
+PEER-VERGLEICH (peer_comparison):
+- Übernehme die Peer-Tabelle exakt aus dem Fundamental-Agent Output
+- Bewertung Subject vs. Sektor-Ø in final_reasoning einbeziehen:
+  DISCOUNT (>15% unter Ø) → mögliches Kaufargument
+  ELEVATED (>15% über Ø)  → mögliches Bewertungsrisiko
+  IN LINE (±15%)           → fair bewertet
+- Falls peer_comparison fehlt: null zurückgeben
+
 KRITISCH: Antworte AUSSCHLIESSLICH mit validem JSON.
 {format_instructions}"""
 
@@ -227,6 +242,25 @@ def synthesize_memo(
     for c in quality_checks:
         quality_context += f"  [{c['result']}] {c['check']}: {c['comment']}\n"
 
+    # ── Neue Felder: Full Financials + Peer Comparison ────────────────────────
+    full_financials  = _extract(fundamental_output, "_full_financials",  [])
+    peer_comparison  = _extract(fundamental_output, "_peer_comparison",  {})
+
+    fin_context = ""
+    if full_financials:
+        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (6 Jahre, direkt übernehmen):\n"
+        fin_context += json.dumps(full_financials, ensure_ascii=False) + "\n"
+
+    peer_context = ""
+    if peer_comparison:
+        peer_context = "\n### PEER-VERGLEICH (direkt übernehmen):\n"
+        peer_context += json.dumps(peer_comparison, ensure_ascii=False) + "\n"
+        vs_avg = peer_comparison.get("subject_vs_avg", {})
+        if vs_avg:
+            peer_context += "Subject vs. Sektor-Ø: " + ", ".join(
+                f"{k}: {v}" for k, v in vs_avg.items()
+            ) + "\n"
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", SUPERVISOR_PROMPT),
         ("human", """Synthetisiere das finale Investment Memo für {ticker} ({company}).
@@ -245,6 +279,8 @@ def synthesize_memo(
 {risk_context}
 {killer_context}
 {quality_context}
+{fin_context}
+{peer_context}
 
 AUFGABEN:
 1. Übernimm die quality_checks aus dem Qualitätsprüfungs-Kontext oben (ergänze ggf.)
@@ -255,6 +291,9 @@ AUFGABEN:
 6. Übernimm conviction_killers aus dem Risk-Agent
 7. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
 8. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
+9. Übernimm full_financials EXAKT aus dem Kontext oben (keine Änderungen)
+10. Übernimm peer_comparison EXAKT aus dem Kontext oben (keine Änderungen)
+11. Erwähne in final_reasoning ob Peer-Bewertung Empfehlung stützt oder widerspricht
 
 Datum heute: {today}
 Gib das Ergebnis als JSON zurück."""),
@@ -265,7 +304,12 @@ Gib das Ergebnis als JSON zurück."""),
     result = chain.invoke({
         "ticker": ticker,
         "company": _extract(fundamental_output, "company", ticker),
-        "fundamental_json": json.dumps(fundamental_output, indent=2, ensure_ascii=False),
+        "fundamental_json": json.dumps(
+            {k: v for k, v in (fundamental_output.items() if isinstance(fundamental_output, dict)
+                               else fundamental_output.__dict__.items())
+             if not k.startswith("_")},
+            indent=2, ensure_ascii=False
+        ),
         "news_json": json.dumps(news_output, indent=2, ensure_ascii=False),
         "risk_json": json.dumps(risk_output, indent=2, ensure_ascii=False),
         "macro_context": macro_context,
@@ -273,9 +317,18 @@ Gib das Ergebnis als JSON zurück."""),
         "risk_context": risk_context,
         "killer_context": killer_context,
         "quality_context": quality_context,
+        "fin_context": fin_context,
+        "peer_context": peer_context,
         "today": date.today().isoformat(),
         "format_instructions": parser.get_format_instructions(),
     })
+
+    # Neue Felder direkt aus fundamental_output übernehmen wenn LLM sie weglässt
+    if isinstance(result, dict):
+        if not result.get("full_financials") and full_financials:
+            result["full_financials"] = full_financials
+        if not result.get("peer_comparison") and peer_comparison:
+            result["peer_comparison"] = peer_comparison
 
     return result
 
@@ -375,6 +428,25 @@ def run_supervisor(ticker: str) -> dict:
     for c in quality_checks:
         quality_context += f"  [{c['result']}] {c['check']}: {c['comment']}\n"
 
+    # ── Neue Felder: Full Financials + Peer Comparison ────────────────────────
+    full_financials = _extract(fundamental_output, "_full_financials", [])
+    peer_comparison = _extract(fundamental_output, "_peer_comparison", {})
+
+    fin_context = ""
+    if full_financials:
+        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (6 Jahre, direkt übernehmen):\n"
+        fin_context += json.dumps(full_financials, ensure_ascii=False) + "\n"
+
+    peer_context = ""
+    if peer_comparison:
+        peer_context = "\n### PEER-VERGLEICH (direkt übernehmen):\n"
+        peer_context += json.dumps(peer_comparison, ensure_ascii=False) + "\n"
+        vs_avg = peer_comparison.get("subject_vs_avg", {})
+        if vs_avg:
+            peer_context += "Subject vs. Sektor-Ø: " + ", ".join(
+                f"{k}: {v}" for k, v in vs_avg.items()
+            ) + "\n"
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", SUPERVISOR_PROMPT),
         ("human", """Synthetisiere das finale Investment Memo für {ticker} ({company}).
@@ -393,6 +465,8 @@ def run_supervisor(ticker: str) -> dict:
 {risk_context}
 {killer_context}
 {quality_context}
+{fin_context}
+{peer_context}
 
 AUFGABEN:
 1. Übernimm die quality_checks aus dem Qualitätsprüfungs-Kontext oben (ergänze ggf.)
@@ -403,6 +477,9 @@ AUFGABEN:
 6. Übernimm conviction_killers aus dem Risk-Agent
 7. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
 8. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
+9. Übernimm full_financials EXAKT aus dem Kontext oben (keine Änderungen)
+10. Übernimm peer_comparison EXAKT aus dem Kontext oben (keine Änderungen)
+11. Erwähne in final_reasoning ob Peer-Bewertung Empfehlung stützt oder widerspricht
 
 Datum heute: {today}
 Gib das Ergebnis als JSON zurück."""),
@@ -413,7 +490,12 @@ Gib das Ergebnis als JSON zurück."""),
     result = chain.invoke({
         "ticker": ticker,
         "company": _extract(fundamental_output, "company", ticker),
-        "fundamental_json": json.dumps(fundamental_output, indent=2, ensure_ascii=False),
+        "fundamental_json": json.dumps(
+            {k: v for k, v in (fundamental_output.items() if isinstance(fundamental_output, dict)
+                               else vars(fundamental_output).items())
+             if not k.startswith("_")},
+            indent=2, ensure_ascii=False
+        ),
         "news_json": json.dumps(news_output, indent=2, ensure_ascii=False),
         "risk_json": json.dumps(risk_output, indent=2, ensure_ascii=False),
         "macro_context": macro_context,
@@ -421,9 +503,18 @@ Gib das Ergebnis als JSON zurück."""),
         "risk_context": risk_context,
         "killer_context": killer_context,
         "quality_context": quality_context,
+        "fin_context": fin_context,
+        "peer_context": peer_context,
         "today": date.today().isoformat(),
         "format_instructions": parser.get_format_instructions(),
     })
+
+    # Neue Felder direkt übernehmen falls LLM sie weglässt
+    if isinstance(result, dict):
+        if not result.get("full_financials") and full_financials:
+            result["full_financials"] = full_financials
+        if not result.get("peer_comparison") and peer_comparison:
+            result["peer_comparison"] = peer_comparison
 
     print(f"\n{'='*60}")
     print(f"[OK] FINALE EMPFEHLUNG: {result.get('final_recommendation')} | "
