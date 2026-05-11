@@ -4,6 +4,7 @@ import yfinance as yf
 import os
 import json
 import requests
+import statistics
 from datetime import datetime, timedelta
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -834,33 +835,172 @@ def get_industry_indicators(sector: str, industry: str) -> dict:
     return {"sector": sector, "industry": industry, "topics": topics, "news_per_topic": news_per_topic}
 
 
+def _peers_cache_path(ticker: str) -> str:
+    cache_dir = os.path.join("ir_cache", ticker.upper())
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "peers.json")
+
+
+def discover_peers_via_tavily(
+    ticker: str,
+    company_name: str,
+    sector: str,
+    industry: str,
+) -> list[str]:
+    """Findet börsennotierte Konkurrenten via Tavily + LLM-Extraktion + yfinance-Validierung."""
+    cache_path = _peers_cache_path(ticker)
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        age_h = (datetime.now().timestamp() - cached.get("ts", 0)) / 3600
+        if age_h < 24 and cached.get("peers"):
+            print(f"      Peers aus Cache ({round(age_h, 1)}h alt): {cached['peers']}")
+            return cached["peers"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Schritt 1: Tavily Suche
+    try:
+        search = TavilySearchResults(max_results=5)
+        queries = [
+            f"main publicly listed competitors of {company_name} "
+            f"in {industry} with stock ticker symbols",
+            f"{company_name} {ticker} peer group comparable companies "
+            f"equity analysis ticker symbols",
+        ]
+        all_results = []
+        for query in queries:
+            all_results.extend(search.invoke(query))
+        search_context = "\n\n".join([
+            f"URL: {r.get('url', '')}\n{r.get('content', '')[:500]}"
+            for r in all_results[:6]
+        ])
+    except Exception as e:
+        print(f"      Tavily Fehler: {e}")
+        return []
+
+    # Schritt 2: LLM extrahiert Ticker-Symbole
+    try:
+        llm = ChatOpenAI(model="gpt-5.4", temperature=0)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "Du bist ein Finanzanalyst. Extrahiere aus den "
+             "Suchergebnissen börsennotierte Konkurrenten. "
+             "Antworte NUR mit einem JSON-Array von Ticker-Symbolen. "
+             "Beispiel: [\"MC.PA\", \"KER.PA\", \"BRBY.L\"] "
+             "Keine Erklärungen, nur das JSON-Array."),
+            ("human",
+             "Unternehmen: {company} ({ticker})\n"
+             "Sektor: {sector}, Industrie: {industry}\n\n"
+             "Suchergebnisse:\n{context}\n\n"
+             "Extrahiere 4-6 direkte Konkurrenten als Ticker-Array. "
+             "Nur börsennotierte Unternehmen. "
+             "Schliesse {ticker} selbst aus. "
+             "Falls unsicher ob ein Ticker korrekt: weglassen."),
+        ])
+        raw = (prompt | llm | StrOutputParser()).invoke({
+            "company": company_name,
+            "ticker": ticker,
+            "sector": sector,
+            "industry": industry,
+            "context": search_context,
+        })
+        s, e = raw.find("["), raw.rfind("]") + 1
+        if s == -1 or e == 0:
+            return []
+        candidate_tickers = json.loads(raw[s:e])
+    except Exception as e:
+        print(f"      LLM Ticker-Extraktion Fehler: {e}")
+        return []
+
+    # Schritt 3: Ticker via yfinance validieren
+    validated = []
+    for peer_ticker in candidate_tickers[:8]:
+        try:
+            info = yf.Ticker(peer_ticker).info
+            if info.get("longName") and info.get("marketCap") and peer_ticker != ticker:
+                validated.append(peer_ticker)
+                print(f"      Peer validiert: {peer_ticker} ({info.get('longName', '')})")
+            else:
+                print(f"      Peer ungültig: {peer_ticker}")
+        except Exception:
+            print(f"      Peer nicht gefunden: {peer_ticker}")
+
+    result = validated[:5]
+
+    # Cache schreiben
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({"ts": datetime.now().timestamp(), "peers": result}, f)
+    except Exception:
+        pass
+
+    return result
+
+
+def get_dynamic_peers(
+    ticker: str,
+    company_name: str,
+    sector: str,
+    industry: str,
+) -> list[str]:
+    """
+    Dreistufige Peer-Ermittlung:
+    1. Tavily Websearch (dynamisch, für alle Branchen)
+    2. Finnhub (nur für US-Titel ohne Suffix)
+    3. Sektor-Fallback (letzter Ausweg)
+    """
+    SECTOR_FALLBACK = {
+        "Technology":             ["MSFT", "GOOGL", "META", "AMZN"],
+        "Healthcare":             ["LLY", "AZN", "NVO", "ABBV"],
+        "Financial Services":     ["JPM", "BAC", "GS", "MS"],
+        "Consumer Defensive":     ["UL", "MDLZ", "PG", "KO"],
+        "Consumer Cyclical":      ["AMZN", "HD", "MCD", "NKE"],
+        "Industrials":            ["HON", "ETN", "EMR", "CAT"],
+        "Basic Materials":        ["LIN", "APD", "SHW", "PPG"],
+        "Energy":                 ["XOM", "CVX", "SHEL", "TTE"],
+        "Communication Services": ["GOOGL", "META", "DIS", "NFLX"],
+        "Utilities":              ["NEE", "DUK", "SO", "AEP"],
+        "Real Estate":            ["PLD", "AMT", "CCI", "EQIX"],
+    }
+
+    # Stufe 1: Tavily
+    print(f"      Suche Peers für {company_name} via Tavily...")
+    tavily_peers = discover_peers_via_tavily(ticker, company_name, sector, industry)
+    if len(tavily_peers) >= 3:
+        return tavily_peers
+
+    # Stufe 2: Finnhub (nur für US-Ticker ohne Börsensuffix)
+    if "." not in ticker:
+        try:
+            client = get_finnhub_client()
+            finnhub_peers = client.company_peers(ticker) or []
+            peers = [p for p in finnhub_peers if p != ticker][:5]
+            if len(peers) >= 3:
+                print(f"      Peers via Finnhub: {peers}")
+                return peers
+        except Exception:
+            pass
+
+    # Stufe 3: Sektor-Fallback
+    fallback = SECTOR_FALLBACK.get(sector, ["SPY"])[:5]
+    print(f"      Sektor-Fallback für '{sector}': {fallback}")
+    return fallback
+
+
 def get_peer_financials(ticker: str) -> dict:
     """
     Erstellt einen Peer-Vergleich mit sektorspezifischen Kennzahlen.
 
-    Schritt 1: Peer-Liste via Finnhub (Fallback: Sektor-Defaults)
+    Schritt 1: Peer-Liste via get_dynamic_peers (Tavily → Finnhub → Fallback)
     Schritt 2: Sektor-relevante Multiples via LLM bestimmen
     Schritt 3: Kennzahlen pro Peer via yfinance holen
-    Schritt 4: Sektor-Durchschnitte berechnen (Ausreisser bereinigen)
-    Schritt 5: Subject vs. Durchschnitt Abweichung berechnen
+    Schritt 4: Sektor-Median berechnen (Ausreisser bereinigen)
+    Schritt 5: Subject vs. Median Abweichung berechnen
 
     Returns dict kompatibel mit PeerComparisonTable.model_dump()
     """
-    import statistics
-
     _llm = ChatOpenAI(model="gpt-5.4", temperature=0)
-
-    SECTOR_FALLBACK_PEERS = {
-        "Basic Materials":      ["CRH", "HDELY", "SGPYY", "SWK"],
-        "Technology":           ["MSFT", "GOOGL", "META", "AMZN"],
-        "Healthcare":           ["LLY", "AZN", "NVO", "ABBV"],
-        "Financial Services":   ["JPM", "BAC", "GS", "MS"],
-        "Consumer Defensive":   ["UL", "MDLZ", "GIS", "KHC"],
-        "Industrials":          ["HON", "MMM", "ETN", "EMR"],
-        "Energy":               ["XOM", "CVX", "SHEL", "TTE"],
-        "Utilities":            ["NEE", "DUK", "SO", "D"],
-        "Real Estate":          ["PLD", "AMT", "CCI", "EQIX"],
-    }
 
     SECTOR_MULTIPLES = {
         "Financial Services":   ["P/B", "ROE", "CET1-Ratio", "Net Interest Margin", "Cost-Income-Ratio"],
@@ -878,19 +1018,14 @@ def get_peer_financials(ticker: str) -> dict:
     try:
         subject_info = yf.Ticker(ticker).info
         sector = subject_info.get("sector", "N/A")
+        industry = subject_info.get("industry", "N/A")
+        company_name = subject_info.get("longName", ticker)
     except Exception:
         subject_info = {}
+        industry = "N/A"
+        company_name = ticker
 
-    peer_tickers: list[str] = []
-    try:
-        client = get_finnhub_client()
-        raw_peers = client.company_peers(ticker) or []
-        peer_tickers = [p for p in raw_peers if p != ticker][:5]
-    except Exception:
-        pass
-
-    if not peer_tickers:
-        peer_tickers = SECTOR_FALLBACK_PEERS.get(sector, ["MSFT", "GOOGL", "META", "AMZN"])[:5]
+    peer_tickers = get_dynamic_peers(ticker, company_name, sector, industry)
 
     # ── Schritt 2: Sektor-relevante Multiples ─────────────────────────────────
     relevant_multiples = SECTOR_MULTIPLES.get(sector, DEFAULT_MULTIPLES)
@@ -1034,9 +1169,10 @@ def get_peer_financials(ticker: str) -> dict:
         "subject_company":           subject_data,
         "subject_vs_avg":            subject_vs_avg,
         "methodology":               (
+            "Peer-Ermittlung: Tavily Websearch → Finnhub → Sektor-Fallback | "
             "Peer-Daten via yfinance | Ausreisser (>3x Median) entfernt | "
             "Sektor-Ø = arithmetisches Mittel bereinigter Werte | "
-            "Quelle: yfinance, Stand: aktuell"
+            "Peers 24h gecacht in ir_cache/{ticker}/peers.json"
         ),
     }
 
