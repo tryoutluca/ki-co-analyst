@@ -780,7 +780,7 @@ def get_macro_indicators(currency: str) -> dict:
 @tool
 def get_industry_indicators(sector: str, industry: str) -> dict:
     """Determines sector/industry-specific indicator topics via LLM, then fetches relevant news per topic."""
-    _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    _llm = ChatOpenAI(model="gpt-5.4", temperature=0)
 
     # Step 1: LLM determines 4-6 relevant indicator topics
     topics: list = []
@@ -848,7 +848,7 @@ def get_peer_financials(ticker: str) -> dict:
     """
     import statistics
 
-    _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    _llm = ChatOpenAI(model="gpt-5.4", temperature=0)
 
     SECTOR_FALLBACK_PEERS = {
         "Basic Materials":      ["CRH", "HDELY", "SGPYY", "SWK"],

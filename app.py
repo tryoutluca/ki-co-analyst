@@ -847,7 +847,6 @@ if st.session_state.result:
                     "EPS":           row.get("eps", "n/v"),
                     "EV/EBITDA":     row.get("ev_ebitda", "n/v"),
                     "KGV":           row.get("pe_ratio", "n/v"),
-                    "# Analysten":   row.get("number_of_analysts", "n/v"),
                 })
             df_ce = pd.DataFrame(rows)
             st.dataframe(
@@ -861,7 +860,6 @@ if st.session_state.result:
                     "EPS":           st.column_config.TextColumn(width="small"),
                     "EV/EBITDA":     st.column_config.TextColumn(width="small"),
                     "KGV":           st.column_config.TextColumn(width="small"),
-                    "# Analysten":   st.column_config.TextColumn(width="small"),
                 }
             )
             st.caption("📊 = Schätzwerte (E = Estimate)")

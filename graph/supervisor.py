@@ -32,16 +32,16 @@ Dokumentiere JEDEN Qualitätscheck mit Ergebnis: bestanden/Warnung/fehlgeschlage
 
 SCHRITT 2 — SYNTHESE nach professionellen Buy-Side Standards:
 
-GEWICHTUNG (dynamisch anpassen):
-- Fundamental: 50% Basisgewicht
-  → Erhöhe auf 60% wenn Makro neutral und Risk-Argumente schwach
-  → Reduziere auf 40% wenn Makro stark negativ ODER Conviction Killers vorhanden
-- News/Sentiment: 20% Basisgewicht
-  → Erhöhe auf 30% wenn klares Makro-Ereignis (Zinsentscheid, Krieg, Krise)
-  → Reduziere auf 10% wenn nur Soft-News ohne operativen Bezug
-- Risk/Advocatus: 30% Basisgewicht
-  → Erhöhe auf 40% wenn Conviction Killers überzeugend
-  → Reduziere auf 20% wenn Gegenargumente schwach oder spekulativ
+GEWICHTUNG (Fundamentalanalyse dominiert):
+- Fundamental: 80% Basisgewicht
+  → Bleibt 80% in allen Normalszenarien (positives, neutrales oder leicht negatives Sentiment)
+  → Reduziere auf 60% NUR wenn Sentiment ≤ 3/10 (sehr schlechtes Sentiment)
+- News/Sentiment: 10% Basisgewicht
+  → Erhöhe auf 20% NUR wenn Sentiment ≤ 3/10 (sehr schlechtes Sentiment, z.B. akute Krise, Krieg, Regulierungsschock)
+  → Bleibt 10% bei neutralem oder positivem Sentiment — Soft-News ohne operativen Bezug haben keinen Einfluss
+- Risk/Advocatus: 10% Basisgewicht
+  → Erhöhe auf 20% NUR wenn Sentiment ≤ 3/10 UND Conviction Killers aktiv
+  → Bleibt 10% wenn Gegenargumente schwach oder spekulativ
 
 EMPFEHLUNGS-SKALA (5-stufig — Buy-Side Standard):
 
@@ -53,10 +53,15 @@ EMPFEHLUNGS-SKALA (5-stufig — Buy-Side Standard):
     VERKAUFEN      < -15%  ODER aktive Conviction Killers + negatives Makro
 
   WICHTIG — Upside ist NICHT alleiniger Faktor:
-  Gewichtete Formel:
-    Score = (Upside_Pct × 0.40)
+  Gewichtete Formel (Normalszenario, Sentiment > 3/10):
+    Score = (Upside_Pct × 0.70)
+           + (Sentiment_Score/10 × 100 × 0.10)
+           + (Risk_Adjustment × 0.20)
+
+  Gewichtete Formel (Sentiment ≤ 3/10 — sehr schlechtes Sentiment):
+    Score = (Upside_Pct × 0.50)
            + (Sentiment_Score/10 × 100 × 0.20)
-           + (Risk_Adjustment × 0.40)
+           + (Risk_Adjustment × 0.30)
 
   Risk_Adjustment:
     Keine Conviction Killers aktiv:     +10
@@ -65,14 +70,15 @@ EMPFEHLUNGS-SKALA (5-stufig — Buy-Side Standard):
     Makro headwind:                      -5
     Makro tailwind:                      +5
 
-  Beispiel bei 11% Upside:
-    Keine Conviction Killers + neutrales Makro + Sentiment 6/10:
-    Score = (11 × 0.40) + (60 × 0.20) + (10 × 0.40)
-           = 4.4 + 12 + 4 = 20.4 → ÜBERGEWICHTEN
+  Beispiel bei 11% Upside, Sentiment 6/10 (Normalszenario):
+    Keine Conviction Killers + neutrales Makro:
+    Score = (11 × 0.70) + (60 × 0.10) + (10 × 0.20)
+           = 7.7 + 6 + 2 = 15.7 → ÜBERGEWICHTEN
 
-    Mit 2 Conviction Killern:
-    Score = (11 × 0.40) + (60 × 0.20) + (-15 × 0.40)
-           = 4.4 + 12 - 6 = 10.4 → HALTEN (korrekt wegen Risiko)
+  Beispiel bei 11% Upside, Sentiment 2/10 (sehr schlechtes Sentiment):
+    1 Conviction Killer + Makro headwind:
+    Score = (11 × 0.50) + (20 × 0.20) + (-5 × 0.30)
+           = 5.5 + 4 - 1.5 = 8.0 → HALTEN (korrekt wegen Krise)
 
   Score → Empfehlung Mapping:
     Score > 25:          KAUFEN
@@ -92,7 +98,7 @@ CONVICTION LEVEL Regeln:
 - niedrig: Widersprüche zwischen Agenten ODER zwei+ Conviction Killers
 
 INVESTMENT CASE Regeln:
-- Exakt 3-5 Bulletpoints
+- die relevantesten 3-5 Bulletpoints
 - Jeder Punkt: konkrete Zahl + Peer-Vergleich oder historischer Vergleich + Quelle
 - Kein Punkt ohne Zahl — "günstige Bewertung" ist NICHT ausreichend
 - Letzter Punkt immer: Katalysator der die These auslöst
@@ -265,13 +271,13 @@ def synthesize_memo(
         ("system", SUPERVISOR_PROMPT),
         ("human", """Synthetisiere das finale Investment Memo für {ticker} ({company}).
 
-## FUNDAMENTAL-ANALYSE (Gewicht: 50%):
+## FUNDAMENTAL-ANALYSE (Gewicht: 80% / bei Sentiment ≤ 3/10: 60%):
 {fundamental_json}
 
-## NEWS/SENTIMENT-ANALYSE (Gewicht: 20%):
+## NEWS/SENTIMENT-ANALYSE (Gewicht: 10% / bei Sentiment ≤ 3/10: 20%):
 {news_json}
 
-## RISK/ADVOCATUS-DIABOLI-ANALYSE (Gewicht: 30%):
+## RISK/ADVOCATUS-DIABOLI-ANALYSE (Gewicht: 10% / bei Sentiment ≤ 3/10: 20%):
 {risk_json}
 
 {macro_context}
@@ -451,13 +457,13 @@ def run_supervisor(ticker: str) -> dict:
         ("system", SUPERVISOR_PROMPT),
         ("human", """Synthetisiere das finale Investment Memo für {ticker} ({company}).
 
-## FUNDAMENTAL-ANALYSE (Gewicht: 50%):
+## FUNDAMENTAL-ANALYSE (Gewicht: 80% / bei Sentiment ≤ 3/10: 60%):
 {fundamental_json}
 
-## NEWS/SENTIMENT-ANALYSE (Gewicht: 20%):
+## NEWS/SENTIMENT-ANALYSE (Gewicht: 10% / bei Sentiment ≤ 3/10: 20%):
 {news_json}
 
-## RISK/ADVOCATUS-DIABOLI-ANALYSE (Gewicht: 30%):
+## RISK/ADVOCATUS-DIABOLI-ANALYSE (Gewicht: 10% / bei Sentiment ≤ 3/10: 20%):
 {risk_json}
 
 {macro_context}

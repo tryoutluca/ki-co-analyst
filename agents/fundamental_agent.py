@@ -17,7 +17,7 @@ from tools.valuation_engine import build_full_financials
 
 load_dotenv()
 
-llm    = ChatOpenAI(model="gpt-4o-mini")
+llm    = ChatOpenAI(model="gpt-5.4")
 parser = JsonOutputParser(pydantic_object=FundamentalAgentOutput)
 
 _DEFAULT_MULTIPLES = ["P/E", "EV/EBITDA", "P/B", "ROE"]

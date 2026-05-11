@@ -17,7 +17,7 @@ from tools.schemas import NewsAgentOutput
 
 load_dotenv()
 
-llm = ChatOpenAI(model="gpt-4o-mini")
+llm = ChatOpenAI(model="gpt-5.4")
 parser = JsonOutputParser(pydantic_object=NewsAgentOutput)
 
 NEWS_PROMPT = """Du bist ein Senior Buy-Side Analyst. Trenne Signal von Rauschen — strukturelle \
