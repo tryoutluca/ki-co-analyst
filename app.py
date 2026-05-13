@@ -329,8 +329,13 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
 
     # Investment Case
     add_heading("Investment Case", 1)
-    for point in data.get("investment_case", []):
-        doc.add_paragraph(point, style="List Bullet")
+    for item in data.get("investment_case", []):
+        if isinstance(item, dict):
+            text = item.get("point", "")
+            src  = item.get("source", "")
+            doc.add_paragraph(f"{text} [{src}]" if src else text, style="List Bullet")
+        else:
+            doc.add_paragraph(str(item), style="List Bullet")
 
     # Finale Begründung
     add_heading("Finale Begründung", 1)
@@ -735,9 +740,16 @@ if st.session_state.result:
             # Investment Case
             st.markdown('<div class="section-header">Investment Case</div>',
                        unsafe_allow_html=True)
-            for point in data.get("investment_case", []):
+            for item in data.get("investment_case", []):
+                if isinstance(item, dict):
+                    point  = item.get("point", "")
+                    source = item.get("source", "")
+                else:
+                    point, source = str(item), ""
                 st.markdown(f'<div class="inv-bullet">{point}</div>',
                            unsafe_allow_html=True)
+                if source:
+                    st.caption(source)
 
             # Finale Begründung
             st.markdown('<div class="section-header">Finale Begründung</div>',

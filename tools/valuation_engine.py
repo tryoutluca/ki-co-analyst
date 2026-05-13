@@ -59,6 +59,24 @@ def _round1(value: float | None) -> float | str:
     return round(value, 1) if value is not None else "n/v"
 
 
+def _base_year_int(historical_financials: dict, ir_data: dict) -> int:
+    """Ermittelt das letzte abgeschlossene Geschäftsjahr als Integer (z.B. 2025)."""
+    year_keys = sorted(
+        k for k in historical_financials
+        if re.match(r"20[12]\d[AE]?$", k)
+    )
+    if year_keys:
+        return int(re.sub(r"[AE]", "", year_keys[-1]))
+    # Fallback: aus IR-Daten wenn vorhanden, sonst Vorjahr
+    from datetime import date
+    return date.today().year - 1
+
+
+def _forward_year_labels(base_year: int) -> list[str]:
+    """Gibt 3 Forward-Jahr-Labels zurück, z.B. ['2026E', '2027E', '2028E']."""
+    return [f"{base_year + 1}E", f"{base_year + 2}E", f"{base_year + 3}E"]
+
+
 # ── Year extraction ───────────────────────────────────────────────────────────
 
 def _extract_two_years(
@@ -251,12 +269,15 @@ def derive_forward_estimates(
     # Forward margin trend: apply half the historical trend (conservatism)
     fwd_margin_step = ebitda_margin_trend * 0.5
 
+    base_year   = _base_year_int(historical_financials, ir_data)
+    fwd_labels  = _forward_year_labels(base_year)
+
     estimates: dict = {}
     prev_rev = rev_y2
     prev_eps = eps_y2
     eps_growth_base = eps_cagr if eps_cagr is not None else final_growth
 
-    for i, year in enumerate(["2026E", "2027E", "2028E"]):
+    for i, year in enumerate(fwd_labels):
         decay  = _growth_decay[i]
         g_rev  = final_growth    * decay
         g_eps  = eps_growth_base * decay
@@ -837,7 +858,12 @@ def build_full_financials(
         (sum(hist_dps_vals) / sum(hist_eps_vals)) if hist_dps_vals and hist_eps_vals else 0.4
     )
 
-    for fwd_year in ["2026E", "2027E", "2028E"]:
+    estimates_dict = forward_estimates.get("estimates") or {}
+    fwd_years = sorted(k for k in estimates_dict if k.endswith("E"))
+    if not fwd_years:
+        fwd_years = _forward_year_labels(_base_year_int(historical_multiples, ir_analysis))
+
+    for fwd_year in fwd_years:
         est = estimates.get(fwd_year, {})
         if not est:
             result.append({

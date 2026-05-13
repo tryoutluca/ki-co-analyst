@@ -12,7 +12,7 @@ from tools.schemas import RiskAgentOutput, FundamentalAgentOutput, NewsAgentOutp
 
 load_dotenv()
 
-llm = ChatOpenAI(model="gpt-5.4")
+llm = ChatOpenAI(model="gpt-5.4-mini")
 parser = JsonOutputParser(pydantic_object=RiskAgentOutput)
 
 RISK_PROMPT = """Du bist der Advocatus Diaboli eines professionellen Buy-Side Teams.

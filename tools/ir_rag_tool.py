@@ -1247,20 +1247,20 @@ HISTORISCHE DATEN:
 {historical_data}
 
 AUFGABE:
-1. Parse den Guidance-Text und extrahiere konkrete Zielwerte für 2026E
-2. Extrapoliere 2027E und 2028E mit historischem CAGR und Sektordurchschnitt
+1. Parse den Guidance-Text und extrahiere konkrete Zielwerte für {year_e1}
+2. Extrapoliere {year_e2} und {year_e3} mit historischem CAGR und Sektordurchschnitt
 3. Sei konservativ — im Zweifelsfall niedrigere Wachstumsrate
 
 Antworte NUR mit diesem JSON:
 {{
   "estimates": {{
-    "2026E": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "Management Guidance"}},
-    "2027E": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "extrapoliert"}},
-    "2028E": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "extrapoliert"}}
+    "{year_e1}": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "Management Guidance"}},
+    "{year_e2}": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "extrapoliert"}},
+    "{year_e3}": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "extrapoliert"}}
   }},
   "key_assumptions": [
     "<Annahme 1: konkrete Guidance-Quelle und Herleitung>",
-    "<Annahme 2: CAGR-Annahme für 2027E/2028E mit Begründung>"
+    "<Annahme 2: CAGR-Annahme für {year_e2}/{year_e3} mit Begründung>"
   ]
 }}\
 """
@@ -1284,9 +1284,9 @@ JSON-Format (kein erklärender Text):
   "source": "LLM-Ableitung aus IR-Dokumenten und historischen Daten",
   "confidence": "hoch" | "mittel" | "niedrig",
   "estimates": {{
-    "2026E": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "derived"}},
-    "2027E": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "derived"}},
-    "2028E": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "derived"}}
+    "{year_e1}": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "derived"}},
+    "{year_e2}": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "derived"}},
+    "{year_e3}": {{"revenue_bn": <Mrd.>, "ebitda_margin_pct": <Prozent>, "eps": <EPS>, "source": "derived"}}
   }},
   "key_assumptions": [
     "<Annahme 1: Herleitung + Quelle>",
@@ -1297,20 +1297,35 @@ JSON-Format (kein erklärender Text):
 }}\
 """
 
-_ESTIMATE_FALLBACK: dict = {
-    "source":      "LLM-Ableitung — Analyse nicht verfügbar",
-    "confidence":  "niedrig",
-    "estimates": {
-        "2026E": {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
-        "2027E": {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
-        "2028E": {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
-    },
-    "key_assumptions": [],
-    "disclaimer": (
-        "Diese Schätzungen stammen aus öffentlichen IR-Dokumenten / wurden vom LLM abgeleitet. "
-        "Kein Ersatz für Bloomberg/FactSet Konsensdaten."
-    ),
-}
+def _make_estimate_fallback(base_year: int) -> dict:
+    e1, e2, e3 = f"{base_year+1}E", f"{base_year+2}E", f"{base_year+3}E"
+    return {
+        "source":      "LLM-Ableitung — Analyse nicht verfügbar",
+        "confidence":  "niedrig",
+        "estimates": {
+            e1: {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
+            e2: {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
+            e3: {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
+        },
+        "key_assumptions": [],
+        "disclaimer": (
+            "Diese Schätzungen stammen aus öffentlichen IR-Dokumenten / wurden vom LLM abgeleitet. "
+            "Kein Ersatz für Bloomberg/FactSet Konsensdaten."
+        ),
+    }
+
+
+def _base_year_from_historical(historical_data: dict) -> int:
+    """Ermittelt das letzte abgeschlossene Geschäftsjahr aus historischen Daten."""
+    import re as _re
+    year_keys = sorted(
+        k for k in historical_data
+        if _re.match(r"20[12]\d[AE]?$", str(k))
+    )
+    if year_keys:
+        return int(_re.sub(r"[AE]", "", year_keys[-1]))
+    from datetime import date
+    return date.today().year - 1
 
 
 def consensus_estimates_from_ir(
@@ -1320,33 +1335,37 @@ def consensus_estimates_from_ir(
     sector: str = "",
 ) -> dict:
     """
-    Returns 3-year forward estimates (2026E/2027E/2028E).
+    Returns 3-year forward estimates dynamically based on the last completed fiscal year.
     NOT a @tool — called directly by fundamental_agent.
 
     Fast path: if the IR document already contains consensus_eps and
-    consensus_revenue (e.g. Holcim publishes their own consensus sheet),
-    those are returned directly without an LLM call.
+    consensus_revenue, those are returned directly without an LLM call.
     """
     def _is_found(v) -> bool:
         return v not in (None, "not found", "n/v", "")
 
-    # ── Fast path: direct IR consensus figures ───────────────────────────────
-    eps_2026 = ir_output.get("consensus_eps_2026")
-    eps_2027 = ir_output.get("consensus_eps_2027")
-    eps_2028 = ir_output.get("consensus_eps_2028")
-    rev_2026 = ir_output.get("consensus_revenue_2026_bn")
-    rev_2027 = ir_output.get("consensus_revenue_2027_bn")
-    rev_2028 = ir_output.get("consensus_revenue_2028_bn")
+    base_year = _base_year_from_historical(historical_data)
+    e1 = f"{base_year + 1}E"
+    e2 = f"{base_year + 2}E"
+    e3 = f"{base_year + 3}E"
+    y1, y2, y3 = base_year + 1, base_year + 2, base_year + 3
 
-    if all(_is_found(v) for v in [eps_2026, eps_2027, eps_2028,
-                                   rev_2026, rev_2027, rev_2028]):
+    # ── Fast path: direct IR consensus figures ───────────────────────────────
+    eps_e1 = ir_output.get(f"consensus_eps_{y1}")
+    eps_e2 = ir_output.get(f"consensus_eps_{y2}")
+    eps_e3 = ir_output.get(f"consensus_eps_{y3}")
+    rev_e1 = ir_output.get(f"consensus_revenue_{y1}_bn")
+    rev_e2 = ir_output.get(f"consensus_revenue_{y2}_bn")
+    rev_e3 = ir_output.get(f"consensus_revenue_{y3}_bn")
+
+    if all(_is_found(v) for v in [eps_e1, eps_e2, eps_e3, rev_e1, rev_e2, rev_e3]):
         return {
             "source":     "IR-Dokument (Consensus Estimates)",
             "confidence": "hoch",
             "estimates": {
-                "2026E": {"revenue_bn": rev_2026, "ebitda_margin_pct": ir_output.get("ebitda_margin_pct", "n/v"), "eps": eps_2026, "source": "direct from IR"},
-                "2027E": {"revenue_bn": rev_2027, "ebitda_margin_pct": "n/v",                                    "eps": eps_2027, "source": "direct from IR"},
-                "2028E": {"revenue_bn": rev_2028, "ebitda_margin_pct": "n/v",                                    "eps": eps_2028, "source": "direct from IR"},
+                e1: {"revenue_bn": rev_e1, "ebitda_margin_pct": ir_output.get("ebitda_margin_pct", "n/v"), "eps": eps_e1, "source": "direct from IR"},
+                e2: {"revenue_bn": rev_e2, "ebitda_margin_pct": "n/v", "eps": eps_e2, "source": "direct from IR"},
+                e3: {"revenue_bn": rev_e3, "ebitda_margin_pct": "n/v", "eps": eps_e3, "source": "direct from IR"},
             },
             "key_assumptions": [
                 f"Direkt aus IR-Consensus-Dokument entnommen ({', '.join(ir_output.get('ir_sources', ['IR']))}).",
@@ -1360,32 +1379,33 @@ def consensus_estimates_from_ir(
         }
 
     # ── Priority 2: Management Guidance from IR ───────────────────────────────
-    guidance_2026 = ir_output.get("guidance_2026")
-    guidance_2027 = ir_output.get("guidance_2027")
+    guidance_e1 = ir_output.get(f"guidance_{y1}")
+    guidance_e2 = ir_output.get(f"guidance_{y2}")
     revenue_bn    = ir_output.get("revenue_bn")
     ebitda_margin = ir_output.get("ebitda_margin_pct")
 
-    if _is_found(guidance_2026) and _is_found(revenue_bn) and _is_found(ebitda_margin):
+    if _is_found(guidance_e1) and _is_found(revenue_bn) and _is_found(ebitda_margin):
         guidance_prompt = ChatPromptTemplate.from_messages([
             ("system", _DERIVE_SYSTEM),
             ("human",  _GUIDANCE_DERIVE_HUMAN),
         ])
         try:
             raw_json: str = (guidance_prompt | _get_llm() | StrOutputParser()).invoke({
-                "ticker":           ticker,
-                "sector":           sector or "unbekannt",
-                "guidance_2026":    guidance_2026,
-                "guidance_2027":    guidance_2027 if _is_found(guidance_2027) else "nicht verfügbar",
-                "revenue_bn":       revenue_bn,
-                "currency":         ir_output.get("revenue_currency", ""),
+                "ticker":            ticker,
+                "sector":            sector or "unbekannt",
+                "guidance_2026":     guidance_e1,
+                "guidance_2027":     guidance_e2 if _is_found(guidance_e2) else "nicht verfügbar",
+                "revenue_bn":        revenue_bn,
+                "currency":          ir_output.get("revenue_currency", ""),
                 "ebitda_margin_pct": ebitda_margin,
-                "adjusted_eps":     ir_output.get("adjusted_eps", "nicht verfügbar"),
-                "historical_data":  json.dumps(historical_data, ensure_ascii=False),
+                "adjusted_eps":      ir_output.get("adjusted_eps", "nicht verfügbar"),
+                "historical_data":   json.dumps(historical_data, ensure_ascii=False),
+                "year_e1": e1, "year_e2": e2, "year_e3": e3,
             })
             s = raw_json.find("{")
-            e = raw_json.rfind("}") + 1
-            if s != -1 and e > 0:
-                parsed = json.loads(raw_json[s:e])
+            e_pos = raw_json.rfind("}") + 1
+            if s != -1 and e_pos > 0:
+                parsed = json.loads(raw_json[s:e_pos])
                 ir_sources = ir_output.get("ir_sources", ["IR-Dokument"])
                 return {
                     "source":     "Management Guidance (IR-Dokument)",
@@ -1394,11 +1414,11 @@ def consensus_estimates_from_ir(
                     "key_assumptions": parsed.get("key_assumptions", [])
                         + [f"Guidance-Quelle: {', '.join(ir_sources)}"],
                     "methodology": (
-                        "2026E direkt aus Management Guidance abgeleitet. "
-                        "2027E/2028E via historischem CAGR extrapoliert."
+                        f"{e1} direkt aus Management Guidance abgeleitet. "
+                        f"{e2}/{e3} via historischem CAGR extrapoliert."
                     ),
                     "disclaimer": (
-                        f"Keine Bloomberg/FactSet Konsensdaten. Quelle: Management Guidance (IR-Dokument). "
+                        "Keine Bloomberg/FactSet Konsensdaten. Quelle: Management Guidance (IR-Dokument). "
                         "Kein Ersatz für professionelle Konsensdaten."
                     ),
                 }
@@ -1417,21 +1437,22 @@ def consensus_estimates_from_ir(
             "sector":          sector or "unbekannt",
             "ir_output":       json.dumps(ir_output,       ensure_ascii=False),
             "historical_data": json.dumps(historical_data, ensure_ascii=False),
+            "year_e1": e1, "year_e2": e2, "year_e3": e3,
         })
         s = raw_json.find("{")
-        e = raw_json.rfind("}") + 1
-        if s != -1 and e > 0:
-            result = json.loads(raw_json[s:e])
+        e_pos = raw_json.rfind("}") + 1
+        if s != -1 and e_pos > 0:
+            result = json.loads(raw_json[s:e_pos])
             result.setdefault("methodology", "LLM-Ableitung aus IR-Dokumenten und historischen Daten.")
             result["disclaimer"] = (
-                f"Keine Bloomberg/FactSet Konsensdaten. Quelle: LLM-Ableitung aus IR-Dokumenten. "
+                "Keine Bloomberg/FactSet Konsensdaten. Quelle: LLM-Ableitung aus IR-Dokumenten. "
                 "Kein Ersatz für professionelle Konsensdaten."
             )
             return result
     except Exception:
         pass
 
-    return _ESTIMATE_FALLBACK.copy()
+    return _make_estimate_fallback(base_year)
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────

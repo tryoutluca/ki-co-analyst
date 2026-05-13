@@ -17,7 +17,7 @@ from tools.valuation_engine import build_full_financials
 
 load_dotenv()
 
-llm    = ChatOpenAI(model="gpt-5.4")
+llm    = ChatOpenAI(model="gpt-5.4-mini")
 parser = JsonOutputParser(pydantic_object=FundamentalAgentOutput)
 
 _DEFAULT_MULTIPLES = ["P/E", "EV/EBITDA", "P/B", "ROE"]
@@ -78,11 +78,11 @@ KGV-VALIDIERUNG:
 
 EMPFEHLUNGS-LOGIK FÜR FUNDAMENTAL-AGENT (5-stufige Skala):
   Basiere Empfehlung primär auf DCF Fair Value vs. Kurs:
-    > +15%:          KAUFEN
-    +5% bis +15%:    ÜBERGEWICHTEN
+    > +10%:          KAUFEN
+    +5% bis +10%:    ÜBERGEWICHTEN
     -5% bis +5%:     HALTEN
-    -15% bis -5%:    UNTERGEWICHTEN
-    < -15%:          VERKAUFEN
+    -10% bis -5%:    UNTERGEWICHTEN
+    < -10%:          VERKAUFEN
 
   Adjustiere um ±1 Stufe wenn:
   - Bewertung mehrheitlich ELEVATED → eine Stufe schlechter
@@ -106,7 +106,24 @@ IR-DOKUMENTE PRIORISIERUNG:
 - Nutze revenue_guidance und ebitda_guidance aus ir_analysis für Ausblick-Abschnitt
 
 FORWARD-SCHÄTZUNGEN:
-- Verwende forward_estimates für die Konsens-Tabelle (2026E/2027E/2028E) in key_metrics
+
+SCHRITT 0 — Estimate-Jahre dynamisch bestimmen:
+  Ermittle das letzte abgeschlossene Geschäftsjahr (A) aus den gelieferten Daten:
+  → Prüfe IR-Dokumente und yfinance: welches ist das aktuellste Jahr mit vollständigen Istzahlen?
+  → Berücksichtige abweichende Geschäftsjahre:
+      Standard (Dezember-Abschluss): 2025A → 2026E, 2027E, 2028E
+      März-Abschluss (z.B. Take-Two): FY2026A → FY2027E, FY2028E, FY2029E
+      Juni-Abschluss:                 FY2026A → FY2027E, FY2028E, FY2029E
+  → Das aktuellste A-Jahr ist das Ausgangsjahr für alle Wachstumsberechnungen
+  → Berechne immer genau 3 Forward-Jahre ab dem letzten A-Jahr
+  → Dokumentiere im Feld "estimate_base_year":
+      z.B. "2025A" oder "FY2026A (Abschluss März 2026)"
+  WICHTIG: Diese Bestimmung basiert ausschliesslich auf den gelieferten Daten.
+  Falls unklar: markiere als "Letztes verfügbares Jahr — Vollständigkeit nicht bestätigt"
+
+- Verwende forward_estimates für die Konsens-Tabelle (E+1/E+2/E+3) in key_metrics,
+  wobei E+1/E+2/E+3 die dynamisch bestimmten Forward-Jahre sind
+- Alle Jahresreferenzen in key_metrics und investment_case verwenden diese dynamischen Jahre
 - Dokumentiere das Konfidenz-Level der Schätzungen (forward_estimates.confidence)
 - Nehme den Disclaimer von forward_estimates.disclaimer in die sources-Liste auf
 
@@ -134,7 +151,7 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
 
     sector = stock_info.get("sector", "N/A")
 
-    print(f"      Berechne Konsensschätzungen 2026/27/28...")
+    print(f"      Berechne Konsensschätzungen (dynamische Vorwärtsjahre)...")
     forward_estimates = consensus_estimates_from_ir(
         ticker,
         ir_analysis,

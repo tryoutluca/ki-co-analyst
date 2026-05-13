@@ -17,7 +17,7 @@ from tools.schemas import NewsAgentOutput
 
 load_dotenv()
 
-llm = ChatOpenAI(model="gpt-5.4")
+llm = ChatOpenAI(model="gpt-5.4-mini")
 parser = JsonOutputParser(pydantic_object=NewsAgentOutput)
 
 NEWS_PROMPT = """Du bist ein Senior Buy-Side Analyst. Trenne Signal von Rauschen — strukturelle \
@@ -142,9 +142,16 @@ def run_news_agent(ticker: str, fundamental_summary: str = "") -> NewsAgentOutpu
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_news = ex.submit(get_recent_news.invoke, ticker)
         fut_info = ex.submit(get_stock_info.invoke, ticker)
-
-    news_yfinance = fut_news.result()
-    stock_info    = fut_info.result()
+        try:
+            news_yfinance = fut_news.result(timeout=15)
+        except Exception as e:
+            print(f"      [Timeout/Fehler] get_recent_news: {e}")
+            news_yfinance = []
+        try:
+            stock_info = fut_info.result(timeout=15)
+        except Exception as e:
+            print(f"      [Timeout/Fehler] get_stock_info: {e}")
+            stock_info = {}
 
     currency     = stock_info.get("currency", "USD")
     sector       = stock_info.get("sector", "N/A")
@@ -156,10 +163,21 @@ def run_news_agent(ticker: str, fundamental_summary: str = "") -> NewsAgentOutpu
         fut_macro      = ex.submit(get_macro_indicators.invoke, currency)
         fut_industry   = ex.submit(get_industry_indicators.invoke, {"sector": sector, "industry": industry})
         fut_milestones = ex.submit(get_strategic_milestones.invoke, {"ticker": ticker, "company_name": company_name})
-
-    macro_data    = fut_macro.result()
-    industry_data = fut_industry.result()
-    milestones    = fut_milestones.result()
+        try:
+            macro_data = fut_macro.result(timeout=15)
+        except Exception as e:
+            print(f"      [Timeout/Fehler] get_macro_indicators: {e}")
+            macro_data = {}
+        try:
+            industry_data = fut_industry.result(timeout=30)
+        except Exception as e:
+            print(f"      [Timeout/Fehler] get_industry_indicators: {e}")
+            industry_data = {}
+        try:
+            milestones = fut_milestones.result(timeout=30)
+        except Exception as e:
+            print(f"      [Timeout/Fehler] get_strategic_milestones: {e}")
+            milestones = []
 
     # Unternehmensnews als Text aufbereiten
     news_text = "=== YAHOO FINANCE / FINNHUB NEWS ===\n"

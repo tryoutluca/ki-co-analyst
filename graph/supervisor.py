@@ -559,7 +559,10 @@ UNTERNEHMENSBESCHREIBUNG
 {'─'*60}
 INVESTMENT CASE
 {'─'*60}
-{chr(10).join(f'• {p}' for p in result.get('investment_case', []))}
+{chr(10).join(
+    f"• {p['point']} [{p.get('source','')}]" if isinstance(p, dict) else f"• {p}"
+    for p in result.get('investment_case', [])
+)}
 
 {'─'*60}
 SZENARIEN

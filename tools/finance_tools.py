@@ -781,7 +781,7 @@ def get_macro_indicators(currency: str) -> dict:
 @tool
 def get_industry_indicators(sector: str, industry: str) -> dict:
     """Determines sector/industry-specific indicator topics via LLM, then fetches relevant news per topic."""
-    _llm = ChatOpenAI(model="gpt-5.4", temperature=0)
+    _llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
 
     # Step 1: LLM determines 4-6 relevant indicator topics
     topics: list = []
@@ -881,7 +881,7 @@ def discover_peers_via_tavily(
 
     # Schritt 2: LLM extrahiert Ticker-Symbole
     try:
-        llm = ChatOpenAI(model="gpt-5.4", temperature=0)
+        llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
         prompt = ChatPromptTemplate.from_messages([
             ("system",
              "Du bist ein Finanzanalyst. Extrahiere aus den "
@@ -1000,7 +1000,7 @@ def get_peer_financials(ticker: str) -> dict:
 
     Returns dict kompatibel mit PeerComparisonTable.model_dump()
     """
-    _llm = ChatOpenAI(model="gpt-5.4", temperature=0)
+    _llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
 
     SECTOR_MULTIPLES = {
         "Financial Services":   ["P/B", "ROE", "CET1-Ratio", "Net Interest Margin", "Cost-Income-Ratio"],
@@ -1127,9 +1127,15 @@ def get_peer_financials(ticker: str) -> dict:
         if not nums:
             return "n/v"
         try:
-            med = statistics.median(nums)
-            clean = [v for v in nums if abs(v) <= abs(med) * 3 + 1]
-            return round(sum(clean) / len(clean), 2) if clean else "n/v"
+            if len(nums) >= 4:
+                q1 = statistics.quantiles(nums, n=4)[0]
+                q3 = statistics.quantiles(nums, n=4)[2]
+                iqr = q3 - q1
+                lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                clean = [v for v in nums if lo <= v <= hi]
+            else:
+                clean = nums
+            return round(statistics.mean(clean), 2) if clean else "n/v"
         except Exception:
             return "n/v"
 

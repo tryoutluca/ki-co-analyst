@@ -340,7 +340,7 @@ class SupervisorOutput(BaseModel):
     company_description: str = Field(
         description="Max. 3 precise sentences: business model, market position, key revenue drivers"
     )
-    investment_case: list[str] = Field(
+    investment_case: list[FundamentalStrength] = Field(
         description=(
             "3-5 bullet points. Each must contain: concrete number + peer or historical "
             "comparison + source. E.g. 'EV/EBITDA 8x vs peer avg 10x and 5y avg 12x "
