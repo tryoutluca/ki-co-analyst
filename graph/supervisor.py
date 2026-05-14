@@ -8,9 +8,6 @@ import os
 import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from agents.fundamental_agent import run_fundamental_agent
-from agents.news_agent import run_news_agent
-from agents.risk_agent import run_risk_agent
 from tools.schemas import SupervisorOutput
 
 load_dotenv()
@@ -163,8 +160,8 @@ def _build_quality_checks(fundamental_output, news_output, risk_output) -> list[
         )
         checks.append({
             "check": "Szenario-Wahrscheinlichkeiten summieren auf 100%",
-            "result": "bestanden" if total == 100 else "Warnung",
-            "comment": f"Summe={total}%" if total != 100 else "OK",
+            "result": "bestanden" if abs(total - 100) < 0.5 else "Warnung",
+            "comment": f"Summe={total}%" if abs(total - 100) >= 0.5 else "OK",
         })
     else:
         checks.append({
@@ -199,12 +196,18 @@ def synthesize_memo(
     fundamental_output,
     news_output,
     risk_output,
+    quality_checks=None,
+    consistency_score=None,
 ) -> dict:
     """
     Führt nur die Supervisor-Synthese durch — Agenten-Outputs bereits vorhanden.
-    Wird von app.py genutzt damit die UI jeden Schritt live anzeigen kann.
+    Wird von app.py und vom LangGraph supervisor_node genutzt.
+
+    quality_checks: falls None, werden sie intern berechnet (Rückwärtskompatibilität)
+    consistency_score: falls übergeben, wird er als Kontext an den LLM weitergegeben
     """
-    quality_checks = _build_quality_checks(fundamental_output, news_output, risk_output)
+    if quality_checks is None:
+        quality_checks = _build_quality_checks(fundamental_output, news_output, risk_output)
 
     macro_indicators = _extract(news_output, "macro_indicators", [])
     industry_factors = _extract(news_output, "industry_factors", [])
@@ -247,6 +250,8 @@ def synthesize_memo(
     quality_context = "\n### QUALITÄTSPRÜFUNG ERGEBNISSE:\n"
     for c in quality_checks:
         quality_context += f"  [{c['result']}] {c['check']}: {c['comment']}\n"
+    if consistency_score is not None:
+        quality_context += f"  [info] Vorab-Konsistenz-Score (deterministisch): {consistency_score}/10\n"
 
     # ── Neue Felder: Full Financials + Peer Comparison ────────────────────────
     full_financials  = _extract(fundamental_output, "_full_financials",  [])
@@ -340,195 +345,9 @@ Gib das Ergebnis als JSON zurück."""),
 
 
 def run_supervisor(ticker: str) -> dict:
-    """
-    Orchestriert alle drei Agenten und synthetisiert das finale Investment Memo.
-
-    Ablauf:
-    [1/5] Fundamental-Agent
-    [2/5] News/Sentiment-Agent
-    [3/5] Risk/Advocatus-Diaboli-Agent
-    [4/5] Qualitätsprüfung
-    [5/5] Supervisor Synthese
-    """
-
-    print(f"\n{'='*60}")
-    print(f"KI-Co-Portfolio-Manager | Analyse: {ticker}")
-    print(f"{'='*60}")
-
-    # ── [1/5] Fundamental-Agent ──────────────────────────────
-    print("\n[1/5] Fundamental-Agent läuft...")
-    fundamental_output = run_fundamental_agent(ticker)
-    print(f"      [OK] Empfehlung: {_extract(fundamental_output, 'recommendation')} | "
-          f"Fair Value: {_extract(fundamental_output, 'fair_value_estimate')}")
-
-    # ── [2/5] News-Agent ─────────────────────────────────────
-    print("\n[2/5] News/Sentiment-Agent läuft...")
-    fundamental_context = (
-        f"Empfehlung: {_extract(fundamental_output, 'recommendation')}, "
-        f"Fair Value: {_extract(fundamental_output, 'fair_value_estimate')}, "
-        f"Bewertung: {_extract(fundamental_output, 'valuation_assessment')}"
-    )
-    news_output = run_news_agent(ticker, fundamental_context)
-    print(f"      [OK] Sentiment: {_extract(news_output, 'overall_sentiment_score')}/10 | "
-          f"Outlook: {_extract(news_output, 'short_term_outlook')}")
-
-    # ── [3/5] Risk-Agent ─────────────────────────────────────
-    print("\n[3/5] Risk/Advocatus-Diaboli-Agent läuft...")
-    risk_output = run_risk_agent(ticker, fundamental_output, news_output)
-    scenarios = _extract(risk_output, "scenarios", [])
-    bear = next((s for s in scenarios if (s.get("name") if isinstance(s, dict) else s.name) == "Bear Case"), None)
-    bear_price = (bear.get("price_target") if isinstance(bear, dict) else bear.price_target) if bear else "N/A"
-    print(f"      [OK] Bear-Case Kurs: {bear_price}")
-
-    # ── [4/5] Qualitätsprüfung ───────────────────────────────
-    print("\n[4/5] Qualitätsprüfung läuft...")
-    quality_checks = _build_quality_checks(fundamental_output, news_output, risk_output)
-    warnings = [c for c in quality_checks if c["result"] == "Warnung"]
-    failures = [c for c in quality_checks if c["result"] == "fehlgeschlagen"]
-    print(f"      [OK] {len(quality_checks)} Checks: "
-          f"{len(quality_checks)-len(warnings)-len(failures)} bestanden, "
-          f"{len(warnings)} Warnungen, {len(failures)} fehlgeschlagen")
-
-    # ── [5/5] Supervisor Synthese ────────────────────────────
-    print("\n[5/5] Supervisor synthetisiert finales Investment Memo...")
-
-    macro_indicators = _extract(news_output, "macro_indicators", [])
-    industry_factors = _extract(news_output, "industry_factors", [])
-    macro_risks_ignored = _extract(risk_output, "macro_risks_ignored", [])
-    conviction_killers = _extract(risk_output, "conviction_killers", [])
-
-    macro_context = ""
-    if macro_indicators:
-        macro_context = "\n### MAKRO-INDIKATOREN (News-Agent):\n"
-        for m in macro_indicators:
-            if isinstance(m, dict):
-                macro_context += f"  • [{m.get('impact_on_company')}] {m.get('indicator')}: {m.get('mechanism')}\n"
-            else:
-                macro_context += f"  • [{m.impact_on_company}] {m.indicator}: {m.mechanism}\n"
-
-    industry_context = ""
-    if industry_factors:
-        industry_context = "\n### INDUSTRIE-FAKTOREN (News-Agent):\n"
-        for f in industry_factors:
-            if isinstance(f, dict):
-                industry_context += f"  • [{f.get('direction')}] {f.get('topic')}: {f.get('mechanism')}\n"
-            else:
-                industry_context += f"  • [{f.direction}] {f.topic}: {f.mechanism}\n"
-
-    risk_context = ""
-    if macro_risks_ignored:
-        risk_context = "\n### VOM FUNDAMENTAL-AGENT IGNORIERTE MAKRO-RISIKEN:\n"
-        for r in macro_risks_ignored:
-            risk_context += f"  • {r}\n"
-
-    killer_context = ""
-    if conviction_killers:
-        killer_context = "\n### CONVICTION KILLERS (Risk-Agent):\n"
-        for k in conviction_killers:
-            if isinstance(k, dict):
-                killer_context += f"  [!]{k.get('description')} → Monitor: {k.get('monitoring_indicator')}\n"
-            else:
-                killer_context += f"  [!]{k.description} → Monitor: {k.monitoring_indicator}\n"
-
-    quality_context = "\n### QUALITÄTSPRÜFUNG ERGEBNISSE:\n"
-    for c in quality_checks:
-        quality_context += f"  [{c['result']}] {c['check']}: {c['comment']}\n"
-
-    # ── Neue Felder: Full Financials + Peer Comparison ────────────────────────
-    full_financials = _extract(fundamental_output, "_full_financials", [])
-    peer_comparison = _extract(fundamental_output, "_peer_comparison", {})
-
-    fin_context = ""
-    if full_financials:
-        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (6 Jahre, direkt übernehmen):\n"
-        fin_context += json.dumps(full_financials, ensure_ascii=False) + "\n"
-
-    peer_context = ""
-    if peer_comparison:
-        peer_context = "\n### PEER-VERGLEICH (direkt übernehmen):\n"
-        peer_context += json.dumps(peer_comparison, ensure_ascii=False) + "\n"
-        vs_avg = peer_comparison.get("subject_vs_avg", {})
-        if vs_avg:
-            peer_context += "Subject vs. Sektor-Ø: " + ", ".join(
-                f"{k}: {v}" for k, v in vs_avg.items()
-            ) + "\n"
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SUPERVISOR_PROMPT),
-        ("human", """Synthetisiere das finale Investment Memo für {ticker} ({company}).
-
-## FUNDAMENTAL-ANALYSE (Gewicht: 80% / bei Sentiment ≤ 3/10: 60%):
-{fundamental_json}
-
-## NEWS/SENTIMENT-ANALYSE (Gewicht: 10% / bei Sentiment ≤ 3/10: 20%):
-{news_json}
-
-## RISK/ADVOCATUS-DIABOLI-ANALYSE (Gewicht: 10% / bei Sentiment ≤ 3/10: 20%):
-{risk_json}
-
-{macro_context}
-{industry_context}
-{risk_context}
-{killer_context}
-{quality_context}
-{fin_context}
-{peer_context}
-
-AUFGABEN:
-1. Übernimm die quality_checks aus dem Qualitätsprüfungs-Kontext oben (ergänze ggf.)
-2. Baue die valuation_table aus den key_metrics der Fundamentalanalyse
-3. Baue consensus_estimates: 2 Jahre Actual aus key_metrics + 3 Jahre Estimate aus consensus_estimates/Finanzkennzahlen
-4. Übernimm scenarios aus dem Risk-Agent (Bear/Base/Bull, Summe=100%)
-5. Baue macro_ampel mit genau 4 Einträgen: Makro, Branche, Unternehmen, Konkurrenz
-6. Übernimm conviction_killers aus dem Risk-Agent
-7. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
-8. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
-9. Übernimm full_financials EXAKT aus dem Kontext oben (keine Änderungen)
-10. Übernimm peer_comparison EXAKT aus dem Kontext oben (keine Änderungen)
-11. Erwähne in final_reasoning ob Peer-Bewertung Empfehlung stützt oder widerspricht
-
-Datum heute: {today}
-Gib das Ergebnis als JSON zurück."""),
-    ])
-
-    chain = prompt | llm | parser
-
-    result = chain.invoke({
-        "ticker": ticker,
-        "company": _extract(fundamental_output, "company", ticker),
-        "fundamental_json": json.dumps(
-            {k: v for k, v in (fundamental_output.items() if isinstance(fundamental_output, dict)
-                               else vars(fundamental_output).items())
-             if not k.startswith("_")},
-            indent=2, ensure_ascii=False
-        ),
-        "news_json": json.dumps(news_output, indent=2, ensure_ascii=False),
-        "risk_json": json.dumps(risk_output, indent=2, ensure_ascii=False),
-        "macro_context": macro_context,
-        "industry_context": industry_context,
-        "risk_context": risk_context,
-        "killer_context": killer_context,
-        "quality_context": quality_context,
-        "fin_context": fin_context,
-        "peer_context": peer_context,
-        "today": date.today().isoformat(),
-        "format_instructions": parser.get_format_instructions(),
-    })
-
-    # Neue Felder direkt übernehmen falls LLM sie weglässt
-    if isinstance(result, dict):
-        if not result.get("full_financials") and full_financials:
-            result["full_financials"] = full_financials
-        if not result.get("peer_comparison") and peer_comparison:
-            result["peer_comparison"] = peer_comparison
-
-    print(f"\n{'='*60}")
-    print(f"[OK] FINALE EMPFEHLUNG: {result.get('final_recommendation')} | "
-          f"Conviction: {result.get('conviction_level')} | "
-          f"Price Target: {result.get('price_target')}")
-    print(f"{'='*60}\n")
-
-    return result
+    """Wrapper für Rückwärtskompatibilität — delegiert an LangGraph."""
+    from graph.graph import run_analysis
+    return run_analysis(ticker)
 
 
 def format_investment_memo(result: dict) -> str:

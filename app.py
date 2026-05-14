@@ -393,10 +393,10 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
 # ── Pipeline Import (mit Fehlerbehandlung) ────────────────────────────────────
 
 def run_analysis(ticker: str) -> dict:
-    """Führt die Pipeline aus und gibt das Ergebnis zurück."""
+    """Führt die Pipeline via LangGraph aus und gibt das Ergebnis zurück."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from graph.supervisor import run_supervisor
-    return run_supervisor(ticker)
+    from graph.graph import run_analysis as _run
+    return _run(ticker)
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -624,6 +624,24 @@ if run_button and selected_ticker:
             st.write(f"   ✅ Finale Empfehlung: **{final_rec}** | Conviction: {conviction} | Kursziel: {pt}")
 
             status.update(label=f"✓ Analyse abgeschlossen — {result.get('company', ticker)}", state="complete", expanded=False)
+
+        # Routing-Log anzeigen falls vorhanden (LangGraph-Modus)
+        routing_log = result.get("routing_log", [])
+        if routing_log:
+            with st.expander("🔀 Routing-Log (LangGraph)"):
+                for entry in routing_log:
+                    icon = "✅" if "✅" in entry else ("⚠️" if "retry" in entry.lower() else "ℹ️")
+                    st.markdown(
+                        f'<div style="font-family:monospace; font-size:0.8rem; '
+                        f'padding:0.2rem 0;">{icon} {entry}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        retries = result.get("fundamental_retry_count", 0)
+        if retries > 0:
+            st.warning(
+                f"⚠️ Fundamental-Agent wurde {retries}× wiederholt (Self-Correction)"
+            )
 
         st.session_state.result = result
         st.rerun()
