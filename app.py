@@ -18,13 +18,6 @@ import os
 
 from tools.finance_tools import search_ticker
 
-@st.cache_resource
-def ensure_docx_installed():
-    """Installiert docx Library beim ersten Start"""
-    if not os.path.exists("node_modules/docx"):
-        subprocess.run(["npm", "install", "docx"], check=False)
-    return True
-
 # Am Anfang von app.py aufrufen:
 ensure_docx_installed()
 
