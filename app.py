@@ -13,8 +13,20 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+import subprocess
+import os
 
 from tools.finance_tools import search_ticker
+
+@st.cache_resource
+def ensure_docx_installed():
+    """Installiert docx Library beim ersten Start"""
+    if not os.path.exists("node_modules/docx"):
+        subprocess.run(["npm", "install", "docx"], check=False)
+    return True
+
+# Am Anfang von app.py aufrufen:
+ensure_docx_installed()
 
 # ── Page Config (muss als erstes Streamlit-Call stehen) ──────────────────────
 st.set_page_config(
@@ -1185,7 +1197,7 @@ if st.session_state.result:
             st.download_button(
                 label="⬇️ Word herunterladen",
                 data=docx_bytes,
-                file_name=f"investment_memo_{ticker}_{date}.docx",
+                file_name=f"Investment Memo_{ticker}_{date}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True,
             )

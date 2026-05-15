@@ -1,812 +1,901 @@
 /**
- * export_memo.js
- * Reads output_memo.json and generates a professional two-page Investment Memo (.docx)
+ * export_memo.js — Professioneller Word-Export für den KI-Co-Analysten
+ * Berner Fachhochschule | Bachelor Thesis 2025/26 | Luca Lüdi
  *
- * Usage: node export_memo.js
- * Requires: npm install docx
+ * Usage: node export_memo.js <json_file> <output_file>
+ * Oder:  node export_memo.js (liest von stdin)
  */
 
 const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-  AlignmentType, BorderStyle, WidthType, ShadingType,
-  VerticalAlign, PageNumber, Header, Footer, LevelFormat, PageBreak,
-} = require("docx");
-const fs = require("fs");
+  AlignmentType, BorderStyle, WidthType, ShadingType, HeadingLevel,
+  VerticalAlign, PageNumber, PageBreak, LevelFormat, Header, Footer,
+} = require('docx');
+const fs = require('fs');
 
-// ── Colour palette ────────────────────────────────────────────────────────────
+// ── Farben ────────────────────────────────────────────────────
 const C = {
-  primary:     "1F3864",
-  secondary:   "2E75B6",
-  accent:      "C00000",   // VERKAUFEN / Bear
-  accentBuy:   "375623",   // KAUFEN / Bull
-  accentHold:  "7F6000",   // HALTEN / neutral
-  lightBlue:   "D6E4F0",
-  lightGray:   "F2F2F2",
-  lightRed:    "FFDFD6",
-  lightGreen:  "DFF0D8",
-  lightYellow: "FFF8D6",
-  warningBg:   "FFF3CD",
-  warningBdr:  "FF8C00",
-  diaboliGray: "E8E8E8",
-  white:       "FFFFFF",
-  black:       "000000",
-  darkGray:    "404040",
-  midGray:     "808080",
+  DARK_BLUE:  "1F3864",
+  MID_BLUE:   "2E75B6",
+  GOLD:       "C9A84C",
+  LIGHT_GRAY: "F5F5F5",
+  WHITE:      "FFFFFF",
+  GREEN_BG:   "E8F5E9",
+  YELLOW_BG:  "FFF8E1",
+  RED_BG:     "FFEBEE",
+  BLUE_BG:    "E3F2FD",
+  GREEN_TXT:  "2E7D32",
+  RED_TXT:    "C62828",
+  BLUE_TXT:   "1565C0",
+  GOLD_TXT:   "B8860B",
+  GRAY_TXT:   "757575",
+  HEADER_BG:  "0D2137",
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Hilfsfunktionen ───────────────────────────────────────────
 
-function recColor(rec) {
-  if (rec === "KAUFEN")    return C.accentBuy;
-  if (rec === "VERKAUFEN") return C.accent;
-  return C.accentHold;
+function txt(text, opts = {}) {
+  return new TextRun({
+    text: String(text ?? "n/v"),
+    font: "Arial",
+    size: opts.size || 18,
+    bold: opts.bold || false,
+    italics: opts.italic || false,
+    color: opts.color || "000000",
+  });
+}
+
+function para(children, opts = {}) {
+  return new Paragraph({
+    spacing: { before: opts.before || 0, after: opts.after || 80 },
+    alignment: opts.align || AlignmentType.LEFT,
+    children: Array.isArray(children) ? children : [children],
+    ...(opts.numbering ? { numbering: opts.numbering } : {}),
+    ...(opts.border ? { border: opts.border } : {}),
+  });
+}
+
+const borderAll = { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" };
+const borders   = { top: borderAll, bottom: borderAll, left: borderAll, right: borderAll };
+const noBorders = {
+  top:    { style: BorderStyle.NONE },
+  bottom: { style: BorderStyle.NONE },
+  left:   { style: BorderStyle.NONE },
+  right:  { style: BorderStyle.NONE },
+};
+
+function cell(children, opts = {}) {
+  return new TableCell({
+    borders: opts.noBorder ? noBorders : borders,
+    width: { size: opts.width || 1000, type: WidthType.DXA },
+    shading: opts.bg ? { fill: opts.bg, type: ShadingType.CLEAR } : undefined,
+    verticalAlign: VerticalAlign.CENTER,
+    margins: { top: 80, bottom: 80, left: 120, right: 120 },
+    columnSpan: opts.span || 1,
+    children: Array.isArray(children) ? children : [children],
+  });
+}
+
+function sectionHeader(title) {
+  return new Paragraph({
+    spacing: { before: 280, after: 140 },
+    border: {
+      bottom: { style: BorderStyle.SINGLE, size: 6, color: C.GOLD, space: 2 }
+    },
+    children: [txt(title, { size: 24, bold: true, color: C.DARK_BLUE })],
+  });
+}
+
+function ratingColor(rating) {
+  const r = (rating || "").toUpperCase();
+  if (r === "KAUFEN" || r === "ÜBERGEWICHTEN") return C.GREEN_TXT;
+  if (r === "VERKAUFEN" || r === "UNTERGEWICHTEN") return C.RED_TXT;
+  return C.GOLD_TXT;
+}
+
+function assessColor(assess) {
+  if (assess === "DISCOUNT") return C.BLUE_TXT;
+  if (assess === "ELEVATED") return C.RED_TXT;
+  return C.GREEN_TXT;
+}
+
+function assessBg(assess) {
+  if (assess === "DISCOUNT") return C.BLUE_BG;
+  if (assess === "ELEVATED") return C.RED_BG;
+  return C.GREEN_BG;
+}
+
+function assessIcon(assess) {
+  if (assess === "DISCOUNT") return "🔵 ";
+  if (assess === "ELEVATED") return "🔴 ";
+  return "🟢 ";
 }
 
 function signalColor(signal) {
-  if (signal === "positiv") return C.accentBuy;
-  if (signal === "negativ") return C.accent;
-  return C.accentHold;
+  const s = (signal || "").toUpperCase();
+  if (s === "POSITIV" || s === "TAILWIND") return C.GREEN_TXT;
+  if (s === "NEGATIV" || s === "HEADWIND") return C.RED_TXT;
+  return C.GOLD_TXT;
 }
 
-function signalEmoji(signal) {
-  if (signal === "positiv") return "🟢";
-  if (signal === "negativ") return "🔴";
-  return "🟡";
+function signalIcon(signal) {
+  const s = (signal || "").toUpperCase();
+  if (s === "POSITIV" || s === "TAILWIND") return "🟢 ";
+  if (s === "NEGATIV" || s === "HEADWIND") return "🔴 ";
+  return "🟡 ";
 }
 
-function assessmentColor(a) {
-  if (a === "DISCOUNT")  return C.accentBuy;
-  if (a === "ELEVATED")  return C.accent;
-  return C.midGray;
+function scenarioBorder(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("bull")) return { color: "43A047", bg: C.GREEN_BG };
+  if (n.includes("bear")) return { color: "E53935", bg: C.RED_BG  };
+  return { color: "F9A825", bg: C.YELLOW_BG };
 }
 
-function convictionLabel(level) {
-  const map = { "hoch": "★★★ HOCH", "mittel": "★★☆ MITTEL", "niedrig": "★☆☆ NIEDRIG" };
-  return map[level] || level;
+function scenarioIcon(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("bull")) return "🐂";
+  if (n.includes("bear")) return "🐻";
+  return "⚖️";
 }
 
-function border1(color = "CCCCCC") {
-  const b = { style: BorderStyle.SINGLE, size: 1, color };
-  return { top: b, bottom: b, left: b, right: b };
+function priceColor(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("bull")) return C.GREEN_TXT;
+  if (n.includes("bear")) return C.RED_TXT;
+  return C.GOLD_TXT;
 }
 
-function cellMargins(v = 100, h = 120) {
-  return { top: v, bottom: v, left: h, right: h };
+function safeVal(v) {
+  if (v === null || v === undefined || v === "" || v === "n/v") return "n/v";
+  return String(v);
 }
 
-function sectionHeader(text) {
-  return new Paragraph({
-    spacing: { before: 240, after: 80 },
-    border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: C.secondary, space: 1 } },
-    children: [new TextRun({ text: text.toUpperCase(), bold: true, size: 21, color: C.secondary, font: "Arial" })],
-  });
-}
+// ── Haupt-Export-Funktion ─────────────────────────────────────
 
-function bodyText(text, opts = {}) {
-  return new Paragraph({
-    spacing: { before: 40, after: 40 },
-    children: [new TextRun({ text: text || "", size: 18, font: "Arial", color: C.darkGray, ...opts })],
-  });
-}
+function buildMemo(DATA) {
+  const ticker  = safeVal(DATA.ticker);
+  const company = safeVal(DATA.company || DATA.company_name || ticker);
+  const sector  = safeVal(DATA.sector  || DATA.industry || "");
+  const date    = safeVal(DATA.date    || new Date().toLocaleDateString("de-CH"));
+  const rating  = safeVal(DATA.final_recommendation || DATA.recommendation || "HALTEN");
+  const prevRating = safeVal(DATA.prev_rating || "");
+  const pt      = safeVal(DATA.price_target || "n/v");
+  const price   = safeVal(DATA.current_price || "n/v");
+  const upside  = safeVal(DATA.upside_downside_pct
+    ? (DATA.upside_downside_pct > 0 ? "+" : "") + DATA.upside_downside_pct + "%"
+    : DATA.upside || "n/v");
+  const ccy     = safeVal(DATA.currency || "CHF");
+  const conviction = safeVal(DATA.conviction_level || "n/v");
+  const mktCap  = safeVal(DATA.market_cap || "n/v");
+  const score   = safeVal(DATA.data_consistency_score || "n/v");
+  const desc    = safeVal(DATA.company_description || "");
+  const finalReasoning = safeVal(DATA.final_reasoning || "");
 
-function italicBox(text) {
-  return new Paragraph({
-    spacing: { before: 60, after: 60 },
-    indent: { left: 360, right: 360 },
-    shading: { fill: C.diaboliGray, type: ShadingType.CLEAR },
-    children: [new TextRun({ text: text || "", size: 18, font: "Arial", italics: true, color: C.darkGray })],
-  });
-}
+  const children = [];
 
-function bullet(parts) {
-  // parts: array of { text, bold?, color? }
-  const runs = parts.map(p => new TextRun({
-    text: p.text, bold: !!p.bold, color: p.color || C.darkGray, size: 18, font: "Arial",
-  }));
-  return new Paragraph({
-    numbering: { reference: "bullets", level: 0 },
-    spacing: { before: 30, after: 30 },
-    children: runs,
-  });
-}
-
-function checkboxItem(text) {
-  return new Paragraph({
-    spacing: { before: 30, after: 30 },
-    children: [
-      new TextRun({ text: "□ ", size: 18, font: "Arial", color: C.secondary }),
-      new TextRun({ text: text || "", size: 18, font: "Arial", color: C.darkGray }),
-    ],
-  });
-}
-
-function emptyLine(size = 80) {
-  return new Paragraph({ spacing: { before: size, after: 0 }, children: [] });
-}
-
-function hCell(text, width, shading = C.primary, textColor = C.white) {
-  return new TableCell({
-    borders: border1(),
-    width: { size: width, type: WidthType.DXA },
-    shading: { fill: shading, type: ShadingType.CLEAR },
-    margins: cellMargins(),
-    children: [new Paragraph({
-      alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text, bold: true, color: textColor, size: 17, font: "Arial" })],
-    })],
-  });
-}
-
-function vCell(text, width, opts = {}) {
-  const { color = C.darkGray, bold = false, align = AlignmentType.CENTER, bg = C.white } = opts;
-  return new TableCell({
-    borders: border1(),
-    width: { size: width, type: WidthType.DXA },
-    shading: { fill: bg, type: ShadingType.CLEAR },
-    margins: cellMargins(80, 100),
-    verticalAlign: VerticalAlign.CENTER,
-    children: [new Paragraph({
-      alignment: align,
-      children: [new TextRun({ text: String(text ?? ""), color, bold, size: 18, font: "Arial" })],
-    })],
-  });
-}
-
-// ── Section 1: Header KPI table ───────────────────────────────────────────────
-
-function buildHeaderTable(data) {
-  const rc = recColor(data.final_recommendation);
-  const upside = data.upside_downside_pct;
-  const upsideStr = upside >= 0 ? `+${upside}%` : `${upside}%`;
-  const upsideColor = upside >= 0 ? C.accentBuy : C.accent;
-  const currency = data.currency || "";
-  const W = [1440, 1620, 1620, 1620, 1620, 1440]; // 6 cols, total 9360
-
-  return new Table({
+  // ══════════════════════════════════════════════════════════
+  // HEADER BLOCK
+  // ══════════════════════════════════════════════════════════
+  children.push(new Table({
     width: { size: 9360, type: WidthType.DXA },
-    columnWidths: W,
-    rows: [
-      new TableRow({ children: [
-        hCell("EMPFEHLUNG",   W[0]),
-        hCell("CONVICTION",   W[1]),
-        hCell("PRICE TARGET", W[2]),
-        hCell("AKT. KURS",    W[3]),
-        hCell("UPSIDE/DOWN.", W[4]),
-        hCell("WÄHRUNG",      W[5]),
-      ]}),
-      new TableRow({ children: [
-        vCell(data.final_recommendation || "N/A", W[0], { color: rc, bold: true }),
-        vCell(convictionLabel(data.conviction_level), W[1], { color: C.primary, bold: true }),
-        vCell(`${currency} ${data.price_target}`, W[2], { color: C.primary, bold: true }),
-        vCell(`${currency} ${data.current_price}`, W[3]),
-        vCell(upsideStr, W[4], { color: upsideColor, bold: true }),
-        vCell(currency, W[5], { color: C.darkGray }),
-      ]}),
-    ],
-  });
-}
-
-// ── Section 2: Valuation table ────────────────────────────────────────────────
-
-function buildValuationTable(rows) {
-  if (!rows || !rows.length) return bodyText("Keine Bewertungsdaten verfügbar.");
-  const W = [1800, 1620, 1980, 1980, 1380, 1600];
-
-  return new Table({
-    width: { size: 9360, type: WidthType.DXA },
-    columnWidths: W,
-    rows: [
-      new TableRow({ children: [
-        hCell("Kennzahl",    W[0], C.secondary),
-        hCell("Aktuell",     W[1], C.secondary),
-        hCell("Peer Ø",      W[2], C.secondary),
-        hCell("Hist. Ø",     W[3], C.secondary),
-        hCell("Einschätz.",  W[4], C.secondary),
-        hCell("Quelle",      W[5], C.secondary),
-      ]}),
-      ...rows.map((r, i) => new TableRow({ children: [
-        vCell(r.metric,             W[0], { align: AlignmentType.LEFT,   bg: i % 2 ? C.white : C.lightGray }),
-        vCell(r.current_value,      W[1], { bg: i % 2 ? C.white : C.lightGray }),
-        vCell(r.peer_average,       W[2], { bg: i % 2 ? C.white : C.lightGray }),
-        vCell(r.historical_average, W[3], { bg: i % 2 ? C.white : C.lightGray }),
-        vCell(r.assessment,         W[4], { color: assessmentColor(r.assessment), bold: true, bg: i % 2 ? C.white : C.lightGray }),
-        vCell(r.source,             W[5], { color: C.midGray, bg: i % 2 ? C.white : C.lightGray }),
-      ]})),
-    ],
-  });
-}
-
-// ── Section 3: Consensus estimates ───────────────────────────────────────────
-
-function buildConsensusTable(years) {
-  if (!years || !years.length) return bodyText("Keine Konsensschätzungen verfügbar.");
-  const colW = [1560, ...Array(years.length).fill(Math.floor((9360 - 1560) / years.length))];
-
-  function isActual(y) { return y.type === "A"; }
-
-  const headerCells = [
-    hCell("Kennzahl", colW[0], C.secondary),
-    ...years.map((y, i) => hCell(
-      `${y.year}${y.type}`,
-      colW[i + 1],
-      isActual(y) ? C.lightGray : C.lightBlue,
-      isActual(y) ? C.darkGray : C.primary,
-    )),
-  ];
-
-  function dataRow(label, field, bold = false, i = 0) {
-    return new TableRow({ children: [
-      vCell(label, colW[0], { align: AlignmentType.LEFT, bold, bg: i % 2 ? C.white : C.lightGray }),
-      ...years.map((y, j) => vCell(
-        y[field] ?? "n/v",
-        colW[j + 1],
-        {
-          bold,
-          bg: isActual(y) ? C.lightGray : C.lightBlue,
-        }
-      )),
-    ]});
-  }
-
-  return new Table({
-    width: { size: 9360, type: WidthType.DXA },
-    columnWidths: colW,
-    rows: [
-      new TableRow({ children: headerCells }),
-      dataRow("Umsatz (Mrd.)",    "revenue_bn",        true,  0),
-      dataRow("EBITDA-Marge %",   "ebitda_margin_pct", false, 1),
-      dataRow("EPS",              "eps",               true,  2),
-      dataRow("EV/EBITDA",        "ev_ebitda",         false, 3),
-      dataRow("KGV (P/E)",        "pe_ratio",          false, 4),
-      dataRow("# Analysten",      "number_of_analysts",false, 5),
-    ],
-  });
-}
-
-// ── Section 4: Scenario table ────────────────────────────────────────────────
-
-function buildScenarioTable(scenarios) {
-  if (!scenarios || !scenarios.length) return bodyText("Keine Szenarien verfügbar.");
-  const W = [1440, 1200, 1320, 2760, 2640];
-
-  function scenarioBg(name) {
-    if (name === "Bear Case") return C.lightRed;
-    if (name === "Bull Case") return C.lightGreen;
-    return C.lightGray;
-  }
-
-  return new Table({
-    width: { size: 9360, type: WidthType.DXA },
-    columnWidths: W,
-    rows: [
-      new TableRow({ children: [
-        hCell("Szenario",    W[0], C.secondary),
-        hCell("Wahrsch.",    W[1], C.secondary),
-        hCell("Kursziel",    W[2], C.secondary),
-        hCell("Kernannahme", W[3], C.secondary),
-        hCell("Trigger",     W[4], C.secondary),
-      ]}),
-      ...scenarios.map(s => {
-        const bg = scenarioBg(s.name);
-        return new TableRow({ children: [
-          vCell(s.name,            W[0], { bold: true, bg }),
-          vCell(`${s.probability_pct}%`, W[1], { bg }),
-          vCell(s.price_target,    W[2], { bold: true, bg }),
-          vCell(s.key_assumption,  W[3], { align: AlignmentType.LEFT, bg }),
-          vCell(s.trigger,         W[4], { align: AlignmentType.LEFT, bg }),
-        ]});
-      }),
-    ],
-  });
-}
-
-// ── Section 5: Macro Ampel ────────────────────────────────────────────────────
-
-function buildMacroAmpel(items) {
-  if (!items || !items.length) return bodyText("Keine Makro-Ampel verfügbar.");
-  // 2x2 grid
-  const W = [2340, 2340, 2340, 2340];
-
-  function ampelCell(item, width) {
-    const sc = signalColor(item.signal);
-    const emoji = signalEmoji(item.signal);
-    return new TableCell({
-      borders: border1(C.lightGray),
-      width: { size: width, type: WidthType.DXA },
-      shading: { fill: C.lightGray, type: ShadingType.CLEAR },
-      margins: cellMargins(120, 160),
+    columnWidths: [6200, 3160],
+    rows: [new TableRow({
       children: [
-        new Paragraph({
-          spacing: { before: 0, after: 40 },
+        cell([
+          para([txt(company, { size: 36, bold: true, color: C.WHITE })],
+            { after: 80 }),
+          para([txt(`${ticker}  ·  ${sector}  ·  ${date}`,
+            { size: 16, color: "B0BEC5" })], { after: 60 }),
+          para([txt("KI-Co-Analyst  ·  BFH Bachelor Thesis 2025/26  ·  Luca Lüdi",
+            { size: 14, color: "78909C", italic: true })]),
+        ], { width: 6200, bg: C.DARK_BLUE, noBorder: true }),
+
+        cell([
+          para([txt("Empfehlung", { size: 14, color: "B0BEC5" })],
+            { align: AlignmentType.CENTER, after: 40 }),
+          para([txt(rating, { size: 28, bold: true, color: ratingColor(rating) })],
+            { align: AlignmentType.CENTER, after: 40 }),
+          ...(prevRating ? [para([txt(`vorher: ${prevRating}`,
+            { size: 14, color: "78909C" })],
+            { align: AlignmentType.CENTER })] : []),
+        ], { width: 3160, bg: C.HEADER_BG, noBorder: true }),
+      ]
+    })]
+  }));
+
+  // Key Metrics
+  const metrics = [
+    { label: "Aktueller Kurs",      value: `${ccy} ${price}` },
+    { label: "Kursziel (12M)",      value: `${ccy} ${pt}` },
+    { label: "Upside / Downside",   value: upside },
+    { label: "Marktkapitalisierung",value: mktCap },
+    { label: "Conviction Level",    value: conviction },
+  ];
+  const metricW = Math.floor(9360 / metrics.length);
+  children.push(new Table({
+    width: { size: 9360, type: WidthType.DXA },
+    columnWidths: metrics.map(() => metricW),
+    rows: [new TableRow({
+      children: metrics.map(m => cell([
+        para([txt(m.label, { size: 13, color: C.GRAY_TXT })],
+          { align: AlignmentType.CENTER, after: 30 }),
+        para([txt(m.value, {
+          size: 22, bold: true,
+          color: m.value.includes("+") ? C.GREEN_TXT
+               : m.value.startsWith("-") ? C.RED_TXT
+               : C.DARK_BLUE
+        })], { align: AlignmentType.CENTER }),
+      ], { width: metricW, bg: C.LIGHT_GRAY }))
+    })]
+  }));
+
+  children.push(para([]));
+
+  // ══════════════════════════════════════════════════════════
+  // 1. UNTERNEHMENSBESCHREIBUNG
+  // ══════════════════════════════════════════════════════════
+  children.push(sectionHeader("1.  Unternehmensbeschreibung"));
+  children.push(para([txt(desc, { size: 18 })], { after: 160 }));
+
+  // ══════════════════════════════════════════════════════════
+  // 2. INVESTMENT CASE
+  // ══════════════════════════════════════════════════════════
+  children.push(sectionHeader("2.  Investment Case"));
+
+  const ic = DATA.investment_case || [];
+  if (ic.length === 0) {
+    children.push(para([txt("Kein Investment Case verfügbar.", { size: 17, color: C.GRAY_TXT })]))
+  } else {
+    ic.forEach((point, i) => {
+      const title = typeof point === "string" ? `${i+1}. Argument` : (point.title || point.point || `Argument ${i+1}`);
+      const text  = typeof point === "string" ? point : (point.text || point.reasoning || "");
+      const src   = typeof point === "object"  ? (point.source || "") : "";
+
+      children.push(new Table({
+        width: { size: 9360, type: WidthType.DXA },
+        columnWidths: [140, 9220],
+        rows: [new TableRow({
           children: [
-            new TextRun({ text: `${emoji} `, size: 20, font: "Arial" }),
-            new TextRun({ text: item.category, bold: true, size: 20, font: "Arial", color: sc }),
-          ],
-        }),
-        new Paragraph({
-          spacing: { before: 0, after: 0 },
-          children: [new TextRun({ text: item.key_point || "", size: 17, font: "Arial", color: C.darkGray })],
-        }),
-      ],
+            cell([para([txt("▌", { size: 22, bold: true, color: C.GOLD })])],
+              { width: 140, noBorder: true }),
+            cell([
+              para([txt(title, { size: 19, bold: true, color: C.DARK_BLUE })], { after: 60 }),
+              para([txt(text,  { size: 17 })], { after: src ? 40 : 0 }),
+              ...(src ? [para([txt(`Quelle: ${src}`, { size: 14, italic: true, color: C.GRAY_TXT })])] : []),
+            ], { width: 9220, bg: C.LIGHT_GRAY }),
+          ]
+        })]
+      }));
+      children.push(para([], { after: 80 }));
     });
   }
 
-  const rows = [];
-  for (let i = 0; i < items.length; i += 2) {
-    const cells = [ampelCell(items[i], W[0] + W[1])];
-    if (items[i + 1]) cells.push(ampelCell(items[i + 1], W[2] + W[3]));
-    rows.push(new TableRow({ children: cells }));
-  }
+  // ══════════════════════════════════════════════════════════
+  // 3. FINANZÜBERSICHT
+  // ══════════════════════════════════════════════════════════
+  children.push(new Paragraph({ children: [new PageBreak()] }));
+  children.push(sectionHeader("3.  Finanzübersicht (in Mrd. Berichtswährung, ausser je Aktie)"));
 
-  return new Table({
-    width: { size: 9360, type: WidthType.DXA },
-    columnWidths: [4680, 4680],
-    rows,
-  });
-}
+  const fin = DATA.full_financials || DATA.consensus_estimates || [];
+  if (fin.length > 0) {
+    const finHeaders = ["Jahr","Umsatz","EBITDA","EBITDA-%","EBIT-%","EPS","DPS","FCF","ND/EBITDA","ROIC-%","Quelle"];
+    const finCols    = [900,  900,    900,     800,      700,    680, 680, 680, 800,       700,     1420];
+    const finTotal   = finCols.reduce((a,b) => a+b, 0);
 
-// ── Section 6: Conviction Killers ────────────────────────────────────────────
-
-function buildConvictionKillers(killers) {
-  if (!killers || !killers.length) return [];
-  const result = [];
-  result.push(new Paragraph({
-    spacing: { before: 200, after: 80 },
-    border: {
-      top:    { style: BorderStyle.SINGLE, size: 6, color: C.warningBdr, space: 1 },
-      bottom: { style: BorderStyle.SINGLE, size: 6, color: C.warningBdr, space: 1 },
-      left:   { style: BorderStyle.THICK,  size: 12, color: C.warningBdr, space: 1 },
-      right:  { style: BorderStyle.SINGLE, size: 6, color: C.warningBdr, space: 1 },
-    },
-    shading: { fill: C.warningBg, type: ShadingType.CLEAR },
-    children: [new TextRun({ text: "⚠  CONVICTION KILLERS", bold: true, size: 19, color: C.warningBdr, font: "Arial" })],
-  }));
-  killers.forEach(k => {
-    result.push(new Paragraph({
-      spacing: { before: 60, after: 20 },
-      shading: { fill: C.warningBg, type: ShadingType.CLEAR },
-      border: {
-        left:  { style: BorderStyle.THICK, size: 12, color: C.warningBdr, space: 1 },
-        right: { style: BorderStyle.SINGLE, size: 6, color: C.warningBdr, space: 1 },
-      },
-      indent: { left: 200 },
-      children: [new TextRun({ text: `⚠ ${k.description}`, size: 18, font: "Arial", color: C.darkGray })],
-    }));
-    result.push(new Paragraph({
-      spacing: { before: 20, after: 60 },
-      shading: { fill: C.warningBg, type: ShadingType.CLEAR },
-      border: {
-        left:  { style: BorderStyle.THICK,  size: 12, color: C.warningBdr, space: 1 },
-        right: { style: BorderStyle.SINGLE, size: 6,  color: C.warningBdr, space: 1 },
-        bottom: { style: BorderStyle.SINGLE, size: 6, color: C.warningBdr, space: 1 },
-      },
-      indent: { left: 360 },
-      children: [new TextRun({ text: `→ Monitor: ${k.monitoring_indicator}`, size: 17, italics: true, color: C.midGray, font: "Arial" })],
-    }));
-  });
-  return result;
-}
-
-// ── Section 7a: Full Financial Overview ──────────────────────────────────────
-
-function buildFullFinancialsTable(years) {
-  if (!years || !years.length) return bodyText("Keine Finanzübersicht verfügbar.");
-
-  const FIELDS = [
-    { label: "Umsatz (Mrd.)",  key: "revenue_bn" },
-    { label: "EBITDA (Mrd.)",  key: "ebitda_bn" },
-    { label: "EBITDA-%",       key: "ebitda_margin_pct" },
-    { label: "EBIT-%",         key: "ebit_margin_pct" },
-    { label: "EPS (adj.)",     key: "eps_adj" },
-    { label: "DPS",            key: "dps" },
-    { label: "FCF (Mrd.)",     key: "fcf_bn" },
-    { label: "ND/EBITDA",      key: "nd_ebitda" },
-    { label: "ROIC-%",         key: "roic_pct" },
-    { label: "CapEx (Mrd.)",   key: "capex_bn" },
-    { label: "Quelle",         key: "source" },
-  ];
-
-  const labelColW = 1400;
-  const dataColW  = Math.floor((9360 - labelColW) / years.length);
-  const colWidths = [labelColW, ...Array(years.length).fill(dataColW)];
-
-  function isEstimate(y) { return y.type === "E"; }
-
-  const headerCells = [
-    hCell("Kennzahl", labelColW, C.secondary),
-    ...years.map((y, i) => hCell(
-      y.year,
-      dataColW,
-      isEstimate(y) ? C.lightYellow : C.lightGray,
-      isEstimate(y) ? C.accentHold  : C.darkGray,
-    )),
-  ];
-
-  const dataRows = FIELDS.map((f, ri) =>
-    new TableRow({ children: [
-      vCell(f.label, labelColW, { align: AlignmentType.LEFT, bold: ri === 0, bg: ri % 2 ? C.white : C.lightGray }),
-      ...years.map(y => {
-        const bg = isEstimate(y) ? C.lightYellow : (ri % 2 ? C.white : C.lightGray);
-        const val = y[f.key] ?? "n/v";
-        return vCell(String(val), dataColW, { bg, bold: f.key === "revenue_bn" });
-      }),
-    ]}),
-  );
-
-  const footnote = new Paragraph({
-    spacing: { before: 60, after: 0 },
-    children: [new TextRun({
-      text: "A = Istzahlen (IR / yfinance)  |  📊 E = Schätzung (Consensus / Guidance / LLM-Ableitung)  |  Kein Ersatz für Bloomberg/FactSet",
-      size: 14, italics: true, color: C.midGray, font: "Arial",
-    })],
-  });
-
-  return [
-    new Table({
-      width: { size: 9360, type: WidthType.DXA },
-      columnWidths: colWidths,
-      rows: [new TableRow({ children: headerCells }), ...dataRows],
-    }),
-    footnote,
-  ];
-}
-
-// ── Section 7b: Peer Comparison ───────────────────────────────────────────────
-
-function buildPeerComparisonTable(pc) {
-  if (!pc || !pc.peers || !pc.peers.length) return bodyText("Kein Peer-Vergleich verfügbar.");
-
-  const allRows = [
-    ...(pc.peers || []),
-    pc.sector_averages,
-    pc.subject_company,
-  ].filter(Boolean);
-
-  const W = [2200, 600, 1000, 900, 900, 900, 900, 900, 960];
-
-  const header = new TableRow({ children: [
-    hCell("Unternehmen",      W[0], C.secondary),
-    hCell("Land",             W[1], C.secondary),
-    hCell("EV/EBITDA",        W[2], C.secondary),
-    hCell("Fwd. P/E",         W[3], C.secondary),
-    hCell("EBIT-%",           W[4], C.secondary),
-    hCell("ND/EBITDA",        W[5], C.secondary),
-    hCell("Div.-Yield",       W[6], C.secondary),
-    hCell("Umsatz-Wachst.",   W[7], C.secondary),
-    hCell("ROIC-%",           W[8], C.secondary),
-  ]});
-
-  const today = new Date().toLocaleDateString("de-CH");
-  const subjectTicker = pc.subject_company && pc.subject_company.ticker;
-
-  const dataRows = allRows.map(p => {
-    const isSubject = p.ticker === subjectTicker;
-    const isAvg     = p.ticker === "AVG";
-    const bg = isSubject ? C.lightBlue : (isAvg ? C.lightGray : C.white);
-    const label = (isSubject ? "⭐ " : isAvg ? "Ø " : "") + (p.company || "");
-
-    return new TableRow({ children: [
-      vCell(label,                      W[0], { align: AlignmentType.LEFT, bold: isSubject || isAvg, bg }),
-      vCell(p.country || "",            W[1], { bg }),
-      vCell(String(p.ev_ebitda ?? "n/v"),     W[2], { bg, bold: isSubject }),
-      vCell(String(p.forward_pe ?? "n/v"),    W[3], { bg }),
-      vCell(String(p.ebit_margin_pct ?? "n/v"), W[4], { bg }),
-      vCell(String(p.nd_ebitda ?? "n/v"),     W[5], { bg }),
-      vCell(String(p.dividend_yield_pct ?? "n/v"), W[6], { bg }),
-      vCell(String(p.revenue_growth_pct ?? "n/v"), W[7], { bg }),
-      vCell(String(p.roic_pct ?? "n/v"),      W[8], { bg }),
-    ]});
-  });
-
-  const footnote = new Paragraph({
-    spacing: { before: 60, after: 0 },
-    children: [new TextRun({
-      text: `⭐ = analysiertes Unternehmen  |  Ø = Sektor-Durchschnitt (Ausreisser >3× Median bereinigt)  |  Quelle: yfinance  |  Stand: ${today}`,
-      size: 14, italics: true, color: C.midGray, font: "Arial",
-    })],
-  });
-
-  const vsAvg = pc.subject_vs_avg || {};
-  const vsEntries = Object.entries(vsAvg).filter(([, v]) => v !== "n/v");
-  const vsPara = vsEntries.length ? new Paragraph({
-    spacing: { before: 60, after: 0 },
-    children: [
-      new TextRun({ text: "Subject vs. Sektor-Ø: ", bold: true, size: 16, font: "Arial", color: C.primary }),
-      new TextRun({
-        text: vsEntries.map(([k, v]) => `${k}: ${v}`).join("  |  "),
-        size: 16, font: "Arial", color: C.darkGray,
-      }),
-    ],
-  }) : null;
-
-  return [
-    new Table({
-      width: { size: 9360, type: WidthType.DXA },
-      columnWidths: W,
-      rows: [header, ...dataRows],
-    }),
-    footnote,
-    ...(vsPara ? [vsPara] : []),
-  ];
-}
-
-// ── Section 7: Sources table ──────────────────────────────────────────────────
-
-function buildSourcesTable(sources) {
-  const rows = (sources || []).map((src, i) =>
-    new TableRow({ children: [
-      new TableCell({
-        borders: border1(),
-        width: { size: 560, type: WidthType.DXA },
-        shading: { fill: i % 2 ? C.white : C.lightGray, type: ShadingType.CLEAR },
-        margins: cellMargins(60, 100),
-        children: [new Paragraph({
-          alignment: AlignmentType.CENTER,
-          children: [new TextRun({ text: `${i + 1}`, size: 16, font: "Arial", color: C.darkGray })],
-        })],
-      }),
-      new TableCell({
-        borders: border1(),
-        width: { size: 8800, type: WidthType.DXA },
-        shading: { fill: i % 2 ? C.white : C.lightGray, type: ShadingType.CLEAR },
-        margins: cellMargins(60, 100),
-        children: [new Paragraph({
-          children: [new TextRun({ text: src, size: 16, font: "Arial", color: C.darkGray })],
-        })],
-      }),
-    ]})
-  );
-  if (!rows.length) return bodyText("Keine Quellen angegeben.");
-  return new Table({ width: { size: 9360, type: WidthType.DXA }, columnWidths: [560, 8800], rows });
-}
-
-// ── Main document builder ─────────────────────────────────────────────────────
-
-async function buildMemo(data) {
-  const today = new Date().toLocaleDateString("de-CH", { year: "numeric", month: "long", day: "numeric" });
-
-  // ── Extract and normalise fields ─────────────────────────────────────────
-  const investmentCase    = Array.isArray(data.investment_case)    ? data.investment_case    : [];
-  const keyRisks          = Array.isArray(data.key_risks)          ? data.key_risks          : [];
-  const monitoringList    = Array.isArray(data.monitoring_checklist)? data.monitoring_checklist : [];
-  const sources           = Array.isArray(data.sources)            ? data.sources            : [];
-  const valTable          = Array.isArray(data.valuation_table)    ? data.valuation_table    : [];
-  const consensusYears    = Array.isArray(data.consensus_estimates) ? data.consensus_estimates : [];
-  const scenarioList      = Array.isArray(data.scenarios)          ? data.scenarios          : [];
-  const macroAmpelList    = Array.isArray(data.macro_ampel)        ? data.macro_ampel        : [];
-  const convKillers       = Array.isArray(data.conviction_killers) ? data.conviction_killers : [];
-  const fullFinancials    = Array.isArray(data.full_financials)    ? data.full_financials    : [];
-  const peerComparison    = data.peer_comparison                   || null;
-
-  function headerParagraph() {
-    return [
-      new Paragraph({
-        spacing: { before: 0, after: 120 },
-        children: [
-          new TextRun({ text: data.company || "", bold: true, size: 52, color: C.primary, font: "Arial" }),
-        ],
-      }),
-      new Paragraph({
-        spacing: { before: 0, after: 60 },
-        children: [
-          new TextRun({ text: `${data.ticker}  |  ${data.sector || ""}  |  Datum: ${data.date || today}`, size: 20, color: C.darkGray, font: "Arial" }),
-        ],
-      }),
-    ];
-  }
-
-  function headerAndFooter() {
-    return {
-      headers: {
-        default: new Header({
-          children: [new Paragraph({
-            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: C.primary, space: 1 } },
-            spacing: { after: 100 },
-            children: [new TextRun({ text: "KI-Co-Portfolio-Manager  |  Investment Memo  |  Vertraulich", size: 15, color: C.primary, font: "Arial", italics: true })],
-          })],
+    children.push(new Table({
+      width: { size: finTotal, type: WidthType.DXA },
+      columnWidths: finCols,
+      rows: [
+        // Header
+        new TableRow({
+          tableHeader: true,
+          children: finHeaders.map((h, i) => cell(
+            [para([txt(h, { size: 15, bold: true, color: C.WHITE })],
+              { align: AlignmentType.CENTER })],
+            { width: finCols[i], bg: C.DARK_BLUE }
+          ))
         }),
-      },
-      footers: {
-        default: new Footer({
-          children: [new Paragraph({
-            border: { top: { style: BorderStyle.SINGLE, size: 6, color: C.primary, space: 1 } },
-            spacing: { before: 100 },
+        // Daten
+        ...fin.map((row, ri) => {
+          const isEst = (row.year || row.type || "").toString().includes("E");
+          const bg = isEst ? C.YELLOW_BG : (ri % 2 === 0 ? C.WHITE : C.LIGHT_GRAY);
+          const vals = [
+            (isEst ? "📊 " : "") + safeVal(row.year),
+            safeVal(row.revenue_bn  || row.umsatz),
+            safeVal(row.ebitda_bn   || row.ebitda),
+            safeVal(row.ebitda_margin_pct || row.ebitda_m),
+            safeVal(row.ebit_margin_pct   || row.ebit_m),
+            safeVal(row.eps_adj     || row.eps),
+            safeVal(row.dps),
+            safeVal(row.fcf_bn      || row.fcf),
+            safeVal(row.nd_ebitda   || row.nd_ev),
+            safeVal(row.roic_pct    || row.roic),
+            safeVal(row.source      || row.src || (isEst ? "Schätzung" : "GBR")),
+          ];
+          return new TableRow({
+            children: vals.map((v, i) => cell(
+              [para([txt(v, {
+                size: 15,
+                bold: i === 0,
+                color: i === 0 && isEst ? "E65100" : "222222"
+              })], { align: i <= 0 ? AlignmentType.LEFT : AlignmentType.CENTER })],
+              { width: finCols[i], bg }
+            ))
+          });
+        }),
+        // Fussnote
+        new TableRow({
+          children: [
+            cell([para([txt("ℹ", { size: 15, bold: true, color: C.GRAY_TXT })])],
+              { width: finCols[0], bg: C.LIGHT_GRAY }),
+            new TableCell({
+              columnSpan: finHeaders.length - 1,
+              borders, shading: { fill: C.LIGHT_GRAY, type: ShadingType.CLEAR },
+              margins: { top: 60, bottom: 60, left: 120, right: 120 },
+              width: { size: finTotal - finCols[0], type: WidthType.DXA },
+              children: [para([txt(
+                "A = Istzahlen (geprüft)  |  📊 E = Schätzwert  |  " +
+                "Forward-Schätzungen sind Approximationen — kein Ersatz für Bloomberg/FactSet Konsensdaten.",
+                { size: 13, italic: true, color: C.GRAY_TXT }
+              )])]
+            })
+          ]
+        })
+      ]
+    }));
+  } else {
+    children.push(para([txt("Keine Finanzdaten verfügbar.", { size: 17, color: C.GRAY_TXT })]));
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 4. BEWERTUNG
+  // ══════════════════════════════════════════════════════════
+  children.push(para([], { before: 200 }));
+  children.push(sectionHeader("4.  Bewertung — ELEVATED / FAIR / DISCOUNT"));
+
+  const vt = DATA.valuation_table || [];
+  if (vt.length > 0) {
+    const valCols = [1900, 1200, 1300, 1260, 1500, 2200];
+    const valTotal = valCols.reduce((a,b) => a+b, 0);
+    children.push(new Table({
+      width: { size: valTotal, type: WidthType.DXA },
+      columnWidths: valCols,
+      rows: [
+        new TableRow({
+          tableHeader: true,
+          children: ["Kennzahl","Aktuell","Peer-Median","Hist. Ø 5J","Einschätzung","Herleitung / Quelle"]
+            .map((h, i) => cell(
+              [para([txt(h, { size: 15, bold: true, color: C.WHITE })],
+                { align: AlignmentType.CENTER })],
+              { width: valCols[i], bg: C.DARK_BLUE }
+            ))
+        }),
+        ...vt.map((row, ri) => {
+          const assess = safeVal(row.assessment || "FAIR");
+          const calcText = safeVal(row.calculation || row.source || "");
+          return new TableRow({
             children: [
-              new TextRun({ text: `Erstellt: ${today}  |  KI-Co-Portfolio-Manager  |  Seite `, size: 15, color: C.primary, font: "Arial" }),
-              new TextRun({ children: [PageNumber.CURRENT], size: 15, color: C.primary, font: "Arial" }),
-              new TextRun({ text: " von ", size: 15, color: C.primary, font: "Arial" }),
-              new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 15, color: C.primary, font: "Arial" }),
-            ],
-          })],
-        }),
-      },
-    };
+              cell([para([txt(safeVal(row.metric), { size: 16, bold: true })])],
+                { width: valCols[0], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+              cell([para([txt(safeVal(row.current_value), { size: 16, bold: true, color: C.DARK_BLUE })],
+                { align: AlignmentType.CENTER })],
+                { width: valCols[1], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+              cell([para([txt(safeVal(row.peer_average), { size: 16 })],
+                { align: AlignmentType.CENTER })],
+                { width: valCols[2], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+              cell([para([txt(safeVal(row.historical_average), { size: 16 })],
+                { align: AlignmentType.CENTER })],
+                { width: valCols[3], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+              cell([para([txt(assessIcon(assess) + assess,
+                { size: 15, bold: true, color: assessColor(assess) })],
+                { align: AlignmentType.CENTER })],
+                { width: valCols[4], bg: assessBg(assess) }),
+              cell([para([txt(calcText, { size: 14, italic: true, color: C.GRAY_TXT })])],
+                { width: valCols[5], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+            ]
+          });
+        })
+      ]
+    }));
+  } else {
+    children.push(para([txt("Keine Bewertungsdaten verfügbar.", { size: 17, color: C.GRAY_TXT })]));
   }
 
-  // ── PAGE 1 children ───────────────────────────────────────────────────────
-  const page1 = [
-    // Title
-    ...headerParagraph(),
-    emptyLine(60),
+  // ══════════════════════════════════════════════════════════
+  // 5. PEER-VERGLEICH
+  // ══════════════════════════════════════════════════════════
+  children.push(para([], { before: 200 }));
+  children.push(sectionHeader("5.  Peer-Vergleich"));
 
-    // 1. KPI header table
-    buildHeaderTable(data),
-    emptyLine(80),
+  const pc = DATA.peer_comparison || {};
+  const peers = pc.peers || [];
+  const secAvg = pc.sector_averages;
+  const subject = pc.subject_company;
 
-    // 2. Unternehmensbeschreibung
-    sectionHeader("Unternehmensbeschreibung"),
-    new Paragraph({
-      spacing: { before: 40, after: 40 },
-      children: [new TextRun({ text: data.company_description || "", size: 18, font: "Arial", color: C.darkGray, italics: true })],
-    }),
-    emptyLine(60),
+  if (peers.length > 0 || secAvg || subject) {
+    const peerCols = [2400, 900, 1100, 1100, 1100, 1100, 1100, 560];
+    const peerTotal = peerCols.reduce((a,b) => a+b, 0);
+    const allRows = [
+      ...peers,
+      ...(secAvg  ? [{ ...secAvg,  _isAvg: true }] : []),
+      ...(subject ? [{ ...subject, _isSubject: true }] : []),
+    ];
 
-    // 3. Investment Case
-    sectionHeader("Investment Case"),
-    ...investmentCase.map(pt => {
-      // Bold the first number-like token for visual emphasis
-      const match = pt.match(/^(.*?)(\d[\d.,x%]*)(.*?)(\(Quelle:[^)]*\))?(.*)/i);
-      if (match && match[2]) {
-        return bullet([
-          { text: match[1] || "" },
-          { text: match[2], bold: true, color: C.primary },
-          { text: (match[3] || "") + (match[4] ? ` ${match[4]}` : "") + (match[5] || "") },
-        ]);
-      }
-      return bullet([{ text: pt }]);
-    }),
-    emptyLine(60),
+    children.push(new Table({
+      width: { size: peerTotal, type: WidthType.DXA },
+      columnWidths: peerCols,
+      rows: [
+        new TableRow({
+          tableHeader: true,
+          children: ["Unternehmen","Ticker","EV/EBITDA","Fwd. P/E","EBIT-%","ND/EBITDA","Div.-Yield","Wachstum"]
+            .map((h,i) => cell(
+              [para([txt(h, { size: 14, bold: true, color: C.WHITE })],
+                { align: AlignmentType.CENTER })],
+              { width: peerCols[i], bg: C.DARK_BLUE }
+            ))
+        }),
+        ...allRows.map((p, ri) => {
+          const isSub = p._isSubject;
+          const isAvg = p._isAvg;
+          const bg = isSub ? C.BLUE_BG : isAvg ? C.LIGHT_GRAY : (ri%2===0 ? C.WHITE : "FAFAFA");
+          const prefix = isSub ? "⭐ " : isAvg ? "Ø  " : "";
+          const vals = [
+            prefix + safeVal(p.company),
+            safeVal(p.ticker),
+            safeVal(p.ev_ebitda),
+            safeVal(p.forward_pe),
+            safeVal(p.ebit_margin_pct),
+            safeVal(p.nd_ebitda),
+            safeVal(p.dividend_yield_pct || p.dividend_yield),
+            safeVal(p.revenue_growth_pct || p.revenue_growth),
+          ];
+          return new TableRow({
+            children: vals.map((v, i) => cell(
+              [para([txt(v, {
+                size: 15,
+                bold: isSub || isAvg,
+                color: isSub && i > 0 ? C.MID_BLUE : "222222"
+              })], { align: i <= 1 ? AlignmentType.LEFT : AlignmentType.CENTER })],
+              { width: peerCols[i], bg }
+            ))
+          });
+        })
+      ]
+    }));
 
-    // 4. Bewertungstabelle
-    sectionHeader("Bewertung"),
-    buildValuationTable(valTable),
-    emptyLine(60),
+    // Abweichung Subject vs. Ø
+    const vsAvg = pc.subject_vs_avg;
+    if (vsAvg && Object.keys(vsAvg).length > 0) {
+      children.push(para([], { before: 80 }));
+      children.push(para([txt("Subject vs. Sektor-Ø:", { size: 16, bold: true, color: C.DARK_BLUE })]));
+      const entries = Object.entries(vsAvg);
+      const deltaW = Math.floor(9360 / Math.min(entries.length, 6));
+      children.push(new Table({
+        width: { size: deltaW * Math.min(entries.length, 6), type: WidthType.DXA },
+        columnWidths: entries.slice(0,6).map(() => deltaW),
+        rows: [new TableRow({
+          children: entries.slice(0,6).map(([k, v]) => {
+            const numVal = parseFloat(String(v).replace("%","").replace("+",""));
+            const vColor = numVal < -10 ? C.GREEN_TXT : numVal > 10 ? C.RED_TXT : C.GOLD_TXT;
+            return cell([
+              para([txt(k, { size: 13, color: C.GRAY_TXT })],
+                { align: AlignmentType.CENTER, after: 30 }),
+              para([txt(String(v), { size: 18, bold: true, color: vColor })],
+                { align: AlignmentType.CENTER }),
+            ], { width: deltaW, bg: C.LIGHT_GRAY });
+          })
+        })]
+      }));
+    }
+  } else {
+    children.push(para([txt("Kein Peer-Vergleich verfügbar.", { size: 17, color: C.GRAY_TXT })]));
+  }
 
-    // 5. Konsensschätzungen
-    sectionHeader("Konsensschätzungen"),
-    buildConsensusTable(consensusYears),
-    emptyLine(60),
+  // ══════════════════════════════════════════════════════════
+  // 6. SZENARIEN
+  // ══════════════════════════════════════════════════════════
+  children.push(new Paragraph({ children: [new PageBreak()] }));
+  children.push(sectionHeader("6.  Szenarien — Bear / Base / Bull Case"));
 
-    // 5a. Vollständige Finanzübersicht
-    sectionHeader("Finanzübersicht (6 Jahre)"),
-    ...buildFullFinancialsTable(fullFinancials),
-    emptyLine(60),
+  const scenarios = DATA.scenarios || [];
+  if (scenarios.length > 0) {
+    const nSc = Math.min(scenarios.length, 3);
+    const scW = Math.floor(9200 / nSc);
+    children.push(new Table({
+      width: { size: scW * nSc + 160, type: WidthType.DXA },
+      columnWidths: [...Array(nSc).fill(scW), 160],
+      rows: [new TableRow({
+        children: [
+          ...scenarios.slice(0, nSc).map(sc => {
+            const { color, bg } = scenarioBorder(sc.name || "");
+            const name = safeVal(sc.name);
+            const ptVal = safeVal(sc.price_target);
+            const prob  = safeVal(sc.probability_pct);
+            const key   = safeVal(sc.key_assumption);
+            const trig  = safeVal(sc.trigger);
+            return new TableCell({
+              borders: {
+                top:    { style: BorderStyle.SINGLE, size: 8,  color },
+                bottom: { style: BorderStyle.SINGLE, size: 2,  color },
+                left:   { style: BorderStyle.SINGLE, size: 8,  color },
+                right:  { style: BorderStyle.SINGLE, size: 2,  color },
+              },
+              width: { size: scW, type: WidthType.DXA },
+              shading: { fill: bg, type: ShadingType.CLEAR },
+              margins: { top: 160, bottom: 160, left: 200, right: 200 },
+              children: [
+                para([txt(`${scenarioIcon(name)}  ${name}`,
+                  { size: 20, bold: true, color: C.DARK_BLUE })], { after: 80 }),
+                para([txt(ptVal,
+                  { size: 30, bold: true, color: priceColor(name) })],
+                  { align: AlignmentType.CENTER, after: 60 }),
+                para([txt(`Wahrscheinlichkeit: ${prob}%`,
+                  { size: 16, bold: true, color: C.GRAY_TXT })],
+                  { align: AlignmentType.CENTER, after: 120 }),
+                ...(key !== "n/v" ? [
+                  para([txt("Kernannahme:", { size: 14, bold: true, color: C.DARK_BLUE })], { after: 40 }),
+                  para([txt(key, { size: 15 })], { after: 80 }),
+                ] : []),
+                ...(trig !== "n/v" ? [
+                  para([txt("Auslöser:", { size: 14, bold: true, color: C.DARK_BLUE })], { after: 40 }),
+                  para([txt(trig, { size: 15 })]),
+                ] : []),
+              ]
+            });
+          }),
+          // Spacer
+          cell([para([txt("")])], { width: 160, noBorder: true }),
+        ]
+      })]
+    }));
+  } else {
+    children.push(para([txt("Keine Szenarien verfügbar.", { size: 17, color: C.GRAY_TXT })]));
+  }
 
-    // 5b. Peer-Vergleich
-    sectionHeader("Peer-Vergleich"),
-    ...buildPeerComparisonTable(peerComparison),
-    emptyLine(60),
-  ];
+  // ══════════════════════════════════════════════════════════
+  // 7. RISIKEN & CONVICTION KILLERS
+  // ══════════════════════════════════════════════════════════
+  children.push(para([], { before: 200 }));
+  children.push(sectionHeader("7.  Quantifizierte Risiken & Conviction Killers"));
 
-  // ── PAGE 2 children ───────────────────────────────────────────────────────
-  const page2 = [
-    // Page break
-    new Paragraph({ children: [new PageBreak()] }),
+  const risks = DATA.key_risks || [];
+  const cks   = DATA.conviction_killers || [];
 
-    // 6. Szenario-Tabelle
-    sectionHeader("Szenarien"),
-    buildScenarioTable(scenarioList),
-    emptyLine(60),
+  children.push(new Table({
+    width: { size: 9360, type: WidthType.DXA },
+    columnWidths: [4560, 4800],
+    rows: [new TableRow({
+      children: [
+        cell([
+          para([txt("Quantifizierte Risiken", { size: 18, bold: true, color: C.DARK_BLUE })],
+            { after: 120 }),
+          ...(risks.length > 0
+            ? risks.map(r => new Paragraph({
+                spacing: { before: 60, after: 60 },
+                numbering: { reference: "bullets", level: 0 },
+                children: [txt(typeof r === "string" ? r : safeVal(r.risk || r.description || r), { size: 16 })],
+              }))
+            : [para([txt("Keine Risiken dokumentiert.", { size: 16, color: C.GRAY_TXT })])]),
+        ], { width: 4560 }),
 
-    // 7. Risiken
-    sectionHeader("Risiken"),
-    ...keyRisks.map(r => {
-      const parts = r.split("→");
-      if (parts.length > 1) {
-        const runs = [];
-        runs.push({ text: parts[0].trim() });
-        runs.push({ text: " → ", color: C.secondary, bold: true });
-        runs.push({ text: parts.slice(1).join("→").trim() });
-        return bullet(runs);
-      }
-      return bullet([{ text: r }]);
-    }),
-    emptyLine(60),
+        cell([
+          para([txt("🚨  Conviction Killers", { size: 18, bold: true, color: C.RED_TXT })],
+            { after: 80 }),
+          para([txt("Datenpunkte die den Investment Case sofort entkräften:",
+            { size: 14, italic: true, color: C.GRAY_TXT })], { after: 120 }),
+          ...(cks.length > 0
+            ? cks.map(ck => {
+                const desc    = typeof ck === "string" ? ck : safeVal(ck.description || ck);
+                const monitor = typeof ck === "object" ? safeVal(ck.monitoring_indicator || "") : "";
+                return new Table({
+                  width: { size: 4500, type: WidthType.DXA },
+                  columnWidths: [4500],
+                  rows: [new TableRow({ children: [
+                    cell([
+                      para([txt("⚠  " + desc, { size: 15, bold: true, color: C.RED_TXT })],
+                        { after: monitor && monitor !== "n/v" ? 40 : 0 }),
+                      ...(monitor && monitor !== "n/v"
+                        ? [para([txt("→ Monitor: " + monitor, { size: 14, color: C.GRAY_TXT, italic: true })])]
+                        : []),
+                    ], { width: 4500, bg: C.RED_BG })
+                  ]})]
+                });
+              })
+            : [para([txt("Keine Conviction Killers identifiziert.",
+                { size: 16, color: C.GRAY_TXT })])]),
+        ], { width: 4800 }),
+      ]
+    })]
+  }));
 
-    // 8. Makro & Sentiment Ampel
-    sectionHeader("Makro & Sentiment Ampel"),
-    buildMacroAmpel(macroAmpelList),
-    emptyLine(60),
+  // ══════════════════════════════════════════════════════════
+  // 8. MAKRO & SENTIMENT
+  // ══════════════════════════════════════════════════════════
+  children.push(para([], { before: 200 }));
+  children.push(sectionHeader("8.  Makro-Ampel & Sentiment"));
 
-    // 9. Conviction Killers
-    sectionHeader("Conviction Killers"),
-    ...buildConvictionKillers(convKillers),
-    emptyLine(60),
+  const macro = DATA.macro_ampel || [];
+  if (macro.length > 0) {
+    const macCols = [1700, 1200, 6460];
+    const macTotal = macCols.reduce((a,b) => a+b, 0);
+    children.push(new Table({
+      width: { size: macTotal, type: WidthType.DXA },
+      columnWidths: macCols,
+      rows: [
+        new TableRow({
+          tableHeader: true,
+          children: ["Beobachtungsbereich","Signal","Einschätzung & Transmissionsmechanismus"]
+            .map((h,i) => cell(
+              [para([txt(h, { size: 15, bold: true, color: C.WHITE })],
+                { align: AlignmentType.CENTER })],
+              { width: macCols[i], bg: C.DARK_BLUE }
+            ))
+        }),
+        ...macro.map((m, ri) => {
+          const sig = safeVal(m.signal || m.direction || "NEUTRAL");
+          const sigBg = sig.toUpperCase() === "POSITIV" || sig.toUpperCase() === "TAILWIND"
+            ? C.GREEN_BG : sig.toUpperCase() === "NEGATIV" || sig.toUpperCase() === "HEADWIND"
+            ? C.RED_BG : C.YELLOW_BG;
+          return new TableRow({ children: [
+            cell([para([txt(safeVal(m.category || m.label || m.indicator),
+              { size: 16, bold: true })])],
+              { width: macCols[0], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+            cell([para([txt(signalIcon(sig) + sig,
+              { size: 15, bold: true, color: signalColor(sig) })],
+              { align: AlignmentType.CENTER })],
+              { width: macCols[1], bg: sigBg }),
+            cell([para([txt(safeVal(m.key_point || m.text || m.description),
+              { size: 16 })])],
+              { width: macCols[2], bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+          ]});
+        })
+      ]
+    }));
+  } else {
+    children.push(para([txt("Keine Makro-Daten verfügbar.", { size: 17, color: C.GRAY_TXT })]));
+  }
 
-    // 10. Advocatus Diaboli
-    sectionHeader("Advocatus Diaboli — Gegenposition"),
-    italicBox(data.advocatus_diaboli_summary || ""),
-    emptyLine(60),
+  // Sentiment Score
+  const sentScore = DATA.sentiment_score || DATA.overall_sentiment_score;
+  const sentOutlook = DATA.sentiment_outlook || DATA.short_term_outlook;
+  if (sentScore || sentOutlook) {
+    children.push(para([], { before: 120 }));
+    children.push(new Table({
+      width: { size: 9360, type: WidthType.DXA },
+      columnWidths: [2000, 7360],
+      rows: [new TableRow({ children: [
+        cell([
+          para([txt("Sentiment-Score", { size: 14, color: C.GRAY_TXT })],
+            { align: AlignmentType.CENTER, after: 30 }),
+          para([txt(safeVal(sentScore) + "/10",
+            { size: 28, bold: true, color: C.DARK_BLUE })],
+            { align: AlignmentType.CENTER }),
+        ], { width: 2000, bg: C.LIGHT_GRAY }),
+        cell([
+          para([txt("Kurzfrist-Outlook:", { size: 14, bold: true, color: C.DARK_BLUE })],
+            { after: 40 }),
+          para([txt(safeVal(sentOutlook), { size: 16 })]),
+        ], { width: 7360 }),
+      ]})]
+    }));
+  }
 
-    // 11. Monitoring Checklist
-    sectionHeader("Monitoring Checklist"),
-    ...monitoringList.map(item => checkboxItem(item)),
-    emptyLine(60),
+  // ══════════════════════════════════════════════════════════
+  // 9. QUALITÄTSPRÜFUNG
+  // ══════════════════════════════════════════════════════════
+  children.push(new Paragraph({ children: [new PageBreak()] }));
+  children.push(sectionHeader("9.  Qualitätsprüfung & Konsistenz-Score"));
 
-    // 12. Finale Begründung
-    sectionHeader("Finale Begründung & Empfehlung"),
-    bodyText(data.final_reasoning || ""),
-    emptyLine(60),
+  // Score Box + Checks nebeneinander
+  const qcChecks = DATA.quality_checks || [];
+  children.push(new Table({
+    width: { size: 9360, type: WidthType.DXA },
+    columnWidths: [2000, 7360],
+    rows: [new TableRow({
+      children: [
+        // Score links
+        cell([
+          para([txt("Konsistenz-Score", { size: 14, color: C.GRAY_TXT, bold: true })],
+            { align: AlignmentType.CENTER, after: 80 }),
+          para([txt(safeVal(score) + "/10", {
+            size: 56, bold: true,
+            color: Number(score) >= 7 ? C.GREEN_TXT
+                 : Number(score) >= 5 ? C.GOLD_TXT : C.RED_TXT
+          })], { align: AlignmentType.CENTER, after: 80 }),
+          para([txt(safeVal(DATA.consistency_notes || ""),
+            { size: 14, italic: true, color: C.GRAY_TXT })],
+            { align: AlignmentType.CENTER }),
+        ], { width: 2000, bg: C.LIGHT_GRAY }),
 
-    // 13. Quellen
-    sectionHeader("Quellen & Datengrundlage"),
-    emptyLine(40),
-    buildSourcesTable(sources),
-    emptyLine(60),
+        // Checks rechts
+        cell([
+          ...(qcChecks.length > 0
+            ? qcChecks.map((qc, ri) => {
+                const result = safeVal(qc.result || qc.status);
+                const icon   = result === "bestanden" ? "✅" : result === "Warnung" ? "⚠️" : "❌";
+                const bg     = result === "bestanden" ? C.GREEN_BG
+                             : result === "Warnung"   ? C.YELLOW_BG : C.RED_BG;
+                return new Table({
+                  width: { size: 7100, type: WidthType.DXA },
+                  columnWidths: [3200, 1000, 2900],
+                  rows: [new TableRow({ children: [
+                    cell([para([txt(safeVal(qc.check || qc.name), { size: 15 })])],
+                      { width: 3200, bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+                    cell([para([txt(`${icon} ${result}`, { size: 14, bold: true })],
+                      { align: AlignmentType.CENTER })],
+                      { width: 1000, bg }),
+                    cell([para([txt(safeVal(qc.comment || qc.note || ""),
+                      { size: 14, italic: true, color: C.GRAY_TXT })])],
+                      { width: 2900, bg: ri%2===0 ? C.WHITE : C.LIGHT_GRAY }),
+                  ]})]
+                });
+              })
+            : [para([txt("Keine Qualitätschecks verfügbar.", { size: 16, color: C.GRAY_TXT })])]),
+        ], { width: 7360 }),
+      ]
+    })]
+  }));
 
-    // 14. Disclaimer
-    new Paragraph({
-      spacing: { before: 160, after: 0 },
-      border: { top: { style: BorderStyle.SINGLE, size: 4, color: C.lightBlue, space: 1 } },
-      children: [new TextRun({
-        text: "Disclaimer: Dieses Dokument wurde automatisch durch das KI-Co-Portfolio-Manager System generiert " +
-              "und dient ausschliesslich zu Informationszwecken. Es stellt keine Anlageberatung dar. " +
-              "Alle Angaben basieren auf öffentlich verfügbaren Daten (yfinance, Yahoo Finance) zum Zeitpunkt der Analyse. " +
-              "Eine Haftung für die Richtigkeit der Angaben wird nicht übernommen.",
-        size: 14,
-        italics: true,
-        color: C.midGray,
-        font: "Arial",
-      })],
-    }),
-  ];
+  // ══════════════════════════════════════════════════════════
+  // 10. FINALE BEGRÜNDUNG
+  // ══════════════════════════════════════════════════════════
+  children.push(para([], { before: 200 }));
+  children.push(sectionHeader("10. Finale Begründung"));
+  children.push(new Table({
+    width: { size: 9360, type: WidthType.DXA },
+    columnWidths: [9360],
+    rows: [new TableRow({ children: [
+      cell([para([txt(finalReasoning, { size: 17 })])],
+        { width: 9360, bg: C.BLUE_BG })
+    ]})]
+  }));
 
-  const doc = new Document({
+  // ══════════════════════════════════════════════════════════
+  // 11. QUELLEN & LITERATURVERZEICHNIS
+  // ══════════════════════════════════════════════════════════
+  children.push(para([], { before: 200 }));
+  children.push(sectionHeader("11. Quellen & Literaturverzeichnis"));
+
+  const sources = DATA.sources || [];
+  if (sources.length > 0) {
+    sources.forEach((src, i) => {
+      children.push(para(
+        [txt(`[${i+1}]  ${safeVal(src)}`, { size: 15, color: C.GRAY_TXT })],
+        { before: 40, after: 40 }
+      ));
+    });
+  } else {
+    children.push(para([txt("Keine Quellenangaben verfügbar.", { size: 15, color: C.GRAY_TXT })]));
+  }
+
+  // DISCLAIMER
+  children.push(para([], { before: 200 }));
+  children.push(new Table({
+    width: { size: 9360, type: WidthType.DXA },
+    columnWidths: [9360],
+    rows: [new TableRow({ children: [
+      cell([para([txt(
+        "DISCLAIMER: Dieses Dokument wurde automatisch durch den KI-Co-Analysten generiert " +
+        "(Bachelor Thesis BFH 2025/26, Luca Lüdi) und dient ausschliesslich zu Forschungs- und " +
+        "Demonstrationszwecken. Es stellt keine Anlageberatung dar (Art. 3 lit. c FIDLEG). " +
+        "Alle Angaben basieren auf öffentlich verfügbaren Daten. " +
+        "Forward-Schätzungen sind Approximationen — kein Ersatz für Bloomberg/FactSet Konsensdaten. " +
+        "Eine Haftung für die Richtigkeit der Angaben wird nicht übernommen.",
+        { size: 14, italic: true, color: C.GRAY_TXT }
+      )])], { width: 9360, bg: C.LIGHT_GRAY })
+    ]})]
+  }));
+
+  // ── Routing-Log (optional, ausgeblendet) ─────────────────
+  const routingLog = DATA.routing_log || [];
+  if (routingLog.length > 0) {
+    children.push(para([], { before: 200 }));
+    children.push(sectionHeader("Anhang: LangGraph Routing-Log"));
+    routingLog.forEach(entry => {
+      children.push(para(
+        [txt(safeVal(entry), { size: 14, color: C.GRAY_TXT })],
+        { before: 20, after: 20 }
+      ));
+    });
+  }
+
+  // ── Dokument zusammenbauen ───────────────────────────────
+  return new Document({
     numbering: {
       config: [{
         reference: "bullets",
         levels: [{
           level: 0,
           format: LevelFormat.BULLET,
-          text: "•",
+          text: "▸",
           alignment: AlignmentType.LEFT,
-          style: { paragraph: { indent: { left: 560, hanging: 280 } } },
-        }],
-      }],
+          style: {
+            paragraph: { indent: { left: 400, hanging: 280 } }
+          }
+        }]
+      }]
     },
     styles: {
       default: {
-        document: { run: { font: "Arial", size: 18, color: C.darkGray } },
-      },
+        document: { run: { font: "Arial", size: 18 } }
+      }
     },
     sections: [{
       properties: {
         page: {
-          size: { width: 11906, height: 16838 }, // A4
-          margin: { top: 1134, right: 1134, bottom: 1134, left: 1134 }, // ~2 cm
-        },
+          size: { width: 11906, height: 16838 },
+          margin: { top: 900, right: 800, bottom: 900, left: 800 }
+        }
       },
-      ...headerAndFooter(),
-      children: [...page1, ...page2],
-    }],
-  });
 
-  return doc;
+      headers: {
+        default: new Header({
+          children: [new Table({
+            width: { size: 10306, type: WidthType.DXA },
+            columnWidths: [6000, 4306],
+            rows: [new TableRow({ children: [
+              cell([para([
+                txt(`${company}  (${ticker})`, { size: 15, bold: true, color: C.DARK_BLUE })
+              ])], { width: 6000, noBorder: true }),
+              cell([para([
+                txt("KI-Co-Analyst  ·  BFH 2025/26", { size: 14, color: C.GRAY_TXT })
+              ], { align: AlignmentType.RIGHT })], { width: 4306, noBorder: true }),
+            ]})]
+          })]
+        })
+      },
+
+      footers: {
+        default: new Footer({
+          children: [new Table({
+            width: { size: 10306, type: WidthType.DXA },
+            columnWidths: [6000, 4306],
+            rows: [new TableRow({ children: [
+              cell([para([
+                txt(`${rating}  |  Kursziel ${ccy} ${pt}  |  Upside ${upside}`,
+                  { size: 14, bold: true, color: ratingColor(rating) })
+              ])], { width: 6000, noBorder: true }),
+              cell([para([
+                txt("Seite ", { size: 14, color: C.GRAY_TXT }),
+                new TextRun({ children: [PageNumber.CURRENT], font: "Arial", size: 14 }),
+                txt(" / ", { size: 14, color: C.GRAY_TXT }),
+                new TextRun({ children: [PageNumber.TOTAL_PAGES], font: "Arial", size: 14 }),
+              ], { align: AlignmentType.RIGHT })], { width: 4306, noBorder: true }),
+            ]})]
+          })]
+        })
+      },
+
+      children,
+    }]
+  });
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// ── CLI Entry Point ───────────────────────────────────────────
 
 async function main() {
-  const inputFile  = "output_memo.json";
-  const outputFile = `investment_memo_${new Date().toISOString().slice(0, 10)}.docx`;
+  let data;
 
-  if (!fs.existsSync(inputFile)) {
-    console.error(`Fehler: ${inputFile} nicht gefunden.`);
-    console.error("Bitte zuerst 'python graph/supervisor.py' ausführen.");
-    process.exit(1);
+  // JSON aus Argument oder Stdin lesen
+  if (process.argv[2] && fs.existsSync(process.argv[2])) {
+    data = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  } else {
+    // Von stdin lesen (für Streamlit-Integration)
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   }
 
-  console.log(`Lese ${inputFile}...`);
-  const data = JSON.parse(fs.readFileSync(inputFile, "utf8"));
+  const outputPath = process.argv[3] || "investment_memo.docx";
 
-  console.log("Erstelle Word-Dokument...");
-  const doc = await buildMemo(data);
-
-  const buffer = await Packer.toBuffer(doc);
-  fs.writeFileSync(outputFile, buffer);
-
-  console.log(`\n✓ Investment Memo gespeichert: ${outputFile}`);
-  console.log(`  Empfehlung: ${data.final_recommendation} | Conviction: ${data.conviction_level} | Price Target: ${data.currency || ""} ${data.price_target}`);
+  const doc = buildMemo(data);
+  const buf = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buf);
+  console.log(`OK: ${buf.length} bytes → ${outputPath}`);
 }
 
-main().catch(console.error);
+main().catch(e => {
+  console.error("Fehler:", e.message);
+  process.exit(1);
+});
