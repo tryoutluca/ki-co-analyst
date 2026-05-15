@@ -18,9 +18,6 @@ import os
 
 from tools.finance_tools import search_ticker
 
-# Am Anfang von app.py aufrufen:
-ensure_docx_installed()
-
 # ── Page Config (muss als erstes Streamlit-Call stehen) ──────────────────────
 st.set_page_config(
     page_title="KI-Co-Portfolio-Manager",
