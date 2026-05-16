@@ -180,16 +180,32 @@ _PDF_TYPE_RULES: list[tuple[str, int, list[str], list[str]]] = [
 ]
 
 STANDARD_QUERIES = [
-    "adjusted EPS earnings per share bereinigt",
-    "free cash flow FCF Cashflow",
-    "revenue net sales Umsatz guidance outlook Prognose",
-    "EBITDA margin Marge recurring",
-    "net debt Nettoverschuldung leverage",
-    "dividend Dividende",
-    "capital expenditure capex Investitionen",
-    "consensus estimates analyst forecast 2026 2027 2028",
-    "organic growth targets Ziele strategy Strategie",
-    "return on invested capital ROIC",
+    # 1. Die "Goldgrube": Übersichts-Tabellen & Key Figures
+    "Financial highlights key figures summary table five-year overview",
+    "Kennzahlen Konzernrechnung Gruppenübersicht Mehrjahresvergleich",
+    
+    # 2. Erfolgsrechnung (Für EBITDA, EBIT, Profit)
+    "Consolidated Income Statement Earnings before interest taxes depreciation EBITDA EBIT",
+    "Konsolidierte Erfolgsrechnung Betriebsergebnis vor Abschreibungen",
+    
+    # 3. Bilanz (Für ROE, ROIC, Assets)
+    "Consolidated Balance Sheet total assets equity liabilities cash debt",
+    "Konsolidierte Bilanz Bilanzsumme Eigenkapital Nettoverschuldung",
+    
+    # 4. Cashflow (Für FCF & Investitionen)
+    "Consolidated Statement of Cash Flows operating investing free cash flow FCF",
+    "Geldflussrechnung Investitionen Sachanlagen Capex",
+    
+    # 5. EPS & Guidance (Für Bewertung & Ausblick)
+    "Adjusted EPS earnings per share bereinigter Gewinn pro Aktie restated",
+    "Guidance outlook forecast target profit margin Umsatzprognose Ausblick",
+    
+    # 6. Marktdaten & Konsens
+    "Consensus estimates analyst forecast revenue EPS 2026 2027 2028",
+    "Dividend policy payout per share Dividende Ausschüttung",
+    
+    # 7. Sektor-spezifisch (Für Industrials wie Rieter)
+    "Order intake order backlog Auftragseingang Auftragsbestand",
 ]
 
 _splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
