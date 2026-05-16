@@ -1,4 +1,8 @@
 {
+  "name": "ki-co-analyst-export",
+  "version": "1.0.0",
+  "description": "Word-Export für KI-Co-Analyst Investment Memos",
+  "main": "export_memo.js",
   "dependencies": {
     "docx": "^9.6.1"
   }

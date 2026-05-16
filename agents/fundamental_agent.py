@@ -14,6 +14,7 @@ from tools.finance_tools import (
 from tools.ir_rag_tool import get_ir_analysis, consensus_estimates_from_ir
 from tools.schemas import FundamentalAgentOutput
 from tools.valuation_engine import build_full_financials
+from tools.multiples_engine import MultiplesEngine
 
 load_dotenv()
 
@@ -151,6 +152,30 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
 
     sector = stock_info.get("sector", "N/A")
 
+    print(f"      Berechne Multiples via MultiplesEngine...")
+    try:
+        engine = MultiplesEngine.from_ticker(
+            ticker           = ticker,
+            ir_analysis      = ir_analysis or {},
+            financial_source = (
+                f"IR-Dokument {ir_analysis.get('document_date', '')}"
+                if ir_analysis else "yfinance"
+            ),
+        )
+        all_multiples = engine.compute_all()
+        _summary      = all_multiples.get("_summary", {})
+        _price_meta   = all_multiples.get("_price_data", {})
+        print(
+            f"      ✅ MultiplesEngine: "
+            f"{_summary.get('valid', 0)}/{_summary.get('total_calculated', 0)} "
+            f"Kennzahlen berechnet | "
+            f"Kurs: {_price_meta.get('current_price')} "
+            f"{_price_meta.get('currency')} (yfinance)"
+        )
+    except Exception as e:
+        print(f"      ⚠ MultiplesEngine Fehler: {e}")
+        all_multiples = {}
+
     print(f"      Berechne Konsensschätzungen (dynamische Vorwärtsjahre)...")
     forward_estimates = consensus_estimates_from_ir(
         ticker,
@@ -162,6 +187,9 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
 
     # Build a concise IR context block for the prompt
     ir_context = _format_ir_context(ir_analysis, forward_estimates)
+
+    # Build deterministic multiples context block
+    multiples_context = _format_multiples_context(all_multiples)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", FUNDAMENTAL_PROMPT),
@@ -186,6 +214,8 @@ KURSENTWICKLUNG 3 MONATE (Quelle: yfinance):
 
 {ir_context}
 
+{multiples_context}
+
 AUFGABEN:
 1. Erstelle die strukturierte Fundamentalanalyse als JSON.
 2. Für cashflow_metrics: übernimm die Rohdaten aus CASHFLOW-DATEN und setze \
@@ -208,8 +238,21 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         "historical_multiples": json.dumps(historical_multiples, ensure_ascii=False),
         "price_history":        json.dumps(price_history,        ensure_ascii=False),
         "ir_context":           ir_context,
+        "multiples_context":    multiples_context,
         "format_instructions":  parser.get_format_instructions(),
     })
+
+    # ── MultiplesEngine Post-Processing ──────────────────────────────────────
+    # Deterministische Werte überschreiben LLM-Output für Kennzahlen
+    if isinstance(result, dict) and all_multiples:
+        sector = result.get("sector", "")
+        result["valuation_table"] = _build_valuation_table(all_multiples, sector)
+        result["all_multiples"]   = all_multiples
+        p = all_multiples.get("_price_data", {})
+        if p.get("current_price"):
+            result["current_price"] = p["current_price"]
+        if p.get("market_cap_bn"):
+            result["market_cap_bn"] = p["market_cap_bn"]
 
     # ── Vollständige Finanzübersicht (3A + 3E) ────────────────────────────────
     print(f"      Erstelle vollständige Finanzübersicht...")
@@ -238,6 +281,81 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         result["_valuation_engine"] = valuation
 
     return result
+
+
+def _format_multiples_context(all_multiples: dict) -> str:
+    """Baut den deterministischen Multiples-Block für den LLM-Prompt."""
+    if not all_multiples:
+        return ""
+
+    def fmt(key):
+        r = all_multiples.get(key, {})
+        if r.get("valid"):
+            return f"{r['value']} ({r['formula']})"
+        return "n/v"
+
+    ev_formula = all_multiples.get("_enterprise_value", {}).get("formula", "n/v")
+
+    return f"""=== DETERMINISTISCH BERECHNETE KENNZAHLEN ===
+(Kurs + MarktKap: yfinance | Fundamentaldaten: IR-Dokument)
+
+EV/EBITDA:       {fmt("ev_ebitda")}
+EV/EBIT:         {fmt("ev_ebit")}
+EV/Sales:        {fmt("ev_sales")}
+P/E:             {fmt("pe_ratio")}
+P/B:             {fmt("pb_ratio")}
+P/FCF:           {fmt("p_fcf")}
+Div-Yield:       {fmt("dividend_yield")}
+FCF-Yield:       {fmt("fcf_yield")}
+ND/EBITDA:       {fmt("nd_ebitda")}
+EBITDA-Marge:    {fmt("ebitda_margin")}
+EBIT-Marge:      {fmt("ebit_margin")}
+FCF-Conversion:  {fmt("fcf_conversion")}
+ROE:             {fmt("roe")}
+ROIC:            {fmt("roic")}
+Umsatz-Wachstum: {fmt("revenue_growth")}
+EPS-Wachstum:    {fmt("eps_growth")}
+
+Enterprise Value: {ev_formula}
+
+WICHTIG: Diese Werte sind DETERMINISTISCH BERECHNET.
+Das LLM darf sie NICHT ändern oder überschreiben.
+Verwende diese Werte direkt für valuation_table."""
+
+
+def _build_valuation_table(all_multiples: dict, sector: str) -> list:
+    """Baut valuation_table deterministisch aus MultiplesEngine-Ergebnissen."""
+    sector_lower = sector.lower()
+
+    if any(w in sector_lower for w in ["bank", "versicher", "financ"]):
+        primary = [("P/B", "pb_ratio"), ("ROE", "roe"), ("P/E", "pe_ratio")]
+    elif any(w in sector_lower for w in ["immobil", "reit", "real estate"]):
+        primary = [("EV/EBITDA", "ev_ebitda"), ("Div-Yield", "dividend_yield"), ("P/B", "pb_ratio")]
+    elif any(w in sector_lower for w in ["tech", "software", "saas"]):
+        primary = [("EV/Sales", "ev_sales"), ("EV/EBITDA", "ev_ebitda"), ("P/FCF", "p_fcf")]
+    else:
+        primary = [
+            ("EV/EBITDA", "ev_ebitda"),
+            ("P/E",       "pe_ratio"),
+            ("EV/Sales",  "ev_sales"),
+            ("P/FCF",     "p_fcf"),
+            ("Div-Yield", "dividend_yield"),
+        ]
+
+    table = []
+    for label, key in primary:
+        m = all_multiples.get(key, {})
+        if m.get("valid"):
+            table.append({
+                "metric":             label,
+                "current_value":      str(m["value"]),
+                "peer_average":       "n/v",
+                "historical_average": "n/v",
+                "assessment":         "FAIR",
+                "calculation":        m["formula"],
+                "source":             m["source"],
+            })
+    return table
 
 
 def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:

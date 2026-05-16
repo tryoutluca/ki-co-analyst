@@ -95,7 +95,7 @@ def run_analysis(ticker: str) -> dict:
     }
 
     print(f"\n{'='*60}")
-    print(f"KI-Co-Portfolio-Manager — Analyse: {ticker}")
+    print(f"KI-Co-Analyst — Analyse: {ticker}")
     print(f"{'='*60}")
 
     start_time = datetime.now()

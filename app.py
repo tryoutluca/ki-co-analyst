@@ -1,5 +1,5 @@
 ﻿"""
-app.py — Streamlit Frontend für den KI-Co-Portfolio-Manager
+app.py — Streamlit Frontend für den KI-Co-Analyst
 Berner Fachhochschule | Bachelor Thesis 2025/26 | Luca Lüdi
 
 Start: streamlit run app.py
@@ -14,13 +14,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 import subprocess
-import os
+import tempfile
 
 from tools.finance_tools import search_ticker
 
 # ── Page Config (muss als erstes Streamlit-Call stehen) ──────────────────────
 st.set_page_config(
-    page_title="KI-Co-Portfolio-Manager",
+    page_title="KI-Co-Analyst",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -312,7 +312,7 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
     # Titel
     title = doc.add_heading(f"Investment Memo — {ticker}", 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph(f"Datum: {date} | KI-Co-Portfolio-Manager (BFH 2025/26, Luca Lüdi)").alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph(f"Datum: {date} | KI-Co-Analyst (BFH 2025/26, Luca Lüdi)").alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_paragraph()
 
     # Empfehlung & Kursziel
@@ -380,7 +380,7 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
     # Disclaimer
     doc.add_paragraph()
     disc = doc.add_paragraph(
-        "Disclaimer: Dieses Dokument wurde automatisch durch das KI-Co-Portfolio-Manager System "
+        "Disclaimer: Dieses Dokument wurde automatisch durch das KI-Co-Analyst System "
         "generiert und dient ausschliesslich zu Forschungs- und Demonstrationszwecken. "
         "Es stellt keine Anlageberatung dar."
     )
@@ -392,6 +392,77 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
     return buf.getvalue()
 
 
+# ── Node.js Word-Export ───────────────────────────────────────────────────────
+
+@st.cache_resource
+def ensure_node_deps_installed():
+    """
+    Prüft Node.js-Verfügbarkeit und installiert docx-Library falls nötig.
+    Läuft durch @cache_resource nur einmal pro Session.
+    """
+    try:
+        result = subprocess.run(
+            ["node", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return False, "Node.js nicht verfügbar"
+
+        if not os.path.exists("node_modules/docx"):
+            install = subprocess.run(
+                ["npm", "install", "docx", "--no-audit", "--no-fund"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if install.returncode != 0:
+                return False, f"npm install fehlgeschlagen: {install.stderr[:200]}"
+
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+
+def generate_word_memo(memo_data: dict) -> bytes | None:
+    """
+    Generiert ein professionelles Word-Memo via Node.js (export_memo.js).
+    Gibt None zurück wenn export_memo.js nicht vorhanden oder Node.js fehlt.
+    """
+    if not os.path.exists("export_memo.js"):
+        st.error("export_memo.js nicht gefunden — Word-Export nicht verfügbar.")
+        return None
+
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        output_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["node", "export_memo.js", "-", output_path],
+            input=json.dumps(memo_data, default=str, ensure_ascii=False),
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+        )
+
+        if result.returncode != 0:
+            st.error(
+                f"Word-Export Fehler:\n"
+                f"stderr: {result.stderr}\nstdout: {result.stdout}"
+            )
+            return None
+
+        with open(output_path, "rb") as f:
+            content = f.read()
+        try:
+            os.unlink(output_path)
+        except Exception:
+            pass
+        return content
+
+    except subprocess.TimeoutExpired:
+        st.error("Word-Export Timeout (>30s)")
+        return None
+    except Exception as e:
+        st.error(f"Word-Export Fehler: {e}")
+        return None
+
+
 # ── Pipeline Import (mit Fehlerbehandlung) ────────────────────────────────────
 
 def run_analysis(ticker: str) -> dict:
@@ -400,6 +471,15 @@ def run_analysis(ticker: str) -> dict:
     from graph.graph import run_analysis as _run
     return _run(ticker)
 
+
+# ── Node.js Verfügbarkeit prüfen ─────────────────────────────────────────────
+
+node_ready, node_msg = ensure_node_deps_installed()
+if not node_ready:
+    st.warning(
+        f"⚠️ Word-Export (Node.js) nicht verfügbar: {node_msg}. "
+        f"JSON- und Text-Export funktionieren weiterhin."
+    )
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -411,7 +491,7 @@ with st.sidebar:
         📊 Portfolio Manager
       </div>
       <div style="font-size:0.75rem; color:#8a9bb0; margin-top:0.2rem;">
-        KI-Co-Portfolio-Manager
+        KI-Co-Analyst
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -508,7 +588,7 @@ with st.sidebar:
 
 st.markdown("""
 <div class="main-header">
-  <h1>KI-Co-Portfolio-Manager</h1>
+  <h1>KI-Co-Analyst</h1>
   <p>Berner Fachhochschule · Bachelor Thesis 2025/26 · Luca Lüdi · 
      Multi-Agent Investment Analysis System</p>
 </div>
@@ -1153,52 +1233,65 @@ if st.session_state.result:
 
     # ── Download Buttons ──────────────────────────────────────────────────────
     st.divider()
-    st.markdown("### Export")
-    dl_col1, dl_col2, dl_col3, _ = st.columns([1, 1, 1, 2])
+    st.markdown("### 📥 Investment Memo herunterladen")
+    dl_col1, dl_col2, dl_col3 = st.columns(3)
 
     with dl_col1:
+        if st.button(
+            "📄 Word (.docx) — empfohlen",
+            type="primary",
+            use_container_width=True,
+            disabled=not node_ready,
+            key="btn_word_export",
+        ):
+            with st.spinner("Erstelle professionelles Word-Dokument..."):
+                memo_bytes = generate_word_memo(data)
+                if memo_bytes:
+                    st.download_button(
+                        label="💾 Memo herunterladen",
+                        data=memo_bytes,
+                        file_name=(
+                            f"KI-Co-Analyst_{ticker}_"
+                            f"{datetime.now().strftime('%Y%m%d')}.docx"
+                        ),
+                        mime=(
+                            "application/vnd.openxmlformats-"
+                            "officedocument.wordprocessingml.document"
+                        ),
+                        use_container_width=True,
+                        key="dl_word_memo",
+                    )
+                    st.success("✅ Word-Memo erstellt")
+
+    with dl_col2:
         json_str = json.dumps(data, indent=2, ensure_ascii=False, default=str)
         st.download_button(
-            label="⬇️ JSON herunterladen",
+            "📋 JSON",
             data=json_str,
-            file_name=f"investment_memo_{ticker}_{date}.json",
+            file_name=f"KI-Co-Analyst_{ticker}_data.json",
             mime="application/json",
             use_container_width=True,
         )
 
-    with dl_col2:
-        # Einfaches Text-Memo für Download
+    with dl_col3:
         from graph.supervisor import format_investment_memo
         try:
-            txt = format_investment_memo(data)
+            txt_memo = format_investment_memo(data)
         except Exception:
-            txt = json_str
+            txt_memo = json_str
         st.download_button(
-            label="⬇️ Text-Memo herunterladen",
-            data=txt,
-            file_name=f"investment_memo_{ticker}_{date}.txt",
+            "📝 Text (.txt)",
+            data=txt_memo,
+            file_name=f"KI-Co-Analyst_{ticker}_memo.txt",
             mime="text/plain",
             use_container_width=True,
         )
-
-    with dl_col3:
-        try:
-            docx_bytes = _build_word_memo(data, ticker, date, ccy)
-            st.download_button(
-                label="⬇️ Word herunterladen",
-                data=docx_bytes,
-                file_name=f"Investment Memo_{ticker}_{date}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-        except ImportError:
-            st.warning("python-docx nicht installiert — `pip install python-docx`")
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     st.markdown(f"""
     <div class="disclaimer">
       <strong>Disclaimer:</strong> Dieses Dokument wurde automatisch durch das 
-      KI-Co-Portfolio-Manager System generiert (Bachelor Thesis BFH 2025/26, Luca Lüdi) 
+      KI-Co-Analyst System generiert (Bachelor Thesis BFH 2025/26, Luca Lüdi) 
       und dient ausschliesslich zu Forschungs- und Demonstrationszwecken. 
       Es stellt keine Anlageberatung dar. Alle Angaben basieren auf öffentlich 
       verfügbaren Daten (yfinance, Finnhub, IR-Dokumente) zum Zeitpunkt der Analyse. 

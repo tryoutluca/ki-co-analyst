@@ -1,4 +1,4 @@
-# KI-Co-Portfolio-Manager — Python Dependencies
+# KI-Co-Analyst — Python Dependencies
 
 # Core
 streamlit>=1.32.0

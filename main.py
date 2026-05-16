@@ -100,7 +100,7 @@ def validate_ticker(ticker: str) -> str:
 
 def main():
     print("\n" + "="*60)
-    print("  KI-Co-Portfolio-Manager")
+    print("  KI-Co-Analyst")
     print("  Berner Fachhochschule — Bachelor Thesis 2025/26")
     print("="*60)
 

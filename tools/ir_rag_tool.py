@@ -142,7 +142,7 @@ _EU_PDF_INTERIM = re.compile(
 )
 
 # SEC EDGAR base URLs and constants
-SEC_USER_AGENT         = "KI-Portfolio-Manager research@bfh.ch"
+SEC_USER_AGENT         = "KI-Co-Analyst research@bfh.ch"
 SEC_TICKERS_CACHE      = Path(CACHE_DIR) / "sec_tickers.json"
 SEC_TICKERS_URL        = "https://www.sec.gov/files/company_tickers.json"
 SEC_TICKERS_MAX_AGE_DAYS = 7
