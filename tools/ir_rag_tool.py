@@ -1036,8 +1036,56 @@ Always cite the page or section for every extracted figure.\
 """
 
 _SYNTHESIS_HUMAN = """\
-Extract structured financial data from these IR document excerpts for {company} ({ticker}).
+Du bist ein Senior Buy-Side Analyst. Extrahiere präzise Finanzdaten für {company} ({ticker}) aus den vorliegenden IR-Auszügen.
 
+WICHTIGSTE REGELN FÜR EINHEITEN:
+- Alle Felder, die auf '_bn' enden, müssen in MILLIARDEN (Billions) angegeben werden.
+- Beispiel: Wenn im Bericht '420.1 Millionen CHF' steht, schreibe 0.4201.
+- Beispiel: Wenn im Bericht '1.2 Milliarden CHF' steht, schreibe 1.2.
+- Rechne Millionen-Beträge konsequent durch 1000.
+
+HIERARCHIE DER DATEN:
+1. Suche zuerst nach der Tabelle 'Key Figures', 'Financial Highlights' oder 'Group Overview'.
+2. Bevorzuge 'Adjusted' (bereinigte) Werte gegenüber 'Reported' Werten.
+3. Bevorzuge 'Restated' (angepasste) Vorjahreswerte, falls vorhanden (wichtig bei Kapitalerhöhungen).
+
+yfinance Referenzdaten (nutze diese NUR zum Abgleich, nicht zum Kopieren):
+{yf_data}
+
+Extrahiere die Daten und antworte AUSSCHLIESSLICH mit diesem JSON-Schema:
+{{
+  "revenue_bn": <float or "not found">,
+  "revenue_currency": "<CHF, USD, EUR>",
+  "ebitda_bn": <float - absolut aus Erfolgsrechnung extrahieren oder berechnen>,
+  "ebitda_margin_pct": <float>,
+  "ebit_bn": <float - 'Operating Result' oder 'EBIT' nutzen>,
+  "recurring_ebit_margin_pct": <float - oft als 'EBIT margin before special items' bezeichnet>,
+  "net_income_bn": <float>,
+  "adjusted_eps": <float - Gewinn pro Aktie bereinigt>,
+  "adjusted_eps_note": "<Quelle und Grund der Bereinigung>",
+  "free_cashflow_bn": <float>,
+  "free_cashflow_note": "<Quelle>",
+  "net_debt_bn": <float - positiv=Schulden, negativ=Netto-Cash>,
+  "total_equity_bn": <float - aus der Bilanz>,
+  "total_assets_bn": <float - Bilanzsumme>,
+  "tax_rate_pct": <float - effektiver Steuersatz für ROIC>,
+  "invested_capital_bn": <float - falls explizit genannt>,
+  "dividend_per_share": <float>,
+  "dividend_currency": "<CHF, USD, EUR>",
+  "guidance_2026": "<Zitat zur Guidance für Umsatz/Marge>",
+  "guidance_2027": "<Zitat zur Guidance>",
+  "consensus_eps_2026": <float - falls 'Consensus' Tabelle im IR gefunden wurde>,
+  "consensus_eps_2027": <float>,
+  "consensus_revenue_2026_bn": <float>,
+  "consensus_revenue_2027_bn": <float>,
+  "management_tone": "<optimistic, neutral, cautious>",
+  "key_statements": ["<Direktzitat inkl. Seite [P. X]>"],
+  "pe_distortion_explanation": "<Grund für KGV-Verzerrung (z.B. Kapitalerhöhung 2025, Restructuring)>",
+  "data_quality": "<high, medium, low>",
+  "yfinance_discrepancies": ["<Beschreibung, wenn IR-Wert >10% von yf_data abweicht>"]
+}}
+
+IR document excerpts:
 {context}
 
 yfinance data for cross-checking:
@@ -1265,7 +1313,7 @@ HISTORISCHE DATEN:
 AUFGABE:
 1. Parse den Guidance-Text und extrahiere konkrete Zielwerte für {year_e1}
 2. Extrapoliere {year_e2} und {year_e3} mit historischem CAGR und Sektordurchschnitt
-3. Sei konservativ — im Zweifelsfall niedrigere Wachstumsrate
+3. Sei konservativ - im Zweifelsfall niedrigere Wachstumsrate
 
 Antworte NUR mit diesem JSON:
 {{
@@ -1309,7 +1357,7 @@ JSON-Format (kein erklärender Text):
     "<Annahme 2: Herleitung + Quelle>",
     "<Annahme 3: Herleitung + Quelle>"
   ],
-  "disclaimer": "Diese Schätzungen stammen aus öffentlichen IR-Dokumenten / wurden vom LLM abgeleitet. Kein Ersatz für Bloomberg/FactSet Konsensdaten."
+  "disclaimer": "Diese Schätzungen stammen aus öffentlichen IR-Dokumenten / wurden vom LLM abgeleitet. Schätzung aus IR-Daten."
 }}\
 """
 
@@ -1319,14 +1367,14 @@ def _make_estimate_fallback(base_year: int) -> dict:
         "source":      "LLM-Ableitung — Analyse nicht verfügbar",
         "confidence":  "niedrig",
         "estimates": {
-            e1: {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
-            e2: {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
-            e3: {"revenue_bn": "n/v", "ebitda_margin_pct": "n/v", "eps": "n/v", "source": "n/v"},
+            e1: {"revenue_bn": "-", "ebitda_margin_pct": "-", "eps": "-", "source": "-"},
+            e2: {"revenue_bn": "-", "ebitda_margin_pct": "-", "eps": "-", "source": "-"},
+            e3: {"revenue_bn": "-", "ebitda_margin_pct": "-", "eps": "-", "source": "-"},
         },
         "key_assumptions": [],
         "disclaimer": (
             "Diese Schätzungen stammen aus öffentlichen IR-Dokumenten / wurden vom LLM abgeleitet. "
-            "Kein Ersatz für Bloomberg/FactSet Konsensdaten."
+            "Schätzung aus IR-Daten."
         ),
     }
 
@@ -1352,13 +1400,13 @@ def consensus_estimates_from_ir(
 ) -> dict:
     """
     Returns 3-year forward estimates dynamically based on the last completed fiscal year.
-    NOT a @tool — called directly by fundamental_agent.
+    NOT a @tool - called directly by fundamental_agent.
 
     Fast path: if the IR document already contains consensus_eps and
     consensus_revenue, those are returned directly without an LLM call.
     """
     def _is_found(v) -> bool:
-        return v not in (None, "not found", "n/v", "")
+        return v not in (None, "not found", "n/v", "-", "")
 
     base_year = _base_year_from_historical(historical_data)
     e1 = f"{base_year + 1}E"
@@ -1380,8 +1428,8 @@ def consensus_estimates_from_ir(
             "confidence": "hoch",
             "estimates": {
                 e1: {"revenue_bn": rev_e1, "ebitda_margin_pct": ir_output.get("ebitda_margin_pct", "n/v"), "eps": eps_e1, "source": "direct from IR"},
-                e2: {"revenue_bn": rev_e2, "ebitda_margin_pct": "n/v", "eps": eps_e2, "source": "direct from IR"},
-                e3: {"revenue_bn": rev_e3, "ebitda_margin_pct": "n/v", "eps": eps_e3, "source": "direct from IR"},
+                e2: {"revenue_bn": rev_e2, "ebitda_margin_pct": "-", "eps": eps_e2, "source": "direct from IR"},
+                e3: {"revenue_bn": rev_e3, "ebitda_margin_pct": "-", "eps": eps_e3, "source": "direct from IR"},
             },
             "key_assumptions": [
                 f"Direkt aus IR-Consensus-Dokument entnommen ({', '.join(ir_output.get('ir_sources', ['IR']))}).",
@@ -1389,7 +1437,7 @@ def consensus_estimates_from_ir(
             ],
             "methodology": "Zahlen direkt aus dem vom Unternehmen publizierten Consensus Sheet übernommen.",
             "disclaimer": (
-                "Keine Bloomberg/FactSet Konsensdaten. Quelle: IR Consensus Sheet (direkt vom Unternehmen). "
+                "Quelle: IR Consensus Sheet (direkt vom Unternehmen). "
                 "Kein Ersatz für professionelle Konsensdaten."
             ),
         }
@@ -1434,7 +1482,7 @@ def consensus_estimates_from_ir(
                         f"{e2}/{e3} via historischem CAGR extrapoliert."
                     ),
                     "disclaimer": (
-                        "Keine Bloomberg/FactSet Konsensdaten. Quelle: Management Guidance (IR-Dokument). "
+                        "Quelle: Management Guidance (IR-Dokument). "
                         "Kein Ersatz für professionelle Konsensdaten."
                     ),
                 }
@@ -1461,7 +1509,7 @@ def consensus_estimates_from_ir(
             result = json.loads(raw_json[s:e_pos])
             result.setdefault("methodology", "LLM-Ableitung aus IR-Dokumenten und historischen Daten.")
             result["disclaimer"] = (
-                "Keine Bloomberg/FactSet Konsensdaten. Quelle: LLM-Ableitung aus IR-Dokumenten. "
+                "Quelle: LLM-Ableitung aus IR-Dokumenten. "
                 "Kein Ersatz für professionelle Konsensdaten."
             )
             return result

@@ -62,9 +62,9 @@ def news_node(state: AnalysisState) -> dict:
 
     f_out = state.get("fundamental_output") or {}
     fundamental_context = (
-        f"Empfehlung: {f_out.get('recommendation', 'n/v')}, "
-        f"Fair Value: {f_out.get('fair_value_estimate', 'n/v')}, "
-        f"Bewertung: {f_out.get('valuation_assessment', 'n/v')}"
+        f"Empfehlung: {f_out.get('recommendation', '-')}, "
+        f"Fair Value: {f_out.get('fair_value_estimate', '-')}, "
+        f"Bewertung: {f_out.get('valuation_assessment', '-')}"
     )
 
     try:

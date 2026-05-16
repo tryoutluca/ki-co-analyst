@@ -112,8 +112,8 @@ def run_analysis(ticker: str) -> dict:
         memo["analysis_duration_s"] = round(duration, 1)
         memo["routing_log"] = final_state.get("routing_log", [])
 
-    rec  = memo.get("final_recommendation", "n/v")
-    conv = memo.get("conviction_level", "n/v")
+    rec  = memo.get("final_recommendation", "-")
+    conv = memo.get("conviction_level", "-")
     print(f"✓ ANALYSE ABGESCHLOSSEN in {duration:.1f}s")
     print(f"  Empfehlung: {rec} | Conviction: {conv}")
     print(f"{'='*60}\n")

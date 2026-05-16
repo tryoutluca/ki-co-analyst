@@ -292,9 +292,9 @@ def _format_multiples_context(all_multiples: dict) -> str:
         r = all_multiples.get(key, {})
         if r.get("valid"):
             return f"{r['value']} ({r['formula']})"
-        return "n/v"
+        return "-"
 
-    ev_formula = all_multiples.get("_enterprise_value", {}).get("formula", "n/v")
+    ev_formula = all_multiples.get("_enterprise_value", {}).get("formula", "-")
 
     return f"""=== DETERMINISTISCH BERECHNETE KENNZAHLEN ===
 (Kurs + MarktKap: yfinance | Fundamentaldaten: IR-Dokument)
@@ -349,8 +349,8 @@ def _build_valuation_table(all_multiples: dict, sector: str) -> list:
             table.append({
                 "metric":             label,
                 "current_value":      str(m["value"]),
-                "peer_average":       "n/v",
-                "historical_average": "n/v",
+                "peer_average":       "-",
+                "historical_average": "-",
                 "assessment":         "FAIR",
                 "calculation":        m["formula"],
                 "source":             m["source"],
@@ -367,14 +367,14 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
     else:
         sources = ir_analysis.get("ir_sources", [])
         lines.append(f"IR-Quellen: {', '.join(sources) if sources else 'keine'}")
-        lines.append(f"Datenqualität: {ir_analysis.get('data_quality', 'n/v')}")
+        lines.append(f"Datenqualität: {ir_analysis.get('data_quality', '-')}")
 
         # EPS
         adj_eps = ir_analysis.get("adjusted_eps", "not found")
         if adj_eps != "not found":
             lines.append(
                 f"Adjusted EPS: {adj_eps} "
-                f"(Quelle: IR-Dokument, {ir_analysis.get('adjusted_eps_note', 'n/v')})"
+                f"(Quelle: IR-Dokument, {ir_analysis.get('adjusted_eps_note', '-')})"
             )
         else:
             lines.append("Adjusted EPS: nicht gefunden in IR-Dokumenten")
@@ -383,7 +383,7 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
         fcf = ir_analysis.get("free_cashflow_bn", "not found")
         fcf_ccy = ir_analysis.get("free_cashflow_currency", "")
         lines.append(
-            f"FCF (IR): {fcf} Mrd. {fcf_ccy} ({ir_analysis.get('free_cashflow_note', 'n/v')})"
+            f"FCF (IR): {fcf} Mrd. {fcf_ccy} ({ir_analysis.get('free_cashflow_note', '-')})"
         )
 
         # Revenue + margins
@@ -410,7 +410,7 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
             if v and v != "not found":
                 lines.append(f"{label}: {v}")
 
-        lines.append(f"Management Tone: {ir_analysis.get('management_tone', 'n/v')}")
+        lines.append(f"Management Tone: {ir_analysis.get('management_tone', '-')}")
 
         # P/E distortion explanation
         pe_note = ir_analysis.get("pe_distortion_explanation", "none")
@@ -426,15 +426,15 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
 
     lines.append("")
     lines.append(
-        f"FORWARD-SCHÄTZUNGEN (Quelle: {forward_estimates.get('source', 'n/v')}, "
-        f"Konfidenz: {forward_estimates.get('confidence', 'n/v')})"
+        f"FORWARD-SCHÄTZUNGEN (Quelle: {forward_estimates.get('source', '-')}, "
+        f"Konfidenz: {forward_estimates.get('confidence', '-')})"
     )
     for year, est in forward_estimates.get("estimates", {}).items():
         lines.append(
-            f"  {year}: Umsatz {est.get('revenue_bn', 'n/v')} Mrd. | "
-            f"EBITDA-Marge {est.get('ebitda_margin_pct', 'n/v')}% | "
-            f"EPS {est.get('eps', 'n/v')} "
-            f"[{est.get('source', 'n/v')}]"
+            f"  {year}: Umsatz {est.get('revenue_bn', '-')} Mrd. | "
+            f"EBITDA-Marge {est.get('ebitda_margin_pct', '-')}% | "
+            f"EPS {est.get('eps', '-')} "
+            f"[{est.get('source', '-')}]"
         )
     for assumption in forward_estimates.get("key_assumptions", []):
         lines.append(f"  Annahme: {assumption}")

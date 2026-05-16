@@ -155,7 +155,7 @@ def get_stock_info(ticker: str) -> dict:
     """Holt allgemeine Unternehmensinformationen und aktuelle Kennzahlen.
     Kurs/Marktkapitalisierung/Aktien: primär Finnhub.
     Alle anderen Felder (Sektor, Multiples, etc.): yfinance."""
-    NA_FINAL = "n/v — IR-Dokument empfohlen"
+    NA_FINAL = "-"
 
     # ── Schritt 1: Finnhub für die drei Live-Werte ────────────────────────────
     fh_price:      float | None = None
@@ -1053,12 +1053,12 @@ def get_peer_financials(ticker: str) -> dict:
             total_debt = info.get("totalDebt") or 0
             total_cash = info.get("totalCash") or 0
             ebitda     = info.get("ebitda") or 0
-            nd_ebitda  = "n/v"
+            nd_ebitda  = "-"
             if ebitda and ebitda != 0:
                 nd_ebitda = round((total_debt - total_cash) / ebitda, 2)
 
             op_margin = info.get("operatingMargins")
-            ebit_margin = round(op_margin * 100, 1) if op_margin is not None else "n/v"
+            ebit_margin = round(op_margin * 100, 1) if op_margin is not None else "-"
 
             div_yield = info.get("dividendYield")
             div_pct = round((div_yield or 0) * 100, 2)
@@ -1067,21 +1067,21 @@ def get_peer_financials(ticker: str) -> dict:
             rev_growth_pct = round((rev_growth or 0) * 100, 1)
 
             roe = info.get("returnOnEquity")
-            roic = round(roe * 100, 1) if roe is not None else "n/v"
+            roic = round(roe * 100, 1) if roe is not None else "-"
 
-            ev_ebitda = info.get("enterpriseToEbitda", "n/v")
-            if ev_ebitda is not None and ev_ebitda != "n/v":
+            ev_ebitda = info.get("enterpriseToEbitda", "-")
+            if ev_ebitda is not None and ev_ebitda not in ("n/v", "-"):
                 try:
                     ev_ebitda = round(float(ev_ebitda), 1)
                 except (TypeError, ValueError):
-                    ev_ebitda = "n/v"
+                    ev_ebitda = "-"
 
-            fwd_pe = info.get("forwardPE", "n/v")
-            if fwd_pe is not None and fwd_pe != "n/v":
+            fwd_pe = info.get("forwardPE", "-")
+            if fwd_pe is not None and fwd_pe not in ("n/v", "-"):
                 try:
                     fwd_pe = round(float(fwd_pe), 1)
                 except (TypeError, ValueError):
-                    fwd_pe = "n/v"
+                    fwd_pe = "-"
 
             return {
                 "company":            info.get("longName", t),
@@ -1111,9 +1111,9 @@ def get_peer_financials(ticker: str) -> dict:
             "company": subject_info.get("longName", ticker),
             "ticker": ticker,
             "country": subject_info.get("country", "N/A"),
-            "ev_ebitda": "n/v", "forward_pe": "n/v", "ebit_margin_pct": "n/v",
-            "nd_ebitda": "n/v", "dividend_yield_pct": "n/v",
-            "revenue_growth_pct": "n/v", "roic_pct": "n/v",
+            "ev_ebitda": "-", "forward_pe": "-", "ebit_margin_pct": "-",
+            "nd_ebitda": "-", "dividend_yield_pct": "-",
+            "revenue_growth_pct": "-", "roic_pct": "-",
         }
 
     # ── Schritt 4: Sektor-Durchschnitte (Ausreisser entfernen) ───────────────
@@ -1123,7 +1123,7 @@ def get_peer_financials(ticker: str) -> dict:
     ]
 
     def _avg_clean(values: list) -> float | str:
-        nums = [float(v) for v in values if v not in ("n/v", None, "") and str(v) != "n/v"]
+        nums = [float(v) for v in values if v not in ("n/v", "-", None, "") and str(v) not in ("n/v", "-")]
         if not nums:
             return "n/v"
         try:
@@ -1163,9 +1163,9 @@ def get_peer_financials(ticker: str) -> dict:
                 pct = round((sv - av) / abs(av) * 100, 1)
                 subject_vs_avg[field] = f"+{pct}%" if pct >= 0 else f"{pct}%"
             else:
-                subject_vs_avg[field] = "n/v"
+                subject_vs_avg[field] = "-"
         except (TypeError, ValueError):
-            subject_vs_avg[field] = "n/v"
+            subject_vs_avg[field] = "-"
 
     return {
         "sector":                    sector,

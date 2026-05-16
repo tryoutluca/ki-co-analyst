@@ -1,4 +1,4 @@
-﻿"""
+"""
 app.py — Streamlit Frontend für den KI-Co-Analyst
 Berner Fachhochschule | Bachelor Thesis 2025/26 | Luca Lüdi
 
@@ -273,7 +273,7 @@ def format_number(value, prefix="", suffix="", decimals=2) -> str:
         v = float(value)
         return f"{prefix}{v:,.{decimals}f}{suffix}"
     except (TypeError, ValueError):
-        return str(value) if value else "n/v"
+        return str(value) if value else "-"
 
 
 def load_demo_output() -> dict | None:
@@ -316,7 +316,7 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
     doc.add_paragraph()
 
     # Empfehlung & Kursziel
-    rec = data.get("recommendation", "n/v")
+    rec = data.get("recommendation", "-")
     pt = data.get("price_target", 0)
     cp = data.get("current_price", 0)
     add_heading("Empfehlung & Kursziel", 1)
@@ -327,7 +327,7 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
 
     # Unternehmensbeschreibung
     add_heading("Unternehmensbeschreibung", 1)
-    doc.add_paragraph(data.get("company_description", "n/v"))
+    doc.add_paragraph(data.get("company_description", "-"))
 
     # Investment Case
     add_heading("Investment Case", 1)
@@ -341,7 +341,7 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
 
     # Finale Begründung
     add_heading("Finale Begründung", 1)
-    doc.add_paragraph(data.get("final_reasoning", "n/v"))
+    doc.add_paragraph(data.get("final_reasoning", "-"))
 
     # Szenarien
     add_heading("Szenarien", 1)
@@ -633,10 +633,10 @@ if run_button and selected_ticker:
             # ── Schritt 1: Fundamental-Agent ─────────────────────────────────
             st.write("🔍 **Fundamental-Agent** — Daten abrufen & DCF-Bewertung…")
             fundamental_output = run_fundamental_agent(ticker)
-            rec   = fundamental_output.get("recommendation", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "recommendation", "n/v")
-            fv    = fundamental_output.get("fair_value_estimate", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "fair_value_estimate", "n/v")
-            updn  = fundamental_output.get("upside_downside_pct", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "upside_downside_pct", "n/v")
-            val   = fundamental_output.get("valuation_assessment", "n/v") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "valuation_assessment", "n/v")
+            rec   = fundamental_output.get("recommendation", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "recommendation", "-")
+            fv    = fundamental_output.get("fair_value_estimate", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "fair_value_estimate", "-")
+            updn  = fundamental_output.get("upside_downside_pct", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "upside_downside_pct", "-")
+            val   = fundamental_output.get("valuation_assessment", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "valuation_assessment", "-")
             st.write(f"   ✅ Empfehlung: **{rec}** | Fair Value: {fv} | Upside: {updn}% | Bewertung: {val}")
 
             # Investment Case Bullets
@@ -652,9 +652,9 @@ if run_button and selected_ticker:
                 f"Empfehlung: {rec}, Fair Value: {fv}, Bewertung: {val}"
             )
             news_output = run_news_agent(ticker, fundamental_context)
-            sentiment    = news_output.get("overall_sentiment_score", "n/v") if isinstance(news_output, dict) else getattr(news_output, "overall_sentiment_score", "n/v")
-            st_outlook   = news_output.get("short_term_outlook", "n/v") if isinstance(news_output, dict) else getattr(news_output, "short_term_outlook", "n/v")
-            macro_dir    = news_output.get("overall_macro_direction", "n/v") if isinstance(news_output, dict) else getattr(news_output, "overall_macro_direction", "n/v")
+            sentiment    = news_output.get("overall_sentiment_score", "-") if isinstance(news_output, dict) else getattr(news_output, "overall_sentiment_score", "-")
+            st_outlook   = news_output.get("short_term_outlook", "-") if isinstance(news_output, dict) else getattr(news_output, "short_term_outlook", "-")
+            macro_dir    = news_output.get("overall_macro_direction", "-") if isinstance(news_output, dict) else getattr(news_output, "overall_macro_direction", "-")
             st.write(f"   ✅ Sentiment: **{sentiment}/10** | Kurzfrist-Outlook: {st_outlook} | Makro: {macro_dir}")
 
             # Top-News
@@ -669,7 +669,7 @@ if run_button and selected_ticker:
             # ── Schritt 3: Risk/Advocatus-Agent ──────────────────────────────
             st.write("⚖️ **Risk-Agent** — Advocatus Diaboli & Szenarien…")
             risk_output  = run_risk_agent(ticker, fundamental_output, news_output)
-            risk_rec     = risk_output.get("original_recommendation", "n/v") if isinstance(risk_output, dict) else getattr(risk_output, "original_recommendation", "n/v")
+            risk_rec     = risk_output.get("original_recommendation", "-") if isinstance(risk_output, dict) else getattr(risk_output, "original_recommendation", "-")
             counter      = risk_output.get("counter_position", "") if isinstance(risk_output, dict) else getattr(risk_output, "counter_position", "")
             st.write(f"   ✅ Gegenposition zu **{risk_rec}**: {counter}")
 
@@ -700,9 +700,9 @@ if run_button and selected_ticker:
             # ── Schritt 5: Supervisor-Synthese ────────────────────────────────
             st.write("✍️ **Supervisor** — Finales Investment Memo wird synthetisiert…")
             result = synthesize_memo(ticker, fundamental_output, news_output, risk_output)
-            final_rec = result.get("final_recommendation", "n/v")
-            conviction = result.get("conviction_level", "n/v")
-            pt         = result.get("price_target", "n/v")
+            final_rec = result.get("final_recommendation", "-")
+            conviction = result.get("conviction_level", "-")
+            pt         = result.get("price_target", "-")
             st.write(f"   ✅ Finale Empfehlung: **{final_rec}** | Conviction: {conviction} | Kursziel: {pt}")
 
             status.update(label=f"✓ Analyse abgeschlossen — {result.get('company', ticker)}", state="complete", expanded=False)
@@ -738,7 +738,7 @@ if run_button and selected_ticker:
 if st.session_state.result:
     data = st.session_state.result
     rec   = data.get("final_recommendation", "HALTEN")
-    conv  = data.get("conviction_level", "n/v")
+    conv  = data.get("conviction_level", "-")
     pt    = data.get("price_target", 0)
     price = data.get("current_price", 0)
     updn  = data.get("upside_downside_pct", 0)
@@ -835,7 +835,7 @@ if st.session_state.result:
             # Unternehmensbeschreibung
             st.markdown('<div class="section-header">Unternehmensbeschreibung</div>',
                        unsafe_allow_html=True)
-            st.markdown(data.get("company_description", "n/v"))
+            st.markdown(data.get("company_description", "-"))
 
             # Investment Case
             st.markdown('<div class="section-header">Investment Case</div>',
@@ -857,7 +857,7 @@ if st.session_state.result:
             st.markdown(f"""
             <div style="background:#f8f9fa; border-radius:8px; padding:1rem; 
                         font-size:0.88rem; line-height:1.7; color:#495057;">
-              {data.get('final_reasoning', 'n/v')}
+              {data.get('final_reasoning', '-')}
             </div>""", unsafe_allow_html=True)
 
         with col_right:
@@ -886,7 +886,7 @@ if st.session_state.result:
             <div style="background:#fff5f5; border:1px solid #fca5a5; 
                         border-radius:8px; padding:1rem; font-size:0.85rem; 
                         line-height:1.6; color:#7f1d1d;">
-              {data.get('advocatus_diaboli_summary', 'n/v')}
+              {data.get('advocatus_diaboli_summary', '-')}
             </div>""", unsafe_allow_html=True)
 
             # Quellen
@@ -917,9 +917,9 @@ if st.session_state.result:
                 }.get(assessment, assessment)
                 rows.append({
                     "Kennzahl":     row.get("metric", ""),
-                    "Aktuell":      row.get("current_value", "n/v"),
-                    "Peer Ø":       row.get("peer_average", "n/v"),
-                    "Hist. Ø":      row.get("historical_average", "n/v"),
+                    "Aktuell":      row.get("current_value", "-"),
+                    "Peer Ø":       row.get("peer_average", "-"),
+                    "Hist. Ø":      row.get("historical_average", "-"),
                     "Einschätzung": assess_label,
                     "Quelle":       row.get("source", ""),
                 })
@@ -954,11 +954,11 @@ if st.session_state.result:
                 year_label = f"📊 {row.get('year', '')}" if is_estimate else row.get("year", "")
                 rows.append({
                     "Jahr":          year_label,
-                    "Umsatz (Mrd.)": row.get("revenue_bn", "n/v"),
-                    "EBITDA-%":      row.get("ebitda_margin_pct", "n/v"),
-                    "EPS":           row.get("eps", "n/v"),
-                    "EV/EBITDA":     row.get("ev_ebitda", "n/v"),
-                    "KGV":           row.get("pe_ratio", "n/v"),
+                    "Umsatz (Mrd.)": row.get("revenue_bn", "-"),
+                    "EBITDA-%":      row.get("ebitda_margin_pct", "-"),
+                    "EPS":           row.get("eps", "-"),
+                    "EV/EBITDA":     row.get("ev_ebitda", "-"),
+                    "KGV":           row.get("pe_ratio", "-"),
                 })
             df_ce = pd.DataFrame(rows)
             st.dataframe(
@@ -989,7 +989,7 @@ if st.session_state.result:
                     "Jahr":           ("📊 " if is_est else "") + str(yr.get("year", "")),
                     "Umsatz (Mrd.)":  yr.get("revenue_bn",        "n/v"),
                     "EBITDA (Mrd.)":  yr.get("ebitda_bn",         "n/v"),
-                    "EBITDA-%":       yr.get("ebitda_margin_pct", "n/v"),
+                    "EBITDA-%":       yr.get("ebitda_margin_pct", "-"),
                     "EBIT-%":         yr.get("ebit_margin_pct",   "n/v"),
                     "EPS (adj.)":     yr.get("eps_adj",           "n/v"),
                     "DPS":            yr.get("dps",               "n/v"),
@@ -1004,7 +1004,7 @@ if st.session_state.result:
                 "📊 = Schätzwert (E) | "
                 "Istzahlen aus IR-Dokument / yfinance | "
                 "Schätzungen: Consensus / Guidance / LLM-Ableitung | "
-                "Kein Ersatz für Bloomberg/FactSet Konsensdaten"
+                "Schätzung: LLM-Ableitung aus IR-Daten"
             )
         else:
             st.info("Vollständige Finanzübersicht nicht verfügbar — Analyse erneut ausführen.")
@@ -1036,12 +1036,12 @@ if st.session_state.result:
                     "Unternehmen":        ("⭐ " if is_subj else "Ø " if is_avg else "")
                                          + str(p.get("company", "")),
                     "Land":              p.get("country", ""),
-                    "EV/EBITDA":         p.get("ev_ebitda", "n/v"),
-                    "Fwd. P/E":          p.get("forward_pe", "n/v"),
-                    "EBIT-%":            p.get("ebit_margin_pct", "n/v"),
-                    "ND/EBITDA":         p.get("nd_ebitda", "n/v"),
-                    "Div.-Yield":        p.get("dividend_yield_pct", "n/v"),
-                    "Umsatz-Wachstum":   p.get("revenue_growth_pct", "n/v"),
+                    "EV/EBITDA":         p.get("ev_ebitda", "-"),
+                    "Fwd. P/E":          p.get("forward_pe", "-"),
+                    "EBIT-%":            p.get("ebit_margin_pct", "-"),
+                    "ND/EBITDA":         p.get("nd_ebitda", "-"),
+                    "Div.-Yield":        p.get("dividend_yield_pct", "-"),
+                    "Umsatz-Wachstum":   p.get("revenue_growth_pct", "-"),
                 })
 
             df_peer = pd.DataFrame(rows_peer)
@@ -1071,7 +1071,7 @@ if st.session_state.result:
 
             st.caption(
                 f"Quelle: yfinance | Peer-Identifikation: Finnhub + Sektor-Fallback | "
-                f"Methodik: {pc.get('methodology', 'n/v')}"
+                f"Methodik: {pc.get('methodology', '-')}"
             )
         else:
             st.info("Peer-Vergleich nicht verfügbar — Analyse erneut ausführen.")

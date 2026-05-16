@@ -19,7 +19,7 @@ def route_after_fundamental(state: AnalysisState) -> str:
         return "proceed_news_with_warning"
 
     fv = f_out.get("fair_value_estimate")
-    if not fv or fv in ("n/v", "N/A", None):
+    if not fv or fv in ("n/v", "-", "N/A", None):
         if retry < 2:
             print(f"      [edge] Retry fundamental ({retry+1}/2): Fair Value fehlt")
             return "retry_fundamental"

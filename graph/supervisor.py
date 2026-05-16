@@ -103,13 +103,13 @@ INVESTMENT CASE Regeln:
 CONSENSUS ESTIMATES Tabelle:
 - 2 historische Jahre (A=Actual) aus Finanzkennzahlen
 - 3 Vorwärtsjahre (E=Estimate) aus Konsensschätzungen
-- Falls Schätzungen fehlen: markiere als "n/v — Bloomberg/FactSet empfohlen"
+- Falls Schätzungen fehlen: mit "-" markieren
 
 VOLLSTÄNDIGE FINANZÜBERSICHT (full_financials):
 - Übernehme die 6-Jahres-Tabelle (3A + 3E) exakt aus dem Fundamental-Agent Output
 - Kennzeichne Schätzjahre explizit als (E) im year-Feld
 - Die Felder source müssen den Disclaimer enthalten:
-  "A = Istzahlen | E = Schätzung (Quelle: [source]) | kein Ersatz für Bloomberg/FactSet"
+  "A = Istzahlen | E = Schätzung (Quelle: [source]) | "
 - Falls full_financials fehlen: leere Liste zurückgeben
 
 PEER-VERGLEICH (peer_comparison):

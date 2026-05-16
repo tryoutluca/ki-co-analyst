@@ -18,7 +18,7 @@ import yfinance as yf
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_NOT_FOUND = {"not found", "n/v", "N/A", "nicht verfügbar", "", None}
+_NOT_FOUND = {"not found", "n/v", "-", "N/A", "nicht verfügbar", "", None}
 
 
 def _safe_float(value) -> float | None:
@@ -48,15 +48,15 @@ def _get(obj, key: str, default=None):
 
 def _pct(value: float | None) -> str:
     """Format float as rounded percentage string or 'n/v'."""
-    return f"{round(value * 100, 2)}" if value is not None else "n/v"
+    return f"{round(value * 100, 2)}" if value is not None else "-"
 
 
 def _round2(value: float | None) -> float | str:
-    return round(value, 2) if value is not None else "n/v"
+    return round(value, 2) if value is not None else "-"
 
 
 def _round1(value: float | None) -> float | str:
-    return round(value, 1) if value is not None else "n/v"
+    return round(value, 1) if value is not None else "-"
 
 
 def _base_year_int(historical_financials: dict, ir_data: dict) -> int:
@@ -290,7 +290,7 @@ def derive_forward_estimates(
 
         consensus_note = (
             f"LLM +{round(g_rev * 100, 1)}% — "
-            "Kein Bloomberg/FactSet Konsens verfügbar"
+            "Schätzung aus IR-Daten"
         )
 
         estimates[year] = {
@@ -317,7 +317,7 @@ def derive_forward_estimates(
         f"System schätzt +{sys_growth_pct}% Umsatzwachstum "
         f"(IR-Basis{ir_override_note} + Makro {round(macro_adj * 100, 1)}% "
         f"+ Industrie {round(industry_adj * 100, 1)}% + Szenario-Gewichtung) "
-        f"vs implizierter Markterwartung: Kein Bloomberg/FactSet Konsens verfügbar. "
+        f"vs implizierter Markterwartung: Schätzung aus IR-Daten. "
         f"{valuation_signal}"
     )
 
@@ -325,14 +325,14 @@ def derive_forward_estimates(
         "method": "IR-Basis + Makro-Adjustment + Risk-Gewichtung",
         "assumptions": {
             "historical_revenue_cagr_pct": (
-                round(revenue_cagr * 100, 2) if revenue_cagr is not None else "n/v"
+                round(revenue_cagr * 100, 2) if revenue_cagr is not None else "-"
             ),
             "macro_adjustment_pct":    round(macro_adj    * 100, 2),
             "industry_adjustment_pct": round(industry_adj * 100, 2),
             "scenario_weights": {
-                "bear": int(bear_prob) if bear_prob is not None else "n/v",
-                "base": int(base_prob) if base_prob is not None else "n/v",
-                "bull": int(bull_prob) if bull_prob is not None else "n/v",
+                "bear": int(bear_prob) if bear_prob is not None else "-",
+                "base": int(base_prob) if base_prob is not None else "-",
+                "bull": int(bull_prob) if bull_prob is not None else "-",
             },
             "ir_guidance_used": ir_guidance_used,
         },
@@ -340,8 +340,7 @@ def derive_forward_estimates(
         "peer_comparison": {},
         "market_vs_system_note": market_vs_system_note,
         "disclaimer": (
-            "Keine Bloomberg/FactSet Konsensdaten verfügbar — "
-            "LLM-Ableitung aus IR + Makro + Risikoszenarien"
+            "Schätzung: LLM-Ableitung aus IR + Makro + Risikoszenarien"
         ),
     }
 
@@ -384,7 +383,7 @@ def build_peer_forward_table(
                 "year":             year,
                 "forward_pe_2026e": _round1(fwd_pe),
                 "ev_ebitda_2026e":  _round1(ev_ebitda),
-                "market_cap_bn":    _round1(mktcap / 1e9) if mktcap else "n/v",
+                "market_cap_bn":    _round1(mktcap / 1e9) if mktcap else "-",
                 "is_primary":       t == ticker,
             })
         except Exception:
@@ -392,9 +391,9 @@ def build_peer_forward_table(
                 "ticker":           t,
                 "name":             t,
                 "year":             year,
-                "forward_pe_2026e": "n/v",
-                "ev_ebitda_2026e":  "n/v",
-                "market_cap_bn":    "n/v",
+                "forward_pe_2026e": "-",
+                "ev_ebitda_2026e":  "-",
+                "market_cap_bn":    "-",
                 "is_primary":       t == ticker,
             })
 
@@ -418,7 +417,7 @@ def run_dcf(
         Dict mit ebitda, fcf, eps, net_debt, book_value_per_share
         plus je ein *_source-Feld zur Nachvollziehbarkeit.
     """
-    _NF = {"not found", "n/v", "N/A", "nicht verfügbar", "", None}
+    _NF = {"not found", "n/v", "-", "N/A", "nicht verfügbar", "", None}
 
     def _ir(key):
         v = ir_analysis.get(key)
@@ -432,7 +431,7 @@ def run_dcf(
 
     # ── EBITDA: IR (revenue × margin) → yfinance ─────────────────────────────
     ebitda: float | None = None
-    ebitda_source = "n/v"
+    ebitda_source = "-"
     ir_margin  = _safe_float(_ir("ebitda_margin_pct"))
     ir_revenue = _safe_float(_ir("revenue_bn"))
     if ir_margin is not None and ir_revenue is not None:
@@ -445,7 +444,7 @@ def run_dcf(
 
     # ── FCF: IR → yfinance cashflow_data ─────────────────────────────────────
     fcf: float | None = None
-    fcf_source = "n/v"
+    fcf_source = "-"
     ir_fcf = _safe_float(_ir("free_cashflow_bn"))
     if ir_fcf is not None:
         fcf = ir_fcf * 1e9
@@ -457,7 +456,7 @@ def run_dcf(
 
     # ── EPS: IR adjusted → yfinance trailing ─────────────────────────────────
     eps: float | None = None
-    eps_source = "n/v"
+    eps_source = "-"
     ir_eps = _safe_float(_ir("adjusted_eps"))
     if ir_eps is not None:
         eps = ir_eps
@@ -469,7 +468,7 @@ def run_dcf(
 
     # ── Net Debt: IR → yfinance (Schulden − Kasse) ───────────────────────────
     net_debt: float | None = None
-    net_debt_source = "n/v"
+    net_debt_source = "-"
     ir_nd = _safe_float(_ir("net_debt_bn"))
     if ir_nd is not None:
         net_debt = ir_nd * 1e9
@@ -534,7 +533,7 @@ def build_valuation_table(dcf_inputs: dict) -> list[dict]:
         ev = mktcap + net_debt
 
     # ── P/E ──────────────────────────────────────────────────────────────────
-    pe_val, pe_calc = None, "n/v"
+    pe_val, pe_calc = None, "-"
     if price and eps:
         pe_val = price / eps
         pe_calc = (
@@ -543,16 +542,16 @@ def build_valuation_table(dcf_inputs: dict) -> list[dict]:
         )
     rows.append({
         "metric":             "P/E (KGV)",
-        "current_value":      f"{pe_val:.1f}x" if pe_val is not None else "n/v",
+        "current_value":      f"{pe_val:.1f}x" if pe_val is not None else "-",
         "calculation":        pe_calc,
-        "peer_average":       "n/v",
-        "historical_average": "n/v",
+        "peer_average":       "-",
+        "historical_average": "-",
         "assessment":         "FAIR",
-        "source":             dcf_inputs.get("eps_source", "n/v"),
+        "source":             dcf_inputs.get("eps_source", "-"),
     })
 
     # ── EV/EBITDA ─────────────────────────────────────────────────────────────
-    ev_ebitda_val, ev_ebitda_calc = None, "n/v"
+    ev_ebitda_val, ev_ebitda_calc = None, "-"
     if ev is not None and ebitda:
         ev_ebitda_val = ev / ebitda
         ev_ebitda_calc = (
@@ -562,16 +561,16 @@ def build_valuation_table(dcf_inputs: dict) -> list[dict]:
         )
     rows.append({
         "metric":             "EV/EBITDA",
-        "current_value":      f"{ev_ebitda_val:.1f}x" if ev_ebitda_val is not None else "n/v",
+        "current_value":      f"{ev_ebitda_val:.1f}x" if ev_ebitda_val is not None else "-",
         "calculation":        ev_ebitda_calc,
-        "peer_average":       "n/v",
-        "historical_average": "n/v",
+        "peer_average":       "-",
+        "historical_average": "-",
         "assessment":         "FAIR",
-        "source":             dcf_inputs.get("ebitda_source", "n/v"),
+        "source":             dcf_inputs.get("ebitda_source", "-"),
     })
 
     # ── EV/FCF ────────────────────────────────────────────────────────────────
-    ev_fcf_val, ev_fcf_calc = None, "n/v"
+    ev_fcf_val, ev_fcf_calc = None, "-"
     if ev is not None and fcf:
         ev_fcf_val = ev / fcf
         ev_fcf_calc = (
@@ -581,16 +580,16 @@ def build_valuation_table(dcf_inputs: dict) -> list[dict]:
         )
     rows.append({
         "metric":             "EV/FCF",
-        "current_value":      f"{ev_fcf_val:.1f}x" if ev_fcf_val is not None else "n/v",
+        "current_value":      f"{ev_fcf_val:.1f}x" if ev_fcf_val is not None else "-",
         "calculation":        ev_fcf_calc,
-        "peer_average":       "n/v",
-        "historical_average": "n/v",
+        "peer_average":       "-",
+        "historical_average": "-",
         "assessment":         "FAIR",
-        "source":             dcf_inputs.get("fcf_source", "n/v"),
+        "source":             dcf_inputs.get("fcf_source", "-"),
     })
 
     # ── P/B ───────────────────────────────────────────────────────────────────
-    pb_val, pb_calc = None, "n/v"
+    pb_val, pb_calc = None, "-"
     if price and bvps:
         pb_val = price / bvps
         pb_calc = (
@@ -599,10 +598,10 @@ def build_valuation_table(dcf_inputs: dict) -> list[dict]:
         )
     rows.append({
         "metric":             "P/B (Kurs/Buchwert)",
-        "current_value":      f"{pb_val:.1f}x" if pb_val is not None else "n/v",
+        "current_value":      f"{pb_val:.1f}x" if pb_val is not None else "-",
         "calculation":        pb_calc,
-        "peer_average":       "n/v",
-        "historical_average": "n/v",
+        "peer_average":       "-",
+        "historical_average": "-",
         "assessment":         "FAIR",
         "source":             dcf_inputs.get("bvps_source", "yfinance"),
     })
@@ -627,10 +626,10 @@ def build_full_financials(
     Priorität historisch: IR-Dokument > yfinance income_stmt > yfinance info
     Priorität Forward:    IR-Consensus > Guidance + LLM-Ableitung
 
-    Fehlende Werte werden als "n/v — Bloomberg/FactSet empfohlen" markiert.
+    Fehlende Werte werden als "-" markiert.
     Returns liste von dicts kompatibel mit FullFinancialYear.
     """
-    NV = "n/v — Bloomberg/FactSet empfohlen"
+    NV = "-"
     current_year = datetime.now().year
     historical_years = [current_year - 3, current_year - 2, current_year - 1]
 
@@ -872,7 +871,7 @@ def build_full_financials(
                 "ebit_bn": NV, "ebit_margin_pct": NV, "net_income_bn": NV,
                 "eps_adj": NV, "dps": NV, "fcf_bn": NV,
                 "net_debt_bn": NV, "nd_ebitda": NV, "roic_pct": NV, "capex_bn": NV,
-                "source": "LLM-Ableitung — kein Bloomberg/FactSet Konsens verfügbar",
+                "source": "LLM-Ableitung aus IR-Daten",
             })
             continue
 
@@ -920,7 +919,7 @@ def build_full_financials(
         est_src = est.get("source", "LLM-Ableitung")
         src_label = (
             f"{fwd_source_base} | {est_src} | "
-            "LLM-basierte Approximation. Kein Ersatz für Bloomberg/FactSet Konsensdaten"
+            "Schätzung: LLM-Ableitung aus IR-Daten"
         )
 
         result.append({

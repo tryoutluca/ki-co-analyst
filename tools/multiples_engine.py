@@ -126,5 +126,149 @@ class MultiplesEngine:
             total_assets=assets,
             eps=eps,
             dps=safe_f(ir_analysis.get("dividend_per_share") or yf_info.get("dividendRate")),
-            financial_source=financial_source
+            financial_source=financial_source,
         )
+
+    # ── Berechnungs-Helfer ────────────────────────────────────────────────────
+
+    def _r(self, v) -> float | None:
+        return round(v, 2) if v is not None else None
+
+    def _ratio(self, label: str, num, den, suffix: str = "x") -> dict:
+        src = f"yfinance Kurs + {self.fin_src}"
+        if num is None or den is None or den == 0:
+            return {"valid": False, "value": None, "formula": f"{label} = -", "source": src}
+        val = round(num / den, 2)
+        return {
+            "valid":   True,
+            "value":   val,
+            "formula": f"{label} = {self._r(num)} / {self._r(den)} = {val}{suffix}",
+            "source":  src,
+        }
+
+    def _pct(self, label: str, num, den) -> dict:
+        src = self.fin_src
+        if num is None or den is None or den == 0:
+            return {"valid": False, "value": None, "formula": f"{label} = -", "source": src}
+        val = round(num / den * 100, 1)
+        return {
+            "valid":   True,
+            "value":   val,
+            "formula": f"{label} = {self._r(num)} / {self._r(den)} = {val}%",
+            "source":  src,
+        }
+
+    # ── compute_all ───────────────────────────────────────────────────────────
+
+    def compute_all(self) -> dict:
+        """Berechnet alle 16 Kennzahlen deterministisch. Gibt dict zurück."""
+        ev  = self._ev
+        mc  = self.mktcap
+        nd  = (self.debt or 0) - (self.cash or 0)
+        cap = (self.equity or 0) + nd  # Invested Capital Näherung
+
+        results: dict = {}
+
+        # Enterprise-Value Multiples
+        results["ev_ebitda"]  = self._ratio("EV/EBITDA",  ev, self.ebitda)
+        results["ev_ebit"]    = self._ratio("EV/EBIT",    ev, self.ebit)
+        results["ev_sales"]   = self._ratio("EV/Umsatz",  ev, self.revenue)
+        results["ev_fcf"]     = self._ratio("EV/FCF",     ev, self.fcf)
+
+        # Preis-Multiples
+        results["pe_ratio"]   = self._ratio("P/E",   mc, self.ni)
+        results["pb_ratio"]   = self._ratio("P/B",   mc, self.equity)
+        results["ps_ratio"]   = self._ratio("P/S",   mc, self.revenue)
+        results["p_fcf"]      = self._ratio("P/FCF", mc, self.fcf)
+
+        # Yield
+        if self.dps and self.price and self.price > 0:
+            val = round(self.dps / self.price * 100, 2)
+            results["dividend_yield"] = {
+                "valid":   True, "value": val,
+                "formula": f"DPS {self.dps} / Kurs {self.price} = {val}%",
+                "source":  f"yfinance Kurs + {self.fin_src}",
+            }
+        else:
+            results["dividend_yield"] = {"valid": False, "value": None,
+                                         "formula": "DPS / Kurs = -", "source": self.fin_src}
+
+        if self.fcf and mc and mc > 0:
+            val = round(self.fcf / mc * 100, 2)
+            results["fcf_yield"] = {
+                "valid":   True, "value": val,
+                "formula": f"FCF {self._r(self.fcf)} / MarktKap {self._r(mc)} = {val}%",
+                "source":  f"yfinance Kurs + {self.fin_src}",
+            }
+        else:
+            results["fcf_yield"] = {"valid": False, "value": None,
+                                    "formula": "FCF / MarktKap = -", "source": self.fin_src}
+
+        # Verschuldung
+        if self.ebitda and self.ebitda != 0:
+            val = round(nd / self.ebitda, 2)
+            results["nd_ebitda"] = {
+                "valid":   True, "value": val,
+                "formula": f"NetDebt {self._r(nd)} / EBITDA {self._r(self.ebitda)} = {val}x",
+                "source":  self.fin_src,
+            }
+        else:
+            results["nd_ebitda"] = {"valid": False, "value": None,
+                                    "formula": "NetDebt / EBITDA = -", "source": self.fin_src}
+
+        # Margen
+        results["ebitda_margin"]  = self._pct("EBITDA-Marge",  self.ebitda, self.revenue)
+        results["ebit_margin"]    = self._pct("EBIT-Marge",    self.ebit,   self.revenue)
+        results["net_margin"]     = self._pct("Nettomarge",    self.ni,     self.revenue)
+        results["gross_margin"]   = self._pct("Bruttomarge",   self.gp,     self.revenue)
+        results["fcf_conversion"] = self._pct("FCF-Conversion", self.fcf,   self.ni)
+
+        # Renditen
+        results["roe"]  = self._pct("ROE",  self.ni,     self.equity)
+        results["roa"]  = self._pct("ROA",  self.ni,     self.assets)
+        if self.nopat_val and self.ic and self.ic != 0:
+            results["roic"] = self._pct("ROIC", self.nopat_val, self.ic)
+        else:
+            results["roic"] = self._pct("ROIC (EBIT/Kapital)", self.ebit, cap if cap != 0 else None)
+
+        # Wachstum
+        if self.rev_prev and self.rev_prev != 0 and self.revenue:
+            val = round((self.revenue - self.rev_prev) / self.rev_prev * 100, 1)
+            results["revenue_growth"] = {
+                "valid":   True, "value": val,
+                "formula": f"Umsatz ({self._r(self.revenue)} - {self._r(self.rev_prev)}) / {self._r(self.rev_prev)} = {val}%",
+                "source":  self.fin_src,
+            }
+        else:
+            results["revenue_growth"] = {"valid": False, "value": None,
+                                         "formula": "Umsatz YoY = -", "source": self.fin_src}
+
+        if self.eps_prev and self.eps_prev != 0 and self.eps:
+            val = round((self.eps - self.eps_prev) / self.eps_prev * 100, 1)
+            results["eps_growth"] = {
+                "valid":   True, "value": val,
+                "formula": f"EPS ({self.eps} - {self.eps_prev}) / {self.eps_prev} = {val}%",
+                "source":  self.fin_src,
+            }
+        else:
+            results["eps_growth"] = {"valid": False, "value": None,
+                                     "formula": "EPS YoY = -", "source": self.fin_src}
+
+        # Meta-Felder
+        ev_str = (
+            f"EV = MarktKap {self._r(mc)} + Schulden {self._r(self.debt or 0)} "
+            f"- Cash {self._r(self.cash or 0)} = {self._r(ev)} Mrd."
+            if ev is not None else "EV = -"
+        )
+        results["_enterprise_value"] = {"formula": ev_str}
+        results["_price_data"] = {
+            "current_price": self.price,
+            "market_cap_bn": mc,
+            "currency":      self.currency,
+        }
+        valid_n = sum(1 for k, v in results.items()
+                      if not k.startswith("_") and isinstance(v, dict) and v.get("valid"))
+        total_n = sum(1 for k in results if not k.startswith("_"))
+        results["_summary"] = {"valid": valid_n, "total_calculated": total_n}
+
+        return results
