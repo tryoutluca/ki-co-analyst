@@ -47,27 +47,33 @@ class MultiplesEngine:
             self._ev = round(self.mktcap + (self.debt or 0) - (self.cash or 0), 3)
 
     @classmethod
-    def from_ticker(cls, ticker: str, ir_analysis: dict, financial_source: str = "IR-Dokument") -> "MultiplesEngine":
-        stock = yf.Ticker(ticker)
+    def from_ticker(
+        cls,
+        ticker:           str,
+        ir_analysis:      dict,
+        financial_source: str        = "IR-Dokument",
+        hist_data:        dict | None = None,
+    ) -> "MultiplesEngine":
+        stock   = yf.Ticker(ticker)
         yf_info = stock.info
-        
+
         def safe_f(val, scale=1.0):
             try:
-                if val in (None, "n/v", "not found", ""): return None
+                if val in (None, "n/v", "not found", "", "-"): return None
                 return float(val) * scale
-            except: return None
+            except Exception: return None
 
         # 1. Basis-Daten (yfinance)
-        price = yf_info.get("currentPrice") or yf_info.get("regularMarketPrice")
-        mktcap = safe_f(yf_info.get("marketCap"), 1e-9) # In Mrd.
-        shares = safe_f(yf_info.get("sharesOutstanding"), 1e-9) # In Mrd.
+        price  = yf_info.get("currentPrice") or yf_info.get("regularMarketPrice")
+        mktcap = safe_f(yf_info.get("marketCap"), 1e-9)          # Mrd.
+        shares = safe_f(yf_info.get("sharesOutstanding"), 1e-9)   # Mrd.
 
-        # 2. Finanzdaten-Extraktion mit Fallback-Logik (IR -> yfinance)
+        # 2. Finanzdaten — IR zuerst, dann yfinance
         # Revenue
         rev = safe_f(ir_analysis.get("revenue_bn"))
         if rev is None: rev = safe_f(yf_info.get("totalRevenue"), 1e-9)
 
-        # EBITDA (Absoluter Wert hat Vorrang vor Marge)
+        # EBITDA
         ebitda = safe_f(ir_analysis.get("ebitda_bn"))
         if ebitda is None:
             ebitda_m = safe_f(ir_analysis.get("ebitda_margin_pct"))
@@ -79,22 +85,24 @@ class MultiplesEngine:
         if ebit is None:
             ebit_m = safe_f(ir_analysis.get("recurring_ebit_margin_pct") or ir_analysis.get("ebit_margin_pct"))
             if rev and ebit_m: ebit = rev * (ebit_m / 100)
-        if ebit is None: ebit = safe_f(yf_info.get("operatingCashflow"), 1e-9) # Sehr grober Fallback
+        if ebit is None: ebit = safe_f(yf_info.get("operatingCashflow"), 1e-9)
 
-        # Net Income / EPS
+        # Gross Profit
+        gp = safe_f(ir_analysis.get("gross_profit_bn"))
+        if gp is None: gp = safe_f(yf_info.get("grossProfits"), 1e-9)
+
+        # EPS / Net Income
         eps = safe_f(ir_analysis.get("adjusted_eps"))
         if eps is None: eps = safe_f(yf_info.get("trailingEps"))
-        
+
         ni = safe_f(ir_analysis.get("net_income_bn"))
         if ni is None and eps and shares: ni = eps * shares
         if ni is None: ni = safe_f(yf_info.get("netIncomeToCommon"), 1e-9)
 
         # Cash & Debt
-        # Wichtig: Wenn IR nur 'Net Debt' liefert, setzen wir Debt=NetDebt und Cash=0 für den EV
         net_debt = safe_f(ir_analysis.get("net_debt_bn"))
-        debt = safe_f(yf_info.get("totalDebt"), 1e-9)
-        cash = safe_f(yf_info.get("totalCash"), 1e-9)
-        
+        debt     = safe_f(yf_info.get("totalDebt"), 1e-9)
+        cash     = safe_f(yf_info.get("totalCash"), 1e-9)
         if net_debt is not None:
             debt = net_debt if net_debt > 0 else 0
             cash = abs(net_debt) if net_debt < 0 else 0
@@ -103,12 +111,37 @@ class MultiplesEngine:
         fcf = safe_f(ir_analysis.get("free_cashflow_bn"))
         if fcf is None: fcf = safe_f(yf_info.get("freeCashflow"), 1e-9)
 
-        # Buchwert / Equity
+        # Equity — IR → yfinance totalStockholderEquity → bookValue × shares
         equity = safe_f(ir_analysis.get("total_equity_bn"))
         if equity is None: equity = safe_f(yf_info.get("totalStockholderEquity"), 1e-9)
-        
+        if equity is None:
+            bvps = safe_f(yf_info.get("bookValue"))
+            if bvps and shares:
+                equity = bvps * shares   # BVPS (CHF/Aktie) × Aktien (Mrd.) = Mrd. CHF
+
+        # Assets
         assets = safe_f(ir_analysis.get("total_assets_bn"))
         if assets is None: assets = safe_f(yf_info.get("totalAssets"), 1e-9)
+
+        # 3. Historische Vorjahreswerte aus hist_data (für Wachstumsberechnung)
+        rev_prev = None
+        eps_prev = None
+        dps_hist = None
+        if hist_data:
+            sorted_years = sorted(hist_data.keys(), reverse=True)
+            if len(sorted_years) >= 2:
+                prev_yr  = sorted_years[1]
+                rev_prev = safe_f(hist_data[prev_yr].get("revenue_bn"))
+                eps_prev = safe_f(hist_data[prev_yr].get("eps"))
+            if sorted_years:
+                dps_hist = safe_f(hist_data[sorted_years[0]].get("dps"))
+
+        # DPS — IR → hist_data → yfinance dividendRate
+        dps = (
+            safe_f(ir_analysis.get("dividend_per_share"))
+            or dps_hist
+            or safe_f(yf_info.get("dividendRate"))
+        )
 
         return cls(
             current_price=price,
@@ -118,6 +151,7 @@ class MultiplesEngine:
             revenue=rev,
             ebitda=ebitda,
             ebit=ebit,
+            gross_profit=gp,
             net_income=ni,
             fcf=fcf,
             total_debt=debt,
@@ -125,7 +159,9 @@ class MultiplesEngine:
             total_equity=equity,
             total_assets=assets,
             eps=eps,
-            dps=safe_f(ir_analysis.get("dividend_per_share") or yf_info.get("dividendRate")),
+            dps=dps,
+            revenue_prev=rev_prev,
+            eps_prev=eps_prev,
             financial_source=financial_source,
         )
 

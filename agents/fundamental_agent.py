@@ -10,10 +10,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.finance_tools import (
     get_stock_info, get_financial_statements, get_price_history,
     get_cashflow_data, get_historical_multiples, get_peer_financials,
+    get_historical_financials, build_estimate_anchors,
 )
 from tools.ir_rag_tool import get_ir_analysis, consensus_estimates_from_ir
 from tools.schemas import FundamentalAgentOutput
-from tools.valuation_engine import build_full_financials
 from tools.multiples_engine import MultiplesEngine
 
 load_dotenv()
@@ -150,6 +150,9 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
     print(f"      Analysiere IR-Dokumente (RAG)...")
     ir_analysis = get_ir_analysis.invoke(ticker)
 
+    print(f"      Hole historische Finanzdaten (Loop)...")
+    hist_data = get_historical_financials.invoke(ticker)
+
     sector = stock_info.get("sector", "N/A")
 
     print(f"      Berechne Multiples via MultiplesEngine...")
@@ -161,6 +164,7 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
                 f"IR-Dokument {ir_analysis.get('document_date', '')}"
                 if ir_analysis else "yfinance"
             ),
+            hist_data        = hist_data,
         )
         all_multiples = engine.compute_all()
         _summary      = all_multiples.get("_summary", {})
@@ -184,6 +188,37 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
         sector,
     )
     relevant_multiples = get_relevant_multiples(sector)
+
+    # ── Peer-Vergleich (vor LLM — wird für Estimate-Anker benötigt) ──────────
+    print(f"      Erstelle Peer-Vergleich...")
+    peer_comparison = get_peer_financials(ticker)
+
+    # ── Estimate-Anker deterministisch berechnen ──────────────────────────────
+    print(f"      Berechne Estimate-Anker...")
+    estimate_anchors = build_estimate_anchors(
+        ticker          = ticker,
+        hist_data       = hist_data,
+        ir_analysis     = ir_analysis or {},
+        peer_comparison = peer_comparison,
+    )
+    print(f"        {estimate_anchors.get('methodology')}")
+
+    estimate_context = (
+        f"=== ESTIMATE-ANKER (deterministisch berechnet) ===\n"
+        f"Historischer Revenue-CAGR:  {estimate_anchors.get('revenue_cagr_3y', '-')}% p.a.\n"
+        f"EBITDA-Marge Ø hist.:       {estimate_anchors.get('ebitda_margin_avg', '-')}%\n"
+        f"EBITDA-Marge Trend:         {estimate_anchors.get('ebitda_margin_trend', '-')}pp p.a.\n"
+        f"EPS-CAGR hist.:             {estimate_anchors.get('eps_cagr_3y', '-')}% p.a.\n"
+        f"Peer-Wachstum Median:       {estimate_anchors.get('peer_revenue_growth', '-')}%\n"
+        f"Empfohlenes Wachstum:       {estimate_anchors.get('recommended_growth', 3.0)}%\n"
+        f"Konfidenz:                  {estimate_anchors.get('confidence', 'niedrig')}\n"
+        f"Methodik:                   {estimate_anchors.get('methodology', '')}\n"
+        f"Management Guidance:        {estimate_anchors.get('management_guidance', {})}\n"
+        f"\n"
+        f"WICHTIG: Verwende diese Anker für Forward-Estimates.\n"
+        f"Weiche nur mit expliziter Begründung davon ab.\n"
+        f"Ein EPS-Sprung >200% in einem Jahr ist NICHT plausibel."
+    )
 
     # Build a concise IR context block for the prompt
     ir_context = _format_ir_context(ir_analysis, forward_estimates)
@@ -216,6 +251,8 @@ KURSENTWICKLUNG 3 MONATE (Quelle: yfinance):
 
 {multiples_context}
 
+{estimate_context}
+
 AUFGABEN:
 1. Erstelle die strukturierte Fundamentalanalyse als JSON.
 2. Für cashflow_metrics: übernimm die Rohdaten aus CASHFLOW-DATEN und setze \
@@ -239,6 +276,7 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         "price_history":        json.dumps(price_history,        ensure_ascii=False),
         "ir_context":           ir_context,
         "multiples_context":    multiples_context,
+        "estimate_context":     estimate_context,
         "format_instructions":  parser.get_format_instructions(),
     })
 
@@ -254,16 +292,25 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         if p.get("market_cap_bn"):
             result["market_cap_bn"] = p["market_cap_bn"]
 
-    # ── Vollständige Finanzübersicht (3A + 3E) ────────────────────────────────
+    # ── Vollständige Finanzübersicht (historisch + Forward) ───────────────────
     print(f"      Erstelle vollständige Finanzübersicht...")
-    full_financials = build_full_financials(
-        ticker, stock_info, financials, cashflow_data,
-        ir_analysis, forward_estimates, historical_multiples
-    )
+    forward_estimates_list = []
+    for yr, est in (forward_estimates.get("estimates") or {}).items():
+        forward_estimates_list.append({
+            "year":             yr,
+            "type":             "E",
+            "revenue_bn":       est.get("revenue_bn"),
+            "ebitda_margin_pct": est.get("ebitda_margin_pct"),
+            "eps_adj":          est.get("eps"),
+            "source":           est.get("source", forward_estimates.get("source", "-")),
+        })
 
-    # ── Peer-Vergleich ────────────────────────────────────────────────────────
-    print(f"      Erstelle Peer-Vergleich...")
-    peer_comparison = get_peer_financials(ticker)
+    full_financials = build_full_financials(
+        hist_data         = hist_data,
+        ir_analysis       = ir_analysis or {},
+        forward_estimates = forward_estimates_list,
+        n_years           = 5,
+    )
 
     # ── Valuation Engine Inputs (DCF + Multiples) ─────────────────────────────
     from tools.valuation_engine import run_dcf, build_valuation_table
@@ -280,6 +327,85 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         result["_peer_comparison"]  = peer_comparison
         result["_valuation_engine"] = valuation
 
+    return result
+
+
+def build_full_financials(
+    hist_data:         dict,
+    ir_analysis:       dict,
+    forward_estimates: list,
+    n_years:           int = 5,
+) -> list:
+    """
+    Kombiniert historische yfinance-Daten, IR-Override für letztes Jahr
+    und Forward-Estimates zu einer einheitlichen Finanzübersicht.
+    """
+    if not hist_data:
+        return forward_estimates or []
+
+    last_year = max(hist_data.keys())
+
+    def safe_ir(key):
+        val = ir_analysis.get(key)
+        if val and str(val) not in ("n/v", "not found", "", "-", "N/A"):
+            try:
+                return float(val)
+            except Exception:
+                return None
+        return None
+
+    overrides = {
+        "revenue_bn":        safe_ir("revenue_bn"),
+        "ebitda_margin_pct": safe_ir("ebitda_margin_pct"),
+        "net_debt_bn":       safe_ir("net_debt_bn"),
+        "fcf_bn":            safe_ir("free_cashflow_bn"),
+        "eps":               safe_ir("adjusted_eps"),
+        "dps":               safe_ir("dps"),
+    }
+
+    applied = []
+    for key, val in overrides.items():
+        if val is not None:
+            hist_data[last_year][key] = val
+            applied.append(key)
+
+    if "ebitda_margin_pct" in applied or "revenue_bn" in applied:
+        rev = hist_data[last_year].get("revenue_bn")
+        m   = hist_data[last_year].get("ebitda_margin_pct")
+        if rev and m:
+            hist_data[last_year]["ebitda_bn"] = round(rev * m / 100, 4)
+
+    if applied:
+        hist_data[last_year]["source"] = "IR-Dokument (bereinigt)"
+        print(f"      IR-Override {last_year}: {applied}")
+
+    years = sorted(hist_data.keys(), reverse=True)[:n_years]
+
+    result = []
+    for yr in sorted(years):
+        d = hist_data[yr]
+        result.append({
+            "year":              f"{yr}A",
+            "type":              "A",
+            "revenue_bn":        d.get("revenue_bn"),
+            "ebitda_bn":         d.get("ebitda_bn"),
+            "ebitda_margin_pct": d.get("ebitda_margin_pct"),
+            "ebit_bn":           d.get("ebit_bn"),
+            "ebit_margin_pct":   d.get("ebit_margin_pct"),
+            "net_income_bn":     d.get("net_income_bn"),
+            "eps_adj":           d.get("eps"),
+            "dps":               d.get("dps"),
+            "fcf_bn":            d.get("fcf_bn"),
+            "net_debt_bn":       d.get("net_debt_bn"),
+            "nd_ebitda":         d.get("nd_ebitda"),
+            "roe_pct":           d.get("roe_pct"),
+            "roic_pct":          d.get("roic_pct"),
+            "capex_bn":          d.get("capex_bn"),
+            "gross_margin_pct":  d.get("gross_margin_pct"),
+            "source":            d.get("source", "yfinance"),
+        })
+
+    result.extend(forward_estimates or [])
     return result
 
 
@@ -446,5 +572,5 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
 
 
 if __name__ == "__main__":
-    result = run_fundamental_agent("RIEN.SW")
+    result = run_fundamental_agent("HOLN.SW")
     print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -339,31 +339,531 @@ def get_recent_news(ticker: str) -> list:
 
 @tool
 def get_historical_multiples(ticker: str) -> dict:
-    """Holt historische Bewertungskennzahlen (P/E, P/B, EV/EBITDA) der letzten 5 Jahre via Finnhub."""
+    """Historische Bewertungskennzahlen der letzten 5 Jahre.
+    Primär: Finnhub annual series.
+    Fallback: deterministisch aus yfinance DataFrames + Jahresend-Kursen."""
+    import pandas as pd
+
+    # ── Schritt 1: Finnhub (primär) ───────────────────────────────────────────
+    finnhub_result: dict = {}
     try:
-        client = get_finnhub_client()
+        client  = get_finnhub_client()
         metrics = client.company_basic_financials(ticker, "all")
-        series = metrics.get("series", {}).get("annual", {})
+        series  = metrics.get("series", {}).get("annual", {})
 
         def extract_series(key):
             data = series.get(key, [])
-            # Neueste 5 Jahre: nach period absteigend sortieren
             sorted_data = sorted(data, key=lambda d: d.get("period", ""), reverse=True)
             return [{"period": d.get("period"), "value": d.get("v")} for d in sorted_data[:5]]
 
-        return {
-            "ticker": ticker,
-            "pe_ratio": extract_series("pe"),
-            "pb_ratio": extract_series("pb"),
-            "ps_ratio": extract_series("ps"),
-            "ev_to_ebitda": extract_series("currentEv/freeCashflowTTM"),
-            "roe": extract_series("roeTTM"),
-            "roa": extract_series("roaTTM"),
-            "net_margin": extract_series("netProfitMarginTTM"),
+        finnhub_result = {
+            "ticker":         ticker,
+            "source":         "finnhub",
+            "pe_ratio":       extract_series("pe"),
+            "pb_ratio":       extract_series("pb"),
+            "ps_ratio":       extract_series("ps"),
+            "ev_to_ebitda":   extract_series("currentEv/freeCashflowTTM"),
+            "roe":            extract_series("roeTTM"),
+            "roa":            extract_series("roaTTM"),
+            "net_margin":     extract_series("netProfitMarginTTM"),
             "revenue_growth": extract_series("revenueGrowthTTMYoy"),
         }
+
+        # Nur zurückgeben wenn mindestens eine Series Daten hat
+        has_data = any(
+            len(finnhub_result.get(k, [])) > 0
+            for k in ("pe_ratio", "pb_ratio", "ev_to_ebitda")
+        )
+        if has_data:
+            return finnhub_result
+    except Exception:
+        pass
+
+    # ── Schritt 2: yfinance Fallback ──────────────────────────────────────────
+    print(f"        Finnhub leer — berechne historische Multiples via yfinance für {ticker}...")
+
+    empty_result = {
+        "ticker": ticker, "source": "yfinance",
+        "pe_ratio": [], "pb_ratio": [], "ps_ratio": [],
+        "ev_to_ebitda": [], "ev_to_sales": [], "ev_to_fcf": [],
+        "roe": [], "roa": [], "net_margin": [], "revenue_growth": [],
+        "nd_ebitda": [],
+    }
+
+    try:
+        stock = yf.Ticker(ticker)
+        info  = stock.info or {}
+
+        def safe_df(attr: str) -> pd.DataFrame:
+            try:
+                df = getattr(stock, attr)
+                return df if (df is not None and not df.empty) else pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
+
+        inc = safe_df("income_stmt")
+        bs  = safe_df("balance_sheet")
+        cf  = safe_df("cashflow")
+
+        if inc.empty:
+            return empty_result
+
+        # Jahresend-Kurse (gesamte verfügbare History)
+        price_hist = pd.DataFrame()
+        try:
+            price_hist = stock.history(period="max", auto_adjust=True)
+        except Exception:
+            pass
+
+        def col_for_year(df: pd.DataFrame, year: str):
+            for c in df.columns:
+                try:
+                    yr = c.year if hasattr(c, "year") else int(str(c)[:4])
+                    if str(yr) == year:
+                        return c
+                except Exception:
+                    pass
+            return None
+
+        def get_v(df: pd.DataFrame, col, *fields):
+            if df.empty or col is None:
+                return None
+            for f in fields:
+                if f in df.index:
+                    try:
+                        val = df.loc[f, col]
+                        if val is not None and not (isinstance(val, float) and str(val) == "nan"):
+                            return float(val)
+                    except Exception:
+                        pass
+            return None
+
+        def to_bn(v):
+            if v is None:
+                return None
+            try:
+                v = float(v)
+                if abs(v) > 1_000_000:
+                    return v / 1e9
+                if abs(v) > 100:
+                    return v / 1e3
+                return v
+            except Exception:
+                return None
+
+        # Alle Jahre aus income_stmt ermitteln
+        years = []
+        for c in inc.columns:
+            try:
+                yr = c.year if hasattr(c, "year") else int(str(c)[:4])
+                if 2015 <= yr <= 2030:
+                    years.append(str(yr))
+            except Exception:
+                pass
+        years = sorted(set(years), reverse=True)[:5]
+
+        pe_series, pb_series, ps_series    = [], [], []
+        ev_ebitda_series, ev_sales_series  = [], []
+        ev_fcf_series                      = []
+        roe_series, roa_series             = [], []
+        net_margin_series, rev_growth_s    = [], []
+        nd_ebitda_series                   = []
+        prev_revenue = None
+
+        for year in sorted(years):
+            inc_col = col_for_year(inc, year)
+            bs_col  = col_for_year(bs,  year)
+            cf_col  = col_for_year(cf,  year)
+
+            # ── Jahresend-Kurs ────────────────────────────────────────────────
+            year_end_price = None
+            if not price_hist.empty:
+                try:
+                    yr_prices = price_hist[price_hist.index.year == int(year)]
+                    if not yr_prices.empty:
+                        year_end_price = float(yr_prices["Close"].iloc[-1])
+                except Exception:
+                    pass
+
+            # Fallback: aktueller Kurs nur für letztes Jahr
+            if year_end_price is None and year == years[-1]:
+                year_end_price = (
+                    info.get("currentPrice") or info.get("regularMarketPrice")
+                )
+
+            # ── Finanzdaten ───────────────────────────────────────────────────
+            revenue    = to_bn(get_v(inc, inc_col, "Total Revenue", "Revenue"))
+            net_income = to_bn(get_v(inc, inc_col, "Net Income",
+                                     "Net Income Common Stockholders"))
+            ebit       = to_bn(get_v(inc, inc_col, "EBIT", "Operating Income",
+                                     "Operating Income Loss"))
+            da         = to_bn(get_v(cf, cf_col,
+                                     "Depreciation And Amortization",
+                                     "Depreciation Amortization Depletion"))
+            if da is None:
+                da = to_bn(get_v(inc, inc_col, "Reconciled Depreciation"))
+            op_cf  = to_bn(get_v(cf, cf_col, "Operating Cash Flow",
+                                  "Cash Flow From Continuing Operating Activities"))
+            capex_raw = to_bn(get_v(cf, cf_col, "Capital Expenditure",
+                                    "Purchase Of PPE", "Capital Expenditures"))
+            capex  = -abs(capex_raw) if capex_raw else None
+            fcf    = to_bn(get_v(cf, cf_col, "Free Cash Flow"))
+            if fcf is None and op_cf and capex:
+                fcf = op_cf + capex
+
+            equity = to_bn(get_v(bs, bs_col, "Common Stock Equity",
+                                  "Stockholders Equity",
+                                  "Total Equity Gross Minority Interest"))
+            assets = to_bn(get_v(bs, bs_col, "Total Assets"))
+            debt   = to_bn(get_v(bs, bs_col, "Total Debt",
+                                  "Long Term Debt And Capital Lease Obligation"))
+            cash   = to_bn(get_v(bs, bs_col, "Cash And Cash Equivalents",
+                                  "Cash Cash Equivalents And Short Term Investments"))
+            shares = to_bn(get_v(inc, inc_col, "Diluted Average Shares",
+                                  "Basic Average Shares"))
+
+            ebitda  = (ebit + abs(da) if (ebit and da) else None)
+            net_debt = (debt - cash if (debt is not None and cash is not None) else None)
+
+            # ── Multiples berechnen ───────────────────────────────────────────
+            if year_end_price and shares and shares > 0:
+                mktcap = year_end_price * shares  # in Mrd. (shares already in Mrd.)
+                ev     = mktcap + (net_debt or 0)
+
+                if net_income and net_income > 0:
+                    pe_series.append({"period": year, "value": round(mktcap / net_income, 2)})
+                if equity and equity > 0:
+                    pb_series.append({"period": year, "value": round(mktcap / equity, 2)})
+                if revenue and revenue > 0:
+                    ps_series.append({"period": year, "value": round(mktcap / revenue, 2)})
+                if ebitda and ebitda > 0:
+                    ev_ebitda_series.append({"period": year, "value": round(ev / ebitda, 2)})
+                if revenue and revenue > 0:
+                    ev_sales_series.append({"period": year, "value": round(ev / revenue, 2)})
+                if fcf and fcf > 0:
+                    ev_fcf_series.append({"period": year, "value": round(ev / fcf, 2)})
+
+            if net_income and equity and equity > 0:
+                roe_series.append({"period": year, "value": round(net_income / equity * 100, 1)})
+            if net_income and assets and assets > 0:
+                roa_series.append({"period": year, "value": round(net_income / assets * 100, 1)})
+            if net_income and revenue and revenue > 0:
+                net_margin_series.append({"period": year, "value": round(net_income / revenue * 100, 1)})
+            if net_debt is not None and ebitda and ebitda > 0:
+                nd_ebitda_series.append({"period": year, "value": round(net_debt / ebitda, 2)})
+            if prev_revenue and prev_revenue > 0 and revenue:
+                rev_growth_s.append({
+                    "period": year,
+                    "value": round((revenue - prev_revenue) / prev_revenue * 100, 1),
+                })
+            prev_revenue = revenue
+
+        return {
+            "ticker":         ticker,
+            "source":         "yfinance",
+            "pe_ratio":       list(reversed(pe_series)),
+            "pb_ratio":       list(reversed(pb_series)),
+            "ps_ratio":       list(reversed(ps_series)),
+            "ev_to_ebitda":   list(reversed(ev_ebitda_series)),
+            "ev_to_sales":    list(reversed(ev_sales_series)),
+            "ev_to_fcf":      list(reversed(ev_fcf_series)),
+            "roe":            list(reversed(roe_series)),
+            "roa":            list(reversed(roa_series)),
+            "net_margin":     list(reversed(net_margin_series)),
+            "revenue_growth": list(reversed(rev_growth_s)),
+            "nd_ebitda":      list(reversed(nd_ebitda_series)),
+        }
+
     except Exception as e:
-        return {"error": str(e), "ticker": ticker}
+        return {**empty_result, "error": str(e)}
+
+
+@tool
+def get_historical_financials(ticker: str) -> dict:
+    """
+    Holt historische Jahresdaten via yfinance DataFrames
+    und berechnet alle Kennzahlen deterministisch per Loop.
+
+    Datenquellen:
+      stock.income_stmt   → Revenue, EBIT, Net Income
+      stock.balance_sheet → Debt, Cash, Equity, Assets
+      stock.cashflow      → Operating CF, Capex, D&A
+
+    Returns dict pro Jahr:
+      { "2022": { revenue_bn, ebitda_bn, eps, net_debt_bn, ... }, ... }
+    """
+    import pandas as pd
+
+    print(f"      Hole historische Finanzdaten für {ticker}...")
+
+    try:
+        stock = yf.Ticker(ticker)
+
+        def safe_df(attr: str) -> pd.DataFrame:
+            try:
+                df = getattr(stock, attr)
+                return df if (df is not None and not df.empty) else pd.DataFrame()
+            except Exception as e:
+                print(f"        ⚠ {attr}: {e}")
+                return pd.DataFrame()
+
+        inc = safe_df("income_stmt")
+        bs  = safe_df("balance_sheet")
+        cf  = safe_df("cashflow")
+
+        all_years: set = set()
+        for df in [inc, bs, cf]:
+            if not df.empty:
+                for col in df.columns:
+                    try:
+                        yr = col.year if hasattr(col, "year") else int(str(col)[:4])
+                        if 2015 <= yr <= 2030:
+                            all_years.add(str(yr))
+                    except Exception:
+                        pass
+
+        if not all_years:
+            print(f"        ⚠ Keine historischen Daten für {ticker}")
+            return {}
+
+        print(f"        Verfügbare Jahre: {sorted(all_years)}")
+
+        def get_val(df: pd.DataFrame, year: str, *fields):
+            if df.empty:
+                return None
+            col_match = None
+            for c in df.columns:
+                try:
+                    yr = c.year if hasattr(c, "year") else int(str(c)[:4])
+                    if str(yr) == year:
+                        col_match = c
+                        break
+                except Exception:
+                    pass
+            if col_match is None:
+                return None
+            for field in fields:
+                if field in df.index:
+                    try:
+                        val = df.loc[field, col_match]
+                        if val is not None and not (
+                            isinstance(val, float) and str(val) == "nan"
+                        ):
+                            return float(val)
+                    except Exception:
+                        continue
+            return None
+
+        def to_bn(val) -> float | None:
+            if val is None:
+                return None
+            try:
+                v = float(val)
+                if abs(v) > 1_000_000:
+                    return round(v / 1e9, 4)
+                if abs(v) > 100:
+                    return round(v / 1e3, 4)
+                return round(v, 4)
+            except Exception:
+                return None
+
+        def safe_div(num, den, pct=False):
+            try:
+                if num is None or den is None or den == 0:
+                    return None
+                r = float(num) / float(den)
+                return round(r * 100 if pct else r, 4)
+            except Exception:
+                return None
+
+        result = {}
+
+        for year in sorted(all_years):
+            print(f"        Verarbeite {year}...")
+
+            revenue_raw    = get_val(inc, year, "Total Revenue", "Revenue", "Total Revenues")
+            gross_profit_raw = get_val(inc, year, "Gross Profit", "Gross Income")
+            ebit_raw       = get_val(inc, year, "EBIT", "Operating Income", "Operating Income Loss")
+            net_income_raw = get_val(inc, year, "Net Income",
+                                     "Net Income Common Stockholders",
+                                     "Net Income Continuous Operations")
+            ebt_raw        = get_val(inc, year, "Pretax Income", "Income Before Tax")
+            tax_prov_raw   = get_val(inc, year, "Tax Provision", "Income Tax Expense")
+            interest_raw   = get_val(inc, year, "Interest Expense",
+                                     "Interest Expense Non Operating")
+            shares_raw     = get_val(inc, year, "Diluted Average Shares", "Basic Average Shares")
+
+            da_raw = get_val(cf, year,
+                             "Depreciation And Amortization",
+                             "Depreciation Amortization Depletion",
+                             "Reconciled Depreciation")
+            if da_raw is None:
+                da_raw = get_val(inc, year,
+                                 "Reconciled Depreciation",
+                                 "Depreciation And Amortization In Income Statement")
+
+            op_cf_raw  = get_val(cf, year, "Operating Cash Flow",
+                                 "Cash Flow From Continuing Operating Activities")
+            capex_raw  = get_val(cf, year, "Capital Expenditure", "Purchase Of PPE",
+                                 "Capital Expenditures")
+            fcf_raw    = get_val(cf, year, "Free Cash Flow")
+            divs_raw   = get_val(cf, year, "Common Stock Dividend Paid",
+                                 "Dividends Paid", "Payment Of Dividends")
+
+            debt_raw   = get_val(bs, year, "Total Debt",
+                                 "Long Term Debt And Capital Lease Obligation",
+                                 "Long Term Debt")
+            cash_raw   = get_val(bs, year, "Cash And Cash Equivalents",
+                                 "Cash Cash Equivalents And Short Term Investments")
+            equity_raw = get_val(bs, year, "Common Stock Equity",
+                                 "Stockholders Equity",
+                                 "Total Equity Gross Minority Interest")
+            assets_raw = get_val(bs, year, "Total Assets")
+            ic_raw     = get_val(bs, year, "Invested Capital", "Net PPE")
+
+            revenue      = to_bn(revenue_raw)
+            gross_profit = to_bn(gross_profit_raw)
+            ebit         = to_bn(ebit_raw)
+            net_income   = to_bn(net_income_raw)
+            ebt          = to_bn(ebt_raw)
+            tax_prov     = to_bn(tax_prov_raw)
+            interest     = to_bn(interest_raw)
+            shares_bn    = to_bn(shares_raw)
+            da           = to_bn(da_raw)
+            op_cf        = to_bn(op_cf_raw)
+            capex_raw_bn = to_bn(capex_raw)
+            capex        = -abs(capex_raw_bn) if capex_raw_bn else None
+            fcf_direct   = to_bn(fcf_raw)
+            divs         = to_bn(divs_raw)
+            total_debt   = to_bn(debt_raw)
+            total_cash   = to_bn(cash_raw)
+            equity       = to_bn(equity_raw)
+            assets       = to_bn(assets_raw)
+            ic           = to_bn(ic_raw)
+
+            ebitda = None
+            if ebit is not None and da is not None:
+                ebitda = round(ebit + abs(da), 4)
+
+            fcf = fcf_direct
+            if fcf is None and op_cf is not None and capex is not None:
+                fcf = round(op_cf + capex, 4)
+
+            net_debt = None
+            if total_debt is not None and total_cash is not None:
+                net_debt = round(total_debt - total_cash, 4)
+
+            eps = None
+            if net_income is not None and shares_bn and shares_bn > 0:
+                eps = round(net_income / shares_bn, 2)
+
+            dps = None
+            if divs is not None and shares_bn and shares_bn > 0:
+                dps = round(abs(divs) / shares_bn, 2)
+
+            tax_rate = None
+            if tax_prov and ebt and ebt != 0:
+                tr = abs(tax_prov) / abs(ebt) * 100
+                if 0 < tr < 60:
+                    tax_rate = round(tr, 1)
+
+            nopat = None
+            if ebit is not None and tax_rate:
+                nopat = round(ebit * (1 - tax_rate / 100), 4)
+
+            ebitda_margin = safe_div(ebitda, revenue, pct=True)
+            ebit_margin   = safe_div(ebit,   revenue, pct=True)
+            gross_margin  = safe_div(gross_profit, revenue, pct=True)
+            net_margin    = safe_div(net_income, revenue, pct=True)
+            fcf_margin    = safe_div(fcf, revenue, pct=True)
+
+            nd_ebitda = None
+            if net_debt is not None and ebitda and ebitda > 0:
+                nd_ebitda = round(net_debt / ebitda, 2)
+
+            roe = None
+            if net_income is not None and equity and equity > 0:
+                roe = round(net_income / equity * 100, 1)
+
+            roa = None
+            if net_income is not None and assets and assets > 0:
+                roa = round(net_income / assets * 100, 1)
+
+            roic = None
+            if nopat and nopat > 0 and ic and ic > 0:
+                roic = round(nopat / ic * 100, 1)
+
+            fcf_conv = None
+            if fcf and net_income and net_income != 0:
+                fcf_conv = round(fcf / net_income * 100, 1)
+
+            capex_pct = None
+            if capex and revenue and revenue > 0:
+                capex_pct = round(abs(capex) / revenue * 100, 1)
+
+            da_pct = safe_div(da, revenue, pct=True)
+
+            if not revenue:
+                print(f"          ⚠ {year}: Kein Revenue — übersprungen")
+                continue
+
+            result[year] = {
+                "year":               year,
+                "source":             "yfinance",
+                "revenue_bn":         revenue,
+                "gross_profit_bn":    gross_profit,
+                "ebitda_bn":          ebitda,
+                "ebit_bn":            ebit,
+                "net_income_bn":      net_income,
+                "interest_bn":        interest,
+                "ebitda_margin_pct":  ebitda_margin,
+                "ebit_margin_pct":    ebit_margin,
+                "gross_margin_pct":   gross_margin,
+                "net_margin_pct":     net_margin,
+                "fcf_margin_pct":     fcf_margin,
+                "eps":                eps,
+                "dps":                dps,
+                "shares_bn":          shares_bn,
+                "operating_cf_bn":    op_cf,
+                "capex_bn":           capex,
+                "capex_pct":          capex_pct,
+                "fcf_bn":             fcf,
+                "fcf_conversion_pct": fcf_conv,
+                "da_bn":              da,
+                "da_pct":             da_pct,
+                "total_debt_bn":      total_debt,
+                "total_cash_bn":      total_cash,
+                "net_debt_bn":        net_debt,
+                "total_equity_bn":    equity,
+                "total_assets_bn":    assets,
+                "invested_capital_bn": ic,
+                "nd_ebitda":          nd_ebitda,
+                "roe_pct":            roe,
+                "roa_pct":            roa,
+                "roic_pct":           roic,
+                "tax_rate_pct":       tax_rate,
+                "nopat_bn":           nopat,
+            }
+
+            if all(v is not None for v in [revenue, ebitda, ebitda_margin, eps, net_debt]):
+                print(
+                    f"          ✅ {year}: "
+                    f"Rev {revenue:.2f} | "
+                    f"EBITDA {ebitda:.2f} ({ebitda_margin:.1f}%) | "
+                    f"EPS {eps} | "
+                    f"ND {net_debt:.2f}"
+                )
+            else:
+                print(f"          ✅ {year}: Rev {revenue:.2f} Mrd.")
+
+        print(f"      ✅ {len(result)} historische Jahre geladen")
+        return result
+
+    except Exception as e:
+        print(f"      ❌ get_historical_financials Fehler: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
 
 
 @tool
@@ -1206,3 +1706,116 @@ def get_strategic_milestones(ticker: str, company_name: str) -> list:
         ]
     except Exception as e:
         return [{"info": f"Tavily nicht erreichbar: {str(e)}"}]
+
+
+# ── Estimate-Anker ────────────────────────────────────────────────────────────
+
+def build_estimate_anchors(
+    ticker:          str,
+    hist_data:       dict,
+    ir_analysis:     dict,
+    peer_comparison: dict | None = None,
+) -> dict:
+    """
+    Berechnet Wachstumsanker für Forward-Estimates.
+
+    Hierarchie:
+      1. Historischer CAGR (deterministisch aus hist_data)
+      2. Peer-Wachstum Median (aus peer_comparison)
+      3. Management-Targets (aus IR-Dokument)
+
+    Returns dict mit Ankerwerten und finaler Empfehlung.
+    """
+    result: dict = {}
+
+    # ── 1. Historischer CAGR aus hist_data ───────────────────────────────────
+    years = sorted(hist_data.keys()) if hist_data else []
+
+    if len(years) >= 2:
+        n_years = len(years) - 1
+
+        # Revenue CAGR
+        rev_start = hist_data[years[0]].get("revenue_bn")
+        rev_end   = hist_data[years[-1]].get("revenue_bn")
+        if rev_start and rev_end and rev_start > 0:
+            cagr = ((rev_end / rev_start) ** (1 / n_years) - 1) * 100
+            result["revenue_cagr_3y"] = round(cagr, 1)
+
+        # EBITDA-Marge: Durchschnitt und Trend
+        margins = [
+            hist_data[y].get("ebitda_margin_pct")
+            for y in years
+            if hist_data[y].get("ebitda_margin_pct") is not None
+        ]
+        if margins:
+            result["ebitda_margin_avg"] = round(sum(margins) / len(margins), 1)
+            if len(margins) >= 2:
+                result["ebitda_margin_trend"] = round(
+                    (margins[-1] - margins[0]) / n_years, 1
+                )
+
+        # EPS CAGR (nur wenn beide Werte positiv)
+        eps_start = hist_data[years[0]].get("eps")
+        eps_end   = hist_data[years[-1]].get("eps")
+        if eps_start and eps_end and eps_start > 0 and eps_end > 0:
+            eps_cagr = ((eps_end / eps_start) ** (1 / n_years) - 1) * 100
+            result["eps_cagr_3y"] = round(eps_cagr, 1)
+
+    # ── 2. Peer-Wachstum Median ───────────────────────────────────────────────
+    if peer_comparison:
+        peer_growths = [
+            p.get("revenue_growth_pct")
+            for p in peer_comparison.get("peers", [])
+            if isinstance(p.get("revenue_growth_pct"), (int, float))
+        ]
+        if peer_growths:
+            peer_growths_sorted = sorted(peer_growths)
+            n = len(peer_growths_sorted)
+            mid = n // 2
+            median = (
+                peer_growths_sorted[mid]
+                if n % 2 else
+                (peer_growths_sorted[mid - 1] + peer_growths_sorted[mid]) / 2
+            )
+            result["peer_revenue_growth"] = round(median, 1)
+
+    # ── 3. Management Guidance aus IR ────────────────────────────────────────
+    guidance = {
+        "revenue":  ir_analysis.get("revenue_guidance", ""),
+        "ebitda_m": ir_analysis.get("ebitda_guidance", ""),
+        "tone":     ir_analysis.get("management_tone", ""),
+    }
+    result["management_guidance"] = guidance
+
+    # ── 4. Finale Empfehlung (konservativ: Mittelwert CAGR + Peer) ───────────
+    anchors = []
+    if result.get("revenue_cagr_3y") is not None:
+        anchors.append(result["revenue_cagr_3y"])
+    if result.get("peer_revenue_growth") is not None:
+        anchors.append(result["peer_revenue_growth"])
+
+    if anchors:
+        recommended = sum(anchors) / len(anchors)
+        tone = guidance.get("tone", "").lower()
+        if any(w in tone for w in ("cautious", "conservative", "vorsichtig")):
+            recommended *= 0.8
+        elif any(w in tone for w in ("positive", "confident", "optimistic", "zuversichtlich")):
+            recommended *= 1.1
+        result["recommended_growth"] = round(recommended, 1)
+        result["confidence"] = (
+            "hoch"        if len(anchors) >= 2 else
+            "mittel-hoch" if result.get("revenue_cagr_3y") is not None else
+            "niedrig"
+        )
+    else:
+        result["recommended_growth"] = 3.0
+        result["confidence"] = "niedrig"
+
+    result["methodology"] = (
+        f"CAGR {result.get('revenue_cagr_3y', '-')}% "
+        f"+ Peer {result.get('peer_revenue_growth', '-')}% "
+        f"→ Empfehlung {result.get('recommended_growth')}% "
+        f"(Konfidenz: {result.get('confidence')})"
+    )
+
+    return result
