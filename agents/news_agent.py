@@ -135,7 +135,11 @@ def _format_milestones_text(milestones: list) -> str:
     return "\n".join(lines)
 
 
-def run_news_agent(ticker: str, fundamental_summary: str = "") -> NewsAgentOutput:
+def run_news_agent(
+    ticker: str,
+    fundamental_summary: str = "",
+    supervisor_critique: str | None = None,
+) -> NewsAgentOutput:
     """Analysiert News, Makro und Industrie-Faktoren — gibt strukturiertes JSON zurück."""
 
     # Batch 1: News + Stock-Info parallel (Stock-Info zuerst nötig für Swiss-Check)
@@ -195,6 +199,14 @@ def run_news_agent(ticker: str, fundamental_summary: str = "") -> NewsAgentOutpu
     if fundamental_summary:
         fundamental_context = f"\n=== KONTEXT FUNDAMENTALANALYSE ===\n{fundamental_summary}\n"
 
+    senior_feedback_block = ""
+    if supervisor_critique:
+        senior_feedback_block = (
+            f"\n⚠️ SENIOR-ANALYST FEEDBACK (HÖCHSTE PRIORITÄT):\n"
+            f"{supervisor_critique}\n"
+            f"Adressiere dieses Feedback EXPLIZIT in deiner Analyse.\n"
+        )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", NEWS_PROMPT),
         ("human", """Analysiere {ticker} ({company}, Sektor: {sector}, Industrie: {industry}, Währung: {currency}).
@@ -207,6 +219,7 @@ def run_news_agent(ticker: str, fundamental_summary: str = "") -> NewsAgentOutpu
 
 {industry_text}
 {fundamental_context}
+{senior_feedback_block}
 
 Erstelle die vollständige Analyse als JSON.
 - Gewichte strategische Meilensteine am stärksten (30%)
@@ -219,17 +232,18 @@ Erstelle die vollständige Analyse als JSON.
     chain = prompt | llm | parser
 
     result = chain.invoke({
-        "ticker":            ticker,
-        "company":           company_name,
-        "sector":            sector,
-        "industry":          industry,
-        "currency":          currency,
-        "milestones_text":   milestones_text,
-        "news_text":         news_text,
-        "macro_text":        macro_text,
-        "industry_text":     industry_text,
-        "fundamental_context": fundamental_context,
-        "format_instructions": parser.get_format_instructions(),
+        "ticker":               ticker,
+        "company":              company_name,
+        "sector":               sector,
+        "industry":             industry,
+        "currency":             currency,
+        "milestones_text":      milestones_text,
+        "news_text":            news_text,
+        "macro_text":           macro_text,
+        "industry_text":        industry_text,
+        "fundamental_context":  fundamental_context,
+        "senior_feedback_block": senior_feedback_block,
+        "format_instructions":  parser.get_format_instructions(),
     })
 
     return result

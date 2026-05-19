@@ -1819,3 +1819,49 @@ def build_estimate_anchors(
     )
 
     return result
+
+
+def detect_structural_anomalies(hist_data: dict) -> list:
+    """
+    Erkennt strukturelle Anomalien (Spin-off, M&A, Divestiture) deterministisch.
+    Gibt Liste von Anomalie-Flags zurück — kein LLM, nur Zahlenvergleich.
+    """
+    if not hist_data or len(hist_data) < 2:
+        return []
+
+    flags = []
+    sorted_years = sorted(hist_data.keys(), reverse=True)
+
+    thresholds = [
+        ("revenue_bn",      -25, "Umsatz",     "Abspaltung/Divestiture möglich"),
+        ("ebitda_bn",       -30, "EBITDA",      "Strukturelle Änderung möglich"),
+        ("total_assets_bn", -20, "Bilanzsumme", "Spin-off/Divestiture möglich"),
+    ]
+
+    for i in range(len(sorted_years) - 1):
+        yr_curr = sorted_years[i]
+        yr_prev = sorted_years[i + 1]
+        curr = hist_data[yr_curr]
+        prev = hist_data[yr_prev]
+
+        for field, threshold_pct, label, hint in thresholds:
+            v_curr = curr.get(field)
+            v_prev = prev.get(field)
+            if v_curr is None or v_prev is None or v_prev == 0:
+                continue
+            change_pct = (v_curr - v_prev) / abs(v_prev) * 100
+            if change_pct < threshold_pct:
+                flags.append({
+                    "year":           yr_curr,
+                    "metric":         field,
+                    "yoy_change_pct": round(change_pct, 1),
+                    "flag":           "STRUKTURELLE_VERÄNDERUNG",
+                    "note":           (
+                        f"{label} {yr_curr} vs {yr_prev}: "
+                        f"{change_pct:+.1f}% — {hint}"
+                    ),
+                })
+
+    return flags
+
+    return result

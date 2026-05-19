@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 from graph.state import AnalysisState
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,7 +26,10 @@ def fundamental_node(state: AnalysisState) -> dict:
           f"({'Wiederholung ' + str(retry) if retry > 0 else 'Erstaufruf'})...")
 
     try:
-        output = run_fundamental_agent(ticker)
+        output = run_fundamental_agent(
+            ticker,
+            structural_context=state.get("structural_context"),
+        )
 
         if hasattr(output, "model_dump"):
             output = output.model_dump()
@@ -180,6 +184,356 @@ def quality_node(state: AnalysisState) -> dict:
             "data_consistency_score": 5,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
+
+
+# ── Neue Knoten: Anomalie-Erkennung & Corporate Actions ──────────────────────
+
+
+def anomaly_check_node(state: AnalysisState) -> dict:
+    """Knoten A: Deterministischer Anomalie-Check auf strukturelle Veränderungen."""
+    from tools.finance_tools import get_historical_financials, detect_structural_anomalies
+    ticker = state["ticker"]
+    print(f"\n[anomaly_check] Prüfe auf strukturelle Veränderungen...")
+
+    try:
+        hist_data = get_historical_financials.invoke(ticker)
+        flags = detect_structural_anomalies(hist_data)
+
+        for f in flags:
+            print(f"      ⚠ {f['note']}")
+
+        log_entry = (
+            f"[anomaly_check] {len(flags)} Anomalie(n) erkannt"
+            if flags else "[anomaly_check] ✅ Keine strukturellen Anomalien"
+        )
+        return {
+            "anomaly_flags": flags,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[anomaly_check] ❌ {e}"
+        return {
+            "anomaly_flags": [],
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def corporate_actions_node(state: AnalysisState) -> dict:
+    """Knoten B: LLM recherchiert Corporate Actions für erkannte Anomalien."""
+    from tools.finance_tools import get_strategic_milestones
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import HumanMessage
+
+    ticker = state["ticker"]
+    anomaly_flags = state.get("anomaly_flags") or []
+    f_out = state.get("fundamental_output") or {}
+    company_name = f_out.get("company", ticker)
+
+    print(f"\n[corporate_actions] Recherchiere Corporate Actions für {company_name}...")
+
+    try:
+        milestones = get_strategic_milestones.invoke(
+            {"ticker": ticker, "company_name": company_name}
+        )
+        anomaly_text = "\n".join(f"• {f['note']}" for f in anomaly_flags)
+
+        prompt = (
+            f"Analysiere diese Corporate Actions für {company_name} ({ticker}).\n\n"
+            f"Erkannte Anomalien in den Finanzkennzahlen:\n{anomaly_text}\n\n"
+            f"Strategische Meilensteine (letzte 12 Monate):\n"
+            f"{json.dumps(milestones[:5], ensure_ascii=False, indent=2)}\n\n"
+            f"Erkläre in 2-3 prägnanten Sätzen welche Corporate Actions (Spin-off, M&A, "
+            f"Divestiture, Restrukturierung) die Anomalien erklären. "
+            f"Falls ein Spin-off identifiziert: nenne das abgespaltene Unternehmen und erkläre "
+            f"dass YoY-Vergleiche Pro-forma Basis brauchen. "
+            f"Kein Markdown, keine Überschriften."
+        )
+
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        response = llm.invoke([HumanMessage(content=prompt)])
+        structural_context = response.content.strip()
+
+        print(f"      ✅ {structural_context[:100]}...")
+        log_entry = f"[corporate_actions] ✅ Kontext: {structural_context[:80]}..."
+
+        return {
+            "structural_context": structural_context,
+            "corporate_actions_checked": True,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[corporate_actions] ❌ {e}"
+        return {
+            "structural_context": f"Corporate Actions Analyse nicht verfügbar: {e}",
+            "corporate_actions_checked": True,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+# ── Neuer Knoten: Senior-Analyst Review ──────────────────────────────────────
+
+SUPERVISOR_REVIEW_PROMPT = """Du bist ein Senior Equity Analyst und prüfst die Arbeit deiner Junior-Analysten.
+
+PRÜFAUFGABE (vor der finalen Synthese):
+Bewerte ob die drei Analysen ausreichend vollständig und konsistent sind.
+
+PRÜFKRITERIEN:
+1. Strukturelle Ereignisse: Falls Anomalie-Flags vorhanden (Spin-off, M&A), hat der \
+Fundamental-Agent diese adäquat berücksichtigt und erklärt?
+2. Zahlen-Plausibilität: Sind EPS-Sprünge >150% begründet? Stimmen Revenue-Angaben überein?
+3. Investment Case Qualität: Ist jeder Bullet-Point mit konkreten Zahlen belegt?
+4. Empfehlungs-Konsistenz: Passt Empfehlung zur Fair-Value-Herleitung?
+
+ENTSCHEIDUNGSREGELN:
+- Sei KONSERVATIV: Nur bei KLAREN, GRAVIERENDEN Mängeln "request_critique"
+- Soft-Issues (fehlende Quellen, ungenaue Formulierungen) → "approve"
+- Hard-Issues (fehlende Spin-off-Berücksichtigung, implausible Zahlen) → "request_critique"
+- Falls supervisor_rounds > 0: IMMER "approve" (keine zweite Critique-Runde)
+- Nur EINE Kritik pro Runde, nur EIN Target
+
+Antworte AUSSCHLIESSLICH als valides JSON:
+{
+  "action": "approve",
+  "critique_target": null,
+  "critique_text": null,
+  "review_notes": "Kurze Begründung (2-3 Sätze)"
+}
+ODER:
+{
+  "action": "request_critique",
+  "critique_target": "fundamental",
+  "critique_text": "Konkrete, actionable Anweisung was der Agent korrigieren soll",
+  "review_notes": "Kurze Begründung (2-3 Sätze)"
+}"""
+
+
+def supervisor_review_node(state: AnalysisState) -> dict:
+    """Knoten 4b: Senior-Analyst prüft Konsistenz und fordert ggf. Nachbesserung."""
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    ticker = state["ticker"]
+    rounds = state.get("supervisor_rounds", 0)
+
+    print(f"\n[supervisor_review] Senior-Analyst Review läuft "
+          f"(Runde {rounds + 1})...")
+
+    f_out  = state.get("fundamental_output") or {}
+    n_out  = state.get("news_output") or {}
+    r_out  = state.get("risk_output") or {}
+    flags  = state.get("anomaly_flags") or []
+    struct = state.get("structural_context") or ""
+
+    anomaly_block = ""
+    if flags:
+        anomaly_block = (
+            "\n=== STRUKTURELLE ANOMALIEN (deterministisch erkannt) ===\n"
+            + "\n".join(f"• {f['note']}" for f in flags)
+            + f"\n\nCorporate Actions Kontext:\n{struct}\n"
+        )
+
+    human_content = (
+        f"Prüfe diese drei Analysen für {ticker}.\n"
+        f"supervisor_rounds bereits abgeschlossen: {rounds}\n"
+        f"{anomaly_block}"
+        f"\n=== FUNDAMENTAL-AGENT OUTPUT (Zusammenfassung) ===\n"
+        f"Empfehlung: {f_out.get('recommendation', '-')} | "
+        f"Fair Value: {f_out.get('fair_value_estimate', '-')} | "
+        f"Conviction: {f_out.get('conviction_level', '-')}\n"
+        f"Investment Case (erste 2 Punkte): "
+        f"{json.dumps(f_out.get('investment_case', [])[:2], ensure_ascii=False)}\n"
+        f"Key Metrics: {json.dumps(list(f_out.get('key_metrics', {}).items())[:6], ensure_ascii=False)}\n"
+        f"\n=== NEWS-AGENT OUTPUT ===\n"
+        f"Sentiment: {n_out.get('overall_sentiment_score', '-')}/10 | "
+        f"Outlook: {n_out.get('short_term_outlook', '-')}\n"
+        f"\n=== RISK-AGENT OUTPUT ===\n"
+        f"Conviction Killers: {len(r_out.get('conviction_killers', []))} | "
+        f"Empfehlung: {r_out.get('original_recommendation', '-')}\n"
+        f"\nBewerte und antworte als JSON."
+    )
+
+    try:
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        response = llm.invoke([
+            SystemMessage(content=SUPERVISOR_REVIEW_PROMPT),
+            HumanMessage(content=human_content),
+        ])
+        raw = response.content.strip()
+
+        # Robustes JSON-Parsing
+        start = raw.find("{")
+        end   = raw.rfind("}") + 1
+        review = json.loads(raw[start:end]) if start != -1 else {"action": "approve"}
+
+        action = review.get("action", "approve")
+        target = review.get("critique_target")
+        notes  = review.get("review_notes", "")
+
+        # Sicherheitsnetz: bei supervisor_rounds > 0 immer approve
+        if rounds >= 1:
+            action = "approve"
+            target = None
+
+        if action == "request_critique" and target in ("fundamental", "news", "risk"):
+            print(f"      ↩ Kritik angefordert für [{target}]: "
+                  f"{review.get('critique_text', '')[:80]}...")
+            log_entry = (
+                f"[supervisor_review] ↩ Kritik → {target}: "
+                f"{review.get('critique_text', '')[:60]}..."
+            )
+            return {
+                "supervisor_review_action":   "request_critique",
+                "supervisor_critique":        review.get("critique_text", ""),
+                "supervisor_critique_target": target,
+                "routing_log": state.get("routing_log", []) + [log_entry],
+            }
+        else:
+            print(f"      ✅ Analyse genehmigt: {notes[:80]}")
+            log_entry = f"[supervisor_review] ✅ Approved: {notes[:60]}"
+            return {
+                "supervisor_review_action":   "approve",
+                "supervisor_critique":        None,
+                "supervisor_critique_target": None,
+                "routing_log": state.get("routing_log", []) + [log_entry],
+            }
+
+    except Exception as e:
+        log_entry = f"[supervisor_review] ❌ {e} → approve fallback"
+        return {
+            "supervisor_review_action":   "approve",
+            "supervisor_critique":        None,
+            "supervisor_critique_target": None,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def update_supervisor_round(state: AnalysisState) -> dict:
+    """Erhöht den Supervisor-Runden-Counter vor dem Critique-Agent-Re-Run."""
+    new_round = state.get("supervisor_rounds", 0) + 1
+    print(f"\n[supervisor_round] Critique-Runde {new_round} startet...")
+    return {
+        "supervisor_rounds": new_round,
+        "routing_log": state.get("routing_log", []) + [
+            f"[supervisor_round] Critique-Runde {new_round}"
+        ],
+    }
+
+
+# ── Critique-Knoten: Re-Run mit Supervisor-Feedback ──────────────────────────
+
+
+def fundamental_critique_node(state: AnalysisState) -> dict:
+    """Re-runs Fundamental Agent mit Supervisor-Kritik und structural_context."""
+    ticker = state["ticker"]
+    critique = state.get("supervisor_critique", "")
+    print(f"\n[fundamental_critique] Re-Analyse mit Senior-Feedback...")
+    print(f"      Critique: {critique[:100]}...")
+
+    try:
+        output = run_fundamental_agent(
+            ticker,
+            supervisor_critique=critique,
+            structural_context=state.get("structural_context"),
+        )
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+        elif not isinstance(output, dict):
+            output = dict(output)
+
+        log_entry = (
+            f"[fundamental_critique] ✅ Re-Analyse | "
+            f"Fair Value: {output.get('fair_value_estimate')} | "
+            f"Empfehlung: {output.get('recommendation')}"
+        )
+        return {
+            "fundamental_output": output,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[fundamental_critique] ❌ {e}"
+        return {
+            "fundamental_output": state.get("fundamental_output") or {"error": str(e)},
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def news_critique_node(state: AnalysisState) -> dict:
+    """Re-runs News Agent mit Supervisor-Kritik."""
+    ticker = state["ticker"]
+    critique = state.get("supervisor_critique", "")
+    print(f"\n[news_critique] Re-Analyse mit Senior-Feedback...")
+
+    f_out = state.get("fundamental_output") or {}
+    fundamental_context = (
+        f"Empfehlung: {f_out.get('recommendation', '-')}, "
+        f"Fair Value: {f_out.get('fair_value_estimate', '-')}"
+    )
+
+    try:
+        output = run_news_agent(
+            ticker,
+            fundamental_context,
+            supervisor_critique=critique,
+        )
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+        elif not isinstance(output, dict):
+            output = dict(output)
+
+        log_entry = (
+            f"[news_critique] ✅ Re-Analyse | "
+            f"Sentiment: {output.get('overall_sentiment_score')}/10"
+        )
+        return {
+            "news_output": output,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[news_critique] ❌ {e}"
+        return {
+            "news_output": state.get("news_output") or {"error": str(e)},
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def risk_critique_node(state: AnalysisState) -> dict:
+    """Re-runs Risk Agent mit Supervisor-Kritik."""
+    ticker = state["ticker"]
+    critique = state.get("supervisor_critique", "")
+    print(f"\n[risk_critique] Re-Analyse mit Senior-Feedback...")
+
+    f_out = state.get("fundamental_output") or {}
+    n_out = state.get("news_output") or {}
+
+    try:
+        output = run_risk_agent(
+            ticker,
+            f_out,
+            n_out,
+            supervisor_critique=critique,
+        )
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+        elif not isinstance(output, dict):
+            output = dict(output)
+
+        log_entry = (
+            f"[risk_critique] ✅ Re-Analyse | "
+            f"Conviction Killers: {len(output.get('conviction_killers', []))}"
+        )
+        return {
+            "risk_output": output,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[risk_critique] ❌ {e}"
+        return {
+            "risk_output": state.get("risk_output") or {"error": str(e)},
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+# ── Bestehender Supervisor-Synthese-Knoten ────────────────────────────────────
 
 
 def supervisor_node(state: AnalysisState) -> dict:

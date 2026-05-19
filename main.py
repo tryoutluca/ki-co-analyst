@@ -1,13 +1,14 @@
 import sys
 import os
 import json
+import subprocess
 from dotenv import load_dotenv
 import yfinance as yf
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv()
 
-from graph.supervisor import run_supervisor, format_investment_memo
+from graph.graph import run_analysis
 
 # ── Bekannte Ticker mit Exchange-Suffix ─────────────────────────────────────
 
@@ -126,43 +127,33 @@ def main():
 
     # Pipeline ausführen
     try:
-        result = run_supervisor(ticker)
+        result = run_analysis(ticker)
 
         # JSON speichern
-        output_json = f"output_memo_{ticker.replace('.', '_')}.json"
+        safe_ticker = ticker.replace(".", "_")
+        output_json = f"output_memo_{safe_ticker}.json"
         with open(output_json, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"\n✓ JSON gespeichert: {output_json}")
 
-        # Lesbares Memo ausgeben
-        memo = format_investment_memo(result)
-        print(memo)
-
-        # Text-Memo speichern
-        output_txt = f"output_memo_{ticker.replace('.', '_')}.txt"
-        with open(output_txt, "w", encoding="utf-8") as f:
-            f.write(memo)
-        print(f"✓ Text-Memo gespeichert: {output_txt}")
-
-        # Word Export automatisch starten
-        print("\nStarte Word-Export...")
-        import subprocess
-
-        # output_memo.json für export_memo.js bereitstellen
-        with open("output_memo.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-
-        node_result = subprocess.run(
-            ["node", "export_memo.js"],
-            capture_output=True,
-            text=True
-        )
-
-        if node_result.returncode == 0:
-            print(node_result.stdout)
+        # Word-Export via export_memo.js
+        if not os.path.exists("export_memo.js"):
+            print("⚠ export_memo.js nicht gefunden — Word-Export übersprungen.")
         else:
-            print(f"⚠ Word-Export Fehler: {node_result.stderr}")
-            print("  Tipp: 'node export_memo.js' manuell ausführen")
+            output_docx = f"investment_memo_{safe_ticker}.docx"
+            print(f"\nStarte Word-Export → {output_docx} ...")
+            node_result = subprocess.run(
+                ["node", "export_memo.js", output_json, output_docx],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if node_result.returncode == 0:
+                print(f"✓ Word-Memo erstellt: {output_docx}")
+                # Datei direkt öffnen
+                os.startfile(os.path.abspath(output_docx))
+            else:
+                print(f"⚠ Word-Export Fehler:\n{node_result.stderr}")
 
     except Exception as e:
         print(f"\n❌ Fehler während der Analyse: {str(e)}")

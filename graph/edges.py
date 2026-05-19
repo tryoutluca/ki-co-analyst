@@ -76,3 +76,37 @@ def update_news_retry(state: AnalysisState) -> dict:
         "news_retry_count": state.get("news_retry_count", 0) + 1,
         "retry_reason": "News-Output unvollständig",
     }
+
+
+def route_after_anomaly_check(state: AnalysisState) -> str:
+    """
+    Conditional Edge nach Anomalie-Check.
+    - "check_corporate_actions": Anomalien erkannt → recherchiere Corporate Actions
+    - "proceed_news":            Keine Anomalien → direkt zu News
+    """
+    flags = state.get("anomaly_flags") or []
+    if flags:
+        print(f"      [edge] {len(flags)} Anomalie(n) → Corporate Actions Recherche")
+        return "check_corporate_actions"
+    print(f"      [edge] Keine Anomalien → proceed zu News")
+    return "proceed_news"
+
+
+def route_after_supervisor_review(state: AnalysisState) -> str:
+    """
+    Conditional Edge nach Senior-Analyst Review.
+    - "proceed_synthesis":    Analyse genehmigt → finale Synthese
+    - "critique_fundamental": Fundamental-Agent soll nachbessern
+    - "critique_news":        News-Agent soll nachbessern
+    - "critique_risk":        Risk-Agent soll nachbessern
+    """
+    action = state.get("supervisor_review_action", "approve")
+    target = state.get("supervisor_critique_target")
+    rounds = state.get("supervisor_rounds", 0)
+
+    if action == "request_critique" and target in ("fundamental", "news", "risk") and rounds < 2:
+        print(f"      [edge] Senior-Kritik → {target} (Runde {rounds + 1})")
+        return f"critique_{target}"
+
+    print(f"      [edge] Review approved → finale Synthese")
+    return "proceed_synthesis"

@@ -133,7 +133,11 @@ KRITISCH: Antworte AUSSCHLIESSLICH mit validem JSON. Kein erklärender Text.
 {format_instructions}"""
 
 
-def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
+def run_fundamental_agent(
+    ticker: str,
+    supervisor_critique: str | None = None,
+    structural_context: str | None = None,
+) -> FundamentalAgentOutput:
     """Führt Fundamentalanalyse durch — gibt strukturiertes JSON zurück."""
 
     print(f"      Hole Unternehmensdaten...")
@@ -226,6 +230,24 @@ def run_fundamental_agent(ticker: str) -> FundamentalAgentOutput:
     # Build deterministic multiples context block
     multiples_context = _format_multiples_context(all_multiples)
 
+    # ── Optionale Kontext-Blöcke (Senior-Feedback + Corporate Actions) ─────────
+    senior_feedback_block = ""
+    if supervisor_critique:
+        senior_feedback_block = (
+            f"\n⚠️ SENIOR-ANALYST FEEDBACK (HÖCHSTE PRIORITÄT):\n"
+            f"{supervisor_critique}\n"
+            f"Adressiere dieses Feedback EXPLIZIT in deiner Analyse.\n"
+        )
+
+    structural_block = ""
+    if structural_context:
+        structural_block = (
+            f"\n=== CORPORATE ACTIONS / STRUKTURELLE VERÄNDERUNG ===\n"
+            f"{structural_context}\n"
+            f"WICHTIG: Erkläre YoY-Änderungen auf Pro-forma-Basis. "
+            f"Stelle klar, dass absolute YoY-Vergleiche durch diese Corporate Action verzerrt sind.\n"
+        )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", FUNDAMENTAL_PROMPT),
         ("human", """Analysiere {ticker} ({company}) im Sektor {sector}.
@@ -253,6 +275,10 @@ KURSENTWICKLUNG 3 MONATE (Quelle: yfinance):
 
 {estimate_context}
 
+{structural_block}
+
+{senior_feedback_block}
+
 AUFGABEN:
 1. Erstelle die strukturierte Fundamentalanalyse als JSON.
 2. Für cashflow_metrics: übernimm die Rohdaten aus CASHFLOW-DATEN und setze \
@@ -277,6 +303,8 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         "ir_context":           ir_context,
         "multiples_context":    multiples_context,
         "estimate_context":     estimate_context,
+        "structural_block":     structural_block,
+        "senior_feedback_block": senior_feedback_block,
         "format_instructions":  parser.get_format_instructions(),
     })
 
@@ -572,5 +600,5 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
 
 
 if __name__ == "__main__":
-    result = run_fundamental_agent("HOLN.SW")
+    result = run_fundamental_agent("LONN.SW")
     print(json.dumps(result, indent=2, ensure_ascii=False))

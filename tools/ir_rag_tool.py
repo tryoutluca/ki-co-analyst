@@ -45,6 +45,12 @@ try:
 except ImportError:
     _PPTX_AVAILABLE = False
 
+try:
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.finance_tools import get_cashflow_data
@@ -86,23 +92,30 @@ CACHE_MAX_AGE_HOURS = 24
 
 _KNOWN_IR_URLS: dict[str, str] = {
     # Swiss
+    "ABBN.SW": "https://www.abb.com/global/en/company/annual-reporting-suite",
+    "ALC.SW":  "https://investor.alcon.com/financials/annual-reports",
+    "AMRZ.SW": "https://investors.amrize.com/financial-info/annual-reports",
+    "CFR.SW":  "https://www.richemont.com/investors/results-reports-presentations/",
+    "GEBN.SW": "https://reports.geberit.com/annual-report/2025/services/downloads.html#downloads-archive",
+    "GIVN.SW": "https://www.givaudan.com/investors/financial-results/results-centre",
     "HOLN.SW": "https://www.holcim.com/investors/publications",
-    "NESN.SW": "https://www.nestle.com/investors/reports-and-presentations",
-    "NOVN.SW": "https://www.novartis.com/investors/financial-data/annual-reports",
-    "ROG.SW":  "https://www.roche.com/investors/annual-reports",
-    "UBSG.SW": "https://www.ubs.com/global/en/investor-relations/financials",
+    "KNIN.SW": "https://www.kuehne-nagel.com/company/investor-relations/financial-performance",
+    "LOGN.SW": "https://ir.logitech.com/financial-info/annual-reports/default.aspx",
+    "LONN.SW": "https://www.lonza.com/investor-relations/reporting-center",
+    "NESN.SW": "https://www.nestle.com/investors/results",
+    "NOVN.SW": "https://www.novartis.com/investors/financial-data/annual-results",
+    "PGHN.SW": "https://www.partnersgroup.com/en/shareholders/reports-and-presentations#all",
+    "ROP.SW":  "https://www.roche.com/investors/reports#9e6fe792-f417-4188-993e-9cedf91bd4f6",
+    "SIKA.SW": "https://www.sika.com/en/investors/reports-publications/financial-reports.html",
+    "SLHN.SW": "https://www.swisslife.com/en/home/investors/results-and-reports.html",
+    "SREN.SW": "https://www.swissre.com/investors/financial-information.html#2025-content",
+    "SCMN.SW": "https://www.swisscom.ch/en/about/investors/reports.html",
+    "UBSG.SW": "https://www.ubs.com/global/en/investor-relations/financial-information/annual-reporting.html",
+    "ZURN.SW": "https://www.zurich.com/investor-relations#Financial%20update",
     "RIEN.SW": "https://www.rieter.com/investor-relations/results-and-presentations/financial-reports",
-    "ABBN.SW": "https://investors.abb.com/financial-information/annual-reports",
-    "GEBN.SW": "https://www.geberit.com/investors/financial-reports",
-    "SIKA.SW": "https://www.sika.com/en/group/investor-relations/financial-reports",
-    "GIVN.SW": "https://www.givaudan.com/investors/financial-reports",
     "SCHN.SW": "https://www.schindler.com/com/internet/en/investor-relations/reports.html",
-    "LONN.SW": "https://www.lonza.com/investors/financial-reports",
-    "PGHN.SW": "https://www.partnersgroup.com/en/investors/shareholder-information/reports",
-    "SLHN.SW": "https://www.swisslife.com/en/home/investors/publications.html",
-    "BAER.SW": "https://www.juliusbaer.com/en/investor-relations/financial-reports",
-    "CFR.SW":  "https://www.richemont.com/investors/financial-reports",
-    "LISN.SW": "https://www.lindt-spruengli.com/investor-relations/reporting/annual-reports",
+    "BAER.SW": "https://www.juliusbaer.com/en/media-investors/financial-information/financial-reporting-1/",
+    "LISN.SW": "https://www.lindt-spruengli.com/investors/financial-reporting/publications",
     "AAPL":    "https://investor.apple.com/financial-information/sec-filings/default.aspx",
     "MSFT":    "https://www.microsoft.com/en-us/investor/sec-filings.aspx",
     "GOOGL":   "https://abc.xyz/investor/",
@@ -229,6 +242,33 @@ def _get_emb() -> OpenAIEmbeddings:
     if _emb is None:
         _emb = OpenAIEmbeddings()
     return _emb
+
+
+# ── Playwright helper ─────────────────────────────────────────────────────────
+
+def _playwright_render(url: str, timeout_ms: int = 20_000) -> str:
+    """
+    Renders *url* with a headless Chromium and returns the full HTML after JS execution.
+    Returns '' if Playwright is not installed or on any error.
+    """
+    if not _PLAYWRIGHT_AVAILABLE:
+        return ""
+    try:
+        with _sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx  = browser.new_context(user_agent=_HEADERS["User-Agent"])
+            page = ctx.new_page()
+            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass  # networkidle timeout is acceptable — grab what's rendered
+            html = page.content()
+            browser.close()
+            return html
+    except Exception as exc:
+        print(f"      Playwright Fehler ({url[:60]}): {exc}")
+        return ""
 
 
 # ── 1. Find IR URL ────────────────────────────────────────────────────────────
@@ -798,6 +838,115 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
         if found:
             found.sort(key=lambda x: (x["priority"], -x["year"]))
             return found[:4]
+
+    # ── Stage 1c: Playwright JS rendering (EU/CH sites with dynamic PDF lists) ──
+    if not found and not (ticker and _sec_is_us_ticker(ticker)) and _PLAYWRIGHT_AVAILABLE:
+        print(f"      Playwright-Rendering: {ir_url[:60]}...")
+        rendered = _playwright_render(ir_url)
+        if rendered:
+            soup_pw = BeautifulSoup(rendered, "html.parser")
+
+            # PDF links in JS-rendered page
+            for a in soup_pw.find_all("a", href=True):
+                href = _resolve(a["href"])
+                if not href.lower().endswith(".pdf") or href in seen:
+                    continue
+                seen.add(href)
+                filename  = href.split("/")[-1].split("?")[0] or "document.pdf"
+                link_text = a.get_text(" ", strip=True)
+                label     = (link_text + " " + filename + " " + href).lower()
+                if any(kw in label for kw in EXCLUDE_KEYWORDS):
+                    continue
+                pdf_type, priority = "other", 99
+                for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
+                    hit_any = any(kw in label for kw in any_kws) if any_kws else True
+                    hit_all = all(kw in label for kw in all_kws) if all_kws else True
+                    if hit_any and hit_all:
+                        pdf_type, priority = t, p
+                        break
+                if pdf_type == "other":
+                    if _EU_PDF_ANNUAL.search(label):
+                        pdf_type, priority = "annual_report", 3
+                    elif _EU_PDF_INTERIM.search(label):
+                        pdf_type, priority = "interim_report", 4
+                    else:
+                        continue
+                year_match = re.search(r"20[12][0-9]", label)
+                year = int(year_match.group()) if year_match else 0
+                found.append({
+                    "url": href, "filename": filename, "type": pdf_type,
+                    "priority": priority, "year": year, "text": link_text,
+                    "format": "pdf", "source": "Playwright IR page PDF",
+                })
+
+            if found:
+                found.sort(key=lambda x: (x["priority"], -x["year"]))
+                return found[:4]
+
+            # Playwright sub-page following (for multi-level EU IR sites)
+            seen_sub_pw: set[str] = set()
+            for a in soup_pw.find_all("a", href=True):
+                href = _resolve(a["href"])
+                if urlparse(href).netloc != parsed.netloc:
+                    continue
+                if href in seen or href == ir_url or href in seen_sub_pw:
+                    continue
+                path_lower = urlparse(href).path.lower().rstrip("/")
+                if not any(kw in path_lower for kw in _SUBPAGE_FOLLOW_PATTERNS):
+                    continue
+                seen_sub_pw.add(href)
+
+            for subpage_url in list(seen_sub_pw)[:4]:
+                print(f"      Playwright Sub-Seite: {subpage_url[:80]}...")
+                rendered2 = _playwright_render(subpage_url)
+                if not rendered2:
+                    continue
+                soup2 = BeautifulSoup(rendered2, "html.parser")
+                for a in soup2.find_all("a", href=True):
+                    raw_href = a["href"].strip()
+                    if raw_href.startswith("//"):
+                        href2 = parsed.scheme + ":" + raw_href
+                    elif raw_href.startswith("/"):
+                        href2 = base_dom + raw_href
+                    elif not raw_href.startswith("http"):
+                        href2 = urljoin(subpage_url, raw_href)
+                    else:
+                        href2 = raw_href
+                    if not href2.lower().endswith(".pdf") or href2 in seen:
+                        continue
+                    seen.add(href2)
+                    filename  = href2.split("/")[-1].split("?")[0] or "document.pdf"
+                    link_text = a.get_text(" ", strip=True)
+                    label     = (link_text + " " + filename + " " + href2).lower()
+                    if any(kw in label for kw in EXCLUDE_KEYWORDS):
+                        continue
+                    pdf_type, priority = "other", 99
+                    for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
+                        hit_any = any(kw in label for kw in any_kws) if any_kws else True
+                        hit_all = all(kw in label for kw in all_kws) if all_kws else True
+                        if hit_any and hit_all:
+                            pdf_type, priority = t, p
+                            break
+                    if pdf_type == "other":
+                        if _EU_PDF_ANNUAL.search(label):
+                            pdf_type, priority = "annual_report", 3
+                        elif _EU_PDF_INTERIM.search(label):
+                            pdf_type, priority = "interim_report", 4
+                        else:
+                            continue
+                    year_match = re.search(r"20[12][0-9]", label)
+                    year = int(year_match.group()) if year_match else 0
+                    found.append({
+                        "url": href2, "filename": filename, "type": pdf_type,
+                        "priority": priority, "year": year, "text": link_text,
+                        "format": "pdf", "source": "Playwright sub-page PDF",
+                    })
+                if found:
+                    break
+
+            if found:
+                found.sort(key=lambda x: (x["priority"], -x["year"]))
+                return found[:4]
 
     # ── Stage 2: HTML links with IR keyword anchors ───────────────────────────
     print(f"      Keine PDFs gefunden auf {ir_url[:60]} — suche HTML IR-Links...")

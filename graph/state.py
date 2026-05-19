@@ -32,3 +32,14 @@ class AnalysisState(TypedDict):
     analysis_started_at: Optional[str]
     analysis_duration_s: Optional[float]
     routing_log:         list   # dokumentiert jeden Routing-Entscheid
+
+    # ── Corporate Actions / Anomalie-Erkennung ───────────────
+    anomaly_flags:             Optional[list]  # detect_structural_anomalies() output
+    structural_context:        Optional[str]   # Ergebnis corporate_actions_node
+    corporate_actions_checked: Optional[bool]  # ob corp_actions_node gelaufen ist
+
+    # ── Senior-Analyst Review (Supervisor Feedback Loop) ─────
+    supervisor_critique:        Optional[str]  # konkretes Feedback-Text
+    supervisor_critique_target: Optional[str]  # "fundamental" | "news" | "risk"
+    supervisor_review_action:   Optional[str]  # "approve" | "request_critique"
+    supervisor_rounds:          int            # Anzahl Critique-Runden (max 2)

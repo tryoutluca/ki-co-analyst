@@ -63,6 +63,7 @@ def run_risk_agent(
     ticker: str,
     fundamental_output: FundamentalAgentOutput,
     news_output: NewsAgentOutput,
+    supervisor_critique: str | None = None,
 ) -> RiskAgentOutput:
     """Führt Advocatus-Diaboli-Analyse durch — gibt strukturiertes JSON zurück."""
 
@@ -97,6 +98,14 @@ def run_risk_agent(
     )
     company = stock_info.get("name", ticker)
 
+    senior_feedback_block = ""
+    if supervisor_critique:
+        senior_feedback_block = (
+            f"\n⚠️ SENIOR-ANALYST FEEDBACK (HÖCHSTE PRIORITÄT):\n"
+            f"{supervisor_critique}\n"
+            f"Adressiere dieses Feedback EXPLIZIT in deiner Analyse.\n"
+        )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", RISK_PROMPT),
         ("human", """Hinterfrage kritisch diese Analyse für {ticker} ({company}):
@@ -109,6 +118,7 @@ NEWS-ANALYSE (JSON):
 
 {macro_text}
 {industry_text}
+{senior_feedback_block}
 
 AKTUELLE MARKTDATEN (yfinance):
 {stock_info}
@@ -128,16 +138,17 @@ Erstelle EXAKT 3 Szenarien (Bear/Base/Bull) deren Wahrscheinlichkeiten sich auf 
     chain = prompt | llm | parser
 
     result = chain.invoke({
-        "ticker": ticker,
-        "company": company,
-        "fundamental_json": json.dumps(fundamental_output, indent=2, ensure_ascii=False),
-        "news_json": json.dumps(news_output, indent=2, ensure_ascii=False),
-        "macro_text": macro_text,
-        "industry_text": industry_text,
-        "recommendation": recommendation,
-        "stock_info": stock_info,
-        "price_history": price_history,
-        "format_instructions": parser.get_format_instructions(),
+        "ticker":               ticker,
+        "company":              company,
+        "fundamental_json":     json.dumps(fundamental_output, indent=2, ensure_ascii=False),
+        "news_json":            json.dumps(news_output, indent=2, ensure_ascii=False),
+        "macro_text":           macro_text,
+        "industry_text":        industry_text,
+        "senior_feedback_block": senior_feedback_block,
+        "recommendation":       recommendation,
+        "stock_info":           stock_info,
+        "price_history":        price_history,
+        "format_instructions":  parser.get_format_instructions(),
     })
 
     return result
