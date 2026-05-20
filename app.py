@@ -1026,23 +1026,66 @@ if st.session_state.result:
                 + ", ".join(relevant)
             )
 
+            # Mapping: mögliche Kennzahl-Namen → (Spaltenheader, Datenfeld)
+            _PEER_METRIC_MAP = {
+                "EV/EBITDA":          ("EV/EBITDA",      "ev_ebitda"),
+                "EV/Sales":           ("EV/EBITDA",      "ev_ebitda"),
+                "Forward P/E":        ("Fwd. P/E",       "forward_pe"),
+                "Fwd. P/E":           ("Fwd. P/E",       "forward_pe"),
+                "P/E":                ("Fwd. P/E",       "forward_pe"),
+                "EBIT-Marge":         ("EBIT-%",         "ebit_margin_pct"),
+                "EBIT-%":             ("EBIT-%",         "ebit_margin_pct"),
+                "FCF-Marge":          ("EBIT-%",         "ebit_margin_pct"),
+                "ND/EBITDA":          ("ND/EBITDA",      "nd_ebitda"),
+                "Net Debt/EBITDA":    ("ND/EBITDA",      "nd_ebitda"),
+                "Dividend-Yield":     ("Div.-Yield",     "dividend_yield_pct"),
+                "Div.-Yield":         ("Div.-Yield",     "dividend_yield_pct"),
+                "FCF-Yield":          ("Div.-Yield",     "dividend_yield_pct"),
+                "Umsatzwachstum":     ("Umsatz-Wachstum","revenue_growth_pct"),
+                "Umsatz-Wachstum":    ("Umsatz-Wachstum","revenue_growth_pct"),
+                "ROE":                ("ROE",            "roic_pct"),
+                "ROIC":               ("ROIC",           "roic_pct"),
+                "P/B":                ("EV/EBITDA",      "ev_ebitda"),
+                "P/FFO":              ("EV/EBITDA",      "ev_ebitda"),
+                "NAV-Discount":       ("EV/EBITDA",      "ev_ebitda"),
+            }
+            _FALLBACK_COLS = [
+                ("EV/EBITDA",      "ev_ebitda"),
+                ("Fwd. P/E",       "forward_pe"),
+                ("EBIT-%",         "ebit_margin_pct"),
+                ("ND/EBITDA",      "nd_ebitda"),
+                ("Div.-Yield",     "dividend_yield_pct"),
+                ("Umsatz-Wachstum","revenue_growth_pct"),
+            ]
+
+            # Spalten in Reihenfolge der sektorspezifischen Kennzahlen aufbauen
+            seen_keys: set = set()
+            dyn_cols: list = []
+            for m in relevant:
+                mapping = _PEER_METRIC_MAP.get(m)
+                if mapping and mapping[1] not in seen_keys:
+                    dyn_cols.append(mapping)
+                    seen_keys.add(mapping[1])
+            # Restliche Standard-Spalten auffüllen, falls nicht schon vorhanden
+            for fb_label, fb_key in _FALLBACK_COLS:
+                if fb_key not in seen_keys:
+                    dyn_cols.append((fb_label, fb_key))
+                    seen_keys.add(fb_key)
+
             rows_peer = []
             for p in [*peers, avg_peer, subject]:
                 if not p:
                     continue
                 is_subj = p.get("ticker") == ticker
                 is_avg  = p.get("ticker") == "AVG"
-                rows_peer.append({
-                    "Unternehmen":        ("⭐ " if is_subj else "Ø " if is_avg else "")
-                                         + str(p.get("company", "")),
-                    "Land":              p.get("country", ""),
-                    "EV/EBITDA":         p.get("ev_ebitda", "-"),
-                    "Fwd. P/E":          p.get("forward_pe", "-"),
-                    "EBIT-%":            p.get("ebit_margin_pct", "-"),
-                    "ND/EBITDA":         p.get("nd_ebitda", "-"),
-                    "Div.-Yield":        p.get("dividend_yield_pct", "-"),
-                    "Umsatz-Wachstum":   p.get("revenue_growth_pct", "-"),
-                })
+                row = {
+                    "Unternehmen": ("⭐ " if is_subj else "Ø " if is_avg else "")
+                                   + str(p.get("company", "")),
+                    "Land":        p.get("country", ""),
+                }
+                for col_label, col_key in dyn_cols:
+                    row[col_label] = p.get(col_key, "-")
+                rows_peer.append(row)
 
             df_peer = pd.DataFrame(rows_peer)
             st.dataframe(df_peer, use_container_width=True, hide_index=True)

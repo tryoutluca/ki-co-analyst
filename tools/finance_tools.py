@@ -1560,8 +1560,10 @@ def get_peer_financials(ticker: str) -> dict:
             op_margin = info.get("operatingMargins")
             ebit_margin = round(op_margin * 100, 1) if op_margin is not None else "-"
 
-            div_yield = info.get("dividendYield")
-            div_pct = round((div_yield or 0) * 100, 2)
+            div_yield = info.get("dividendYield") or 0
+            div_raw = float(div_yield)
+            # yfinance dividendYield: decimal (0.031) → * 100; already-% (3.1) → keep
+            div_pct = round(div_raw * 100 if div_raw < 1.0 else div_raw, 2)
 
             rev_growth = info.get("revenueGrowth")
             rev_growth_pct = round((rev_growth or 0) * 100, 1)
