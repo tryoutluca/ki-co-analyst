@@ -92,7 +92,7 @@ CACHE_MAX_AGE_HOURS = 24
 
 _KNOWN_IR_URLS: dict[str, str] = {
     # Swiss
-    "ABBN.SW": "https://www.abb.com/global/en/company/annual-reporting-suite",
+    "ABBN.SW": "https://www.abb.com/global/en/company/annual-reporting-suite#download",
     "ALC.SW":  "https://investor.alcon.com/financials/annual-reports",
     "AMRZ.SW": "https://investors.amrize.com/financial-info/annual-reports",
     "CFR.SW":  "https://www.richemont.com/investors/results-reports-presentations/",
@@ -102,7 +102,7 @@ _KNOWN_IR_URLS: dict[str, str] = {
     "KNIN.SW": "https://www.kuehne-nagel.com/company/investor-relations/financial-performance",
     "LOGN.SW": "https://ir.logitech.com/financial-info/annual-reports/default.aspx",
     "LONN.SW": "https://www.lonza.com/investor-relations/reporting-center",
-    "NESN.SW": "https://www.nestle.com/investors/results",
+    "NESN.SW": "https://www.nestle.com/investors/publications",
     "NOVN.SW": "https://www.novartis.com/investors/financial-data/annual-results",
     "PGHN.SW": "https://www.partnersgroup.com/en/shareholders/reports-and-presentations#all",
     "ROP.SW":  "https://www.roche.com/investors/reports#9e6fe792-f417-4188-993e-9cedf91bd4f6",
@@ -110,11 +110,11 @@ _KNOWN_IR_URLS: dict[str, str] = {
     "SLHN.SW": "https://www.swisslife.com/en/home/investors/results-and-reports.html",
     "SREN.SW": "https://www.swissre.com/investors/financial-information.html#2025-content",
     "SCMN.SW": "https://www.swisscom.ch/en/about/investors/reports.html",
-    "UBSG.SW": "https://www.ubs.com/global/en/investor-relations/financial-information/annual-reporting.html",
-    "ZURN.SW": "https://www.zurich.com/investor-relations#Financial%20update",
+    "UBSG.SW": "https://www.ubs.com/global/en/investor-relations/financial-information/sec-filings.html#tab-1955586228",
+    "ZURN.SW": "https://www.zurich.com/investor-relations/results-and-reports",
     "RIEN.SW": "https://www.rieter.com/investor-relations/results-and-presentations/financial-reports",
     "SCHN.SW": "https://www.schindler.com/com/internet/en/investor-relations/reports.html",
-    "BAER.SW": "https://www.juliusbaer.com/en/media-investors/financial-information/financial-reporting-1/",
+    "BAER.SW": "https://www.juliusbaer.com/en/media-investors/financial-information/financial-reporting-1/#c101123",
     "LISN.SW": "https://www.lindt-spruengli.com/investors/financial-reporting/publications",
     "AAPL":    "https://investor.apple.com/financial-information/sec-filings/default.aspx",
     "MSFT":    "https://www.microsoft.com/en-us/investor/sec-filings.aspx",
@@ -126,6 +126,14 @@ _KNOWN_IR_URLS: dict[str, str] = {
     "TSLA":    "https://ir.tesla.com/sec-filings/annual-reports",
     "JPM":     "https://www.jpmorganchase.com/ir/annual-report",
     "GS":      "https://www.goldmansachs.com/investor-relations/financials/",
+}
+
+# Foreign private issuers: maps exchange ticker -> US SEC ticker for EDGAR lookup
+# These companies file 20-F (annual) and 6-K (interim) instead of 10-K/10-Q
+_SEC_FOREIGN_FILERS: dict[str, str] = {
+    "UBSG.SW": "UBS",
+    "NOVN.SW": "NVS",
+    "ABBN.SW": "ABBNY",  # ABB Ltd ADR — files 20-F/6-K with SEC
 }
 
 # HTML anchor-text keywords used to detect IR documents when no PDFs are found
@@ -244,6 +252,62 @@ def _get_emb() -> OpenAIEmbeddings:
     return _emb
 
 
+# ── Document deduplication & year spreading ───────────────────────────────────
+
+def _deduplicate_and_spread(docs: list[dict], max_docs: int = 5) -> list[dict]:
+    """
+    1. Remove language duplicates (EN > DE > FR > IT preferred).
+    2. Spread across years: one document per year, covering the 5 most recent years.
+    """
+    from datetime import datetime as _dt
+    from urllib.parse import unquote as _unquote
+
+    if not docs:
+        return docs
+
+    def _lang_rank(doc: dict) -> int:
+        combined = (_unquote(doc.get("url", "")) + " " + doc.get("filename", "")).lower()
+        for suffix, rank in (("_en.", 0), ("/en/", 0), ("_de.", 1), ("/de/", 1),
+                              ("_fr.", 2), ("_it.", 3)):
+            if suffix in combined:
+                return rank
+        return 2  # neutral — treat as acceptable
+
+    def _norm_url(url: str) -> str:
+        """Strip language suffix for grouping."""
+        decoded = _unquote(url).lower()
+        return re.sub(r"[_-](?:de|en|fr|it)(?=\.pdf)", "", decoded)
+
+    # Group by (type, year, normalised_url) → keep best language per group
+    groups: dict[tuple, dict] = {}
+    for doc in docs:
+        key = (doc["type"], doc["year"], _norm_url(doc.get("url", doc["filename"])))
+        if key not in groups or _lang_rank(doc) < _lang_rank(groups[key]):
+            groups[key] = doc
+
+    candidates = sorted(groups.values(), key=lambda d: (d["priority"], -d["year"]))
+
+    # Keep at most one document per year; cover the 5 most recent years
+    current_year = _dt.now().year
+    min_year = current_year - 5
+
+    result: list[dict] = []
+    seen_years: set = set()
+
+    for doc in candidates:
+        yr = doc.get("year", 0)
+        if yr > 0 and yr < min_year:
+            continue
+        yr_key = yr if yr > 0 else f"_unknown_{len(result)}"
+        if yr_key not in seen_years:
+            seen_years.add(yr_key)
+            result.append(doc)
+        if len(result) >= max_docs:
+            break
+
+    return result
+
+
 # ── Playwright helper ─────────────────────────────────────────────────────────
 
 def _playwright_render(url: str, timeout_ms: int = 20_000) -> str:
@@ -258,17 +322,135 @@ def _playwright_render(url: str, timeout_ms: int = 20_000) -> str:
             browser = pw.chromium.launch(headless=True)
             ctx  = browser.new_context(user_agent=_HEADERS["User-Agent"])
             page = ctx.new_page()
-            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            page.goto(url, timeout=timeout_ms, wait_until="commit")
             try:
                 page.wait_for_load_state("networkidle", timeout=10_000)
             except Exception:
-                pass  # networkidle timeout is acceptable — grab what's rendered
+                page.wait_for_timeout(3_000)
+            try:
+                page.evaluate("""
+                    () => {
+                        const patterns = [
+                            '#onetrust-accept-btn-handler',
+                            '#accept-recommended-btn-handler',
+                            '#CybotCookiebotDialogBodyButtonAccept',
+                            'button[id*="accept"]','button[class*="accept"]',
+                        ];
+                        for (const sel of patterns) {
+                            const btn = document.querySelector(sel);
+                            if (btn) { btn.click(); return true; }
+                        }
+                        const texts = ['accept all','accept all cookies','alle akzeptieren',
+                                       'akzeptieren','i accept','agree','ok'];
+                        for (const btn of document.querySelectorAll('button')) {
+                            if (texts.includes(btn.textContent.trim().toLowerCase())) {
+                                btn.click(); return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                page.wait_for_timeout(1_500)
+            except Exception:
+                pass
             html = page.content()
             browser.close()
             return html
     except Exception as exc:
         print(f"      Playwright Fehler ({url[:60]}): {exc}")
         return ""
+
+
+def _playwright_render_multi_year(url: str, n_years: int = 5,
+                                   timeout_ms: int = 20_000) -> str:
+    """
+    Renders *url* and then clicks year-filter buttons for the n most recent years.
+    Many EU/CH IR pages (Swiss Life, Zurich, etc.) show only the current year by
+    default and require clicking year-tabs to reveal older documents.
+
+    Returns concatenated HTML from all year views so PDF scraping covers all years.
+    Falls back silently to a single-page render if no year buttons are found.
+    """
+    if not _PLAYWRIGHT_AVAILABLE:
+        return ""
+
+    from datetime import datetime as _dt
+    current_year = _dt.now().year
+    # Try previous years (current year is visible on initial load)
+    prev_years = list(range(current_year - 1, current_year - n_years - 1, -1))
+
+    combined_html = ""
+    try:
+        with _sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx  = browser.new_context(
+                user_agent=_HEADERS["User-Agent"],
+                viewport={"width": 1920, "height": 1080},
+            )
+            page = ctx.new_page()
+            # 'commit' fires as soon as response headers arrive — never times out on slow
+            # sites that delay DOMContentLoaded (e.g. Zurich Insurance). Then we wait
+            # for networkidle (up to 20 s) or fall back to a fixed 5-second pause.
+            page.goto(url, timeout=45_000, wait_until="commit")
+            try:
+                page.wait_for_load_state("networkidle", timeout=20_000)
+            except Exception:
+                page.wait_for_timeout(5_000)
+
+            # Accept cookie consent banners (OneTrust, Cookiebot, generic)
+            try:
+                page.evaluate("""
+                    () => {
+                        const patterns = [
+                            '#onetrust-accept-btn-handler',
+                            '#accept-recommended-btn-handler',
+                            '#CybotCookiebotDialogBodyButtonAccept',
+                            'button[id*="accept"]',
+                            'button[class*="accept"]',
+                        ];
+                        for (const sel of patterns) {
+                            const btn = document.querySelector(sel);
+                            if (btn) { btn.click(); return true; }
+                        }
+                        // Text-based fallback
+                        const texts = ['accept all','accept all cookies','alle akzeptieren',
+                                       'akzeptieren','i accept','agree','ok'];
+                        for (const btn of document.querySelectorAll('button')) {
+                            if (texts.includes(btn.textContent.trim().toLowerCase())) {
+                                btn.click(); return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                page.wait_for_timeout(1_500)
+            except Exception:
+                pass
+
+            combined_html += page.content()
+
+            for year in prev_years:
+                try:
+                    clicked = page.evaluate(f"""
+                        () => {{
+                            const btn = Array.from(document.querySelectorAll("button"))
+                                .find(b => b.textContent.trim() === "{year}");
+                            if (btn) {{ btn.click(); return true; }}
+                            return false;
+                        }}
+                    """)
+                    if clicked:
+                        page.wait_for_timeout(1_500)
+                        combined_html += page.content()
+                        print(f"      Playwright Tab {year}: OK")
+                except Exception:
+                    continue
+
+            browser.close()
+    except Exception as exc:
+        print(f"      Playwright multi-year Fehler ({url[:60]}): {exc}")
+
+    return combined_html
 
 
 # ── 1. Find IR URL ────────────────────────────────────────────────────────────
@@ -298,15 +480,12 @@ def find_ir_url(ticker: str, company_name: str = "") -> str:
         # CIK not found — fall through to website scraping below
 
     # ── Known hard-coded mapping (EU/CH primary, US fallback) ────────────────
+    # Trusted URLs are returned directly — no HTTP check needed.
+    # Many IR sites return 403 to bots (requests) but load fine via Playwright.
     if ticker in _KNOWN_IR_URLS:
         url = _KNOWN_IR_URLS[ticker]
-        try:
-            r = requests.get(url, headers=_HEADERS, timeout=8, allow_redirects=True)
-            if r.status_code == 200:
-                print(f"      IR-Seite gefunden: {url}")
-                return url
-        except Exception:
-            pass
+        print(f"      IR-Seite (bekannte URL): {url}")
+        return url
 
     # ── yfinance website + IR path patterns (EU/CH tickers) ──────────────────
     base_url = ""
@@ -463,6 +642,8 @@ def get_sec_filings(ticker: str, cik: str) -> list[dict]:
         "10-K": ("annual_report",    3),
         "10-Q": ("interim_report",   2),
         "8-K":  ("earnings_release", 1),
+        "20-F": ("annual_report",    3),  # Foreign Private Issuer annual report
+        "6-K":  ("interim_report",   2),  # Foreign Private Issuer interim/earnings
     }
 
     filings_by_type: dict[str, dict] = {}
@@ -654,6 +835,14 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
     Returns up to 4 entries, each with:
       {url, filename, type, priority, year, text, format, source}
     """
+    # ── Foreign Private Issuer: route directly to SEC EDGAR ──────────────────
+    if ticker and ticker in _SEC_FOREIGN_FILERS:
+        sec_ticker = _SEC_FOREIGN_FILERS[ticker]
+        cik = get_sec_cik(sec_ticker)
+        if cik:
+            print(f"      {ticker} = Foreign Private Issuer, SEC EDGAR ({sec_ticker}, CIK {cik})")
+            return get_sec_filings(ticker, cik)
+
     # ── SEC EDGAR URL: extract CIK and fetch filings directly ────────────────
     if ir_url and "sec.gov" in ir_url:
         cik_match = re.search(r"CIK=(\d+)", ir_url)
@@ -671,19 +860,23 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
                 return get_sec_filings(ticker, cik)
         return []
 
+    parsed   = urlparse(ir_url)
+    base_dom = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Try fetching with requests first; on 403/error fall through to Playwright below
+    _requests_ok = False
     try:
         r = requests.get(ir_url, headers=_HEADERS, timeout=15)
         r.raise_for_status()
+        _requests_ok = True
     except Exception:
         if ticker and _sec_is_us_ticker(ticker):
             cik = get_sec_cik(ticker)
             if cik:
                 return get_sec_filings(ticker, cik)
-        return []
+        # Non-US: don't give up — Playwright (Stage 1c) will handle the 403
 
-    soup     = BeautifulSoup(r.text, "html.parser")
-    parsed   = urlparse(ir_url)
-    base_dom = f"{parsed.scheme}://{parsed.netloc}"
+    soup = BeautifulSoup(r.text if _requests_ok else "", "html.parser")
 
     found: list[dict] = []
     seen:  set[str]   = set()
@@ -698,10 +891,14 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
             return urljoin(ir_url, href)
         return href
 
+    def _is_pdf(href: str) -> bool:
+        """True if the URL path (ignoring query string / fragment) ends with .pdf."""
+        return href.split("?")[0].split("#")[0].lower().endswith(".pdf")
+
     # ── Stage 1: PDF links ────────────────────────────────────────────────────
     for a in soup.find_all("a", href=True):
         href = _resolve(a["href"])
-        if not href.lower().endswith(".pdf"):
+        if not _is_pdf(href):
             continue
         if href in seen:
             continue
@@ -742,8 +939,7 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
         })
 
     if found:
-        found.sort(key=lambda x: (x["priority"], -x["year"]))
-        return found[:4]
+        return _deduplicate_and_spread(found)
 
     # ── Stage 1b: Follow report sub-pages (EU/CH multi-level IR sites) ────────
     # Many European IR sites have PDFs only 1-2 clicks below the landing page.
@@ -785,7 +981,7 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
                     else:
                         href2 = raw_href
 
-                    if not href2.lower().endswith(".pdf"):
+                    if not _is_pdf(href2):
                         continue
                     if href2 in seen:
                         continue
@@ -836,52 +1032,85 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
                 break  # stop after first sub-page that yields PDFs
 
         if found:
-            found.sort(key=lambda x: (x["priority"], -x["year"]))
-            return found[:4]
+            return _deduplicate_and_spread(found)
 
     # ── Stage 1c: Playwright JS rendering (EU/CH sites with dynamic PDF lists) ──
     if not found and not (ticker and _sec_is_us_ticker(ticker)) and _PLAYWRIGHT_AVAILABLE:
-        print(f"      Playwright-Rendering: {ir_url[:60]}...")
-        rendered = _playwright_render(ir_url)
+        print(f"      Playwright-Rendering (multi-year): {ir_url[:60]}...")
+        rendered = _playwright_render_multi_year(ir_url)
         if rendered:
             soup_pw = BeautifulSoup(rendered, "html.parser")
 
-            # PDF links in JS-rendered page
-            for a in soup_pw.find_all("a", href=True):
-                href = _resolve(a["href"])
-                if not href.lower().endswith(".pdf") or href in seen:
-                    continue
-                seen.add(href)
-                filename  = href.split("/")[-1].split("?")[0] or "document.pdf"
-                link_text = a.get_text(" ", strip=True)
-                label     = (link_text + " " + filename + " " + href).lower()
-                if any(kw in label for kw in EXCLUDE_KEYWORDS):
-                    continue
-                pdf_type, priority = "other", 99
-                for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
-                    hit_any = any(kw in label for kw in any_kws) if any_kws else True
-                    hit_all = all(kw in label for kw in all_kws) if all_kws else True
-                    if hit_any and hit_all:
-                        pdf_type, priority = t, p
-                        break
-                if pdf_type == "other":
-                    if _EU_PDF_ANNUAL.search(label):
-                        pdf_type, priority = "annual_report", 3
-                    elif _EU_PDF_INTERIM.search(label):
-                        pdf_type, priority = "interim_report", 4
-                    else:
+            def _scan_html_for_pdfs(html_src: str, soup_obj, source_label: str) -> None:
+                """Extract PDF URLs from both <a href> and raw HTML regex (covers CDN embeds)."""
+                # <a href> scan
+                for a in soup_obj.find_all("a", href=True):
+                    href = _resolve(a["href"])
+                    if not _is_pdf(href) or href in seen:
                         continue
-                year_match = re.search(r"20[12][0-9]", label)
-                year = int(year_match.group()) if year_match else 0
-                found.append({
-                    "url": href, "filename": filename, "type": pdf_type,
-                    "priority": priority, "year": year, "text": link_text,
-                    "format": "pdf", "source": "Playwright IR page PDF",
-                })
+                    seen.add(href)
+                    filename  = href.split("/")[-1].split("?")[0] or "document.pdf"
+                    link_text = a.get_text(" ", strip=True)
+                    label     = (link_text + " " + filename + " " + href).lower()
+                    if any(kw in label for kw in EXCLUDE_KEYWORDS):
+                        continue
+                    pdf_type, priority = "other", 99
+                    for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
+                        hit_any = any(kw in label for kw in any_kws) if any_kws else True
+                        hit_all = all(kw in label for kw in all_kws) if all_kws else True
+                        if hit_any and hit_all:
+                            pdf_type, priority = t, p
+                            break
+                    if pdf_type == "other":
+                        if _EU_PDF_ANNUAL.search(label):
+                            pdf_type, priority = "annual_report", 3
+                        elif _EU_PDF_INTERIM.search(label):
+                            pdf_type, priority = "interim_report", 4
+                        else:
+                            continue
+                    year_match = re.search(r"20[12][0-9]", label)
+                    year = int(year_match.group()) if year_match else 0
+                    found.append({
+                        "url": href, "filename": filename, "type": pdf_type,
+                        "priority": priority, "year": year, "text": link_text,
+                        "format": "pdf", "source": source_label,
+                    })
+                # Regex scan — catches PDF URLs in JSON blobs / data-attrs not in <a href>
+                for raw_url in re.findall(r'https?://[^\s"\'<>()\[\]]+\.pdf', html_src):
+                    if raw_url in seen:
+                        continue
+                    seen.add(raw_url)
+                    filename = raw_url.split("/")[-1].split("?")[0] or "document.pdf"
+                    label    = (filename + " " + raw_url).lower()
+                    if any(kw in label for kw in EXCLUDE_KEYWORDS):
+                        continue
+                    pdf_type, priority = "other", 99
+                    for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
+                        hit_any = any(kw in label for kw in any_kws) if any_kws else True
+                        hit_all = all(kw in label for kw in all_kws) if all_kws else True
+                        if hit_any and hit_all:
+                            pdf_type, priority = t, p
+                            break
+                    if pdf_type == "other":
+                        if _EU_PDF_ANNUAL.search(label):
+                            pdf_type, priority = "annual_report", 3
+                        elif _EU_PDF_INTERIM.search(label):
+                            pdf_type, priority = "interim_report", 4
+                        else:
+                            continue
+                    year_match = re.search(r"20[12][0-9]", label)
+                    year = int(year_match.group()) if year_match else 0
+                    found.append({
+                        "url": raw_url, "filename": filename, "type": pdf_type,
+                        "priority": priority, "year": year, "text": "",
+                        "format": "pdf", "source": source_label + " (regex)",
+                    })
+
+            # PDF links in JS-rendered page (<a href> + regex)
+            _scan_html_for_pdfs(rendered, soup_pw, "Playwright IR page PDF")
 
             if found:
-                found.sort(key=lambda x: (x["priority"], -x["year"]))
-                return found[:4]
+                return _deduplicate_and_spread(found)
 
             # Playwright sub-page following (for multi-level EU IR sites)
             seen_sub_pw: set[str] = set()
@@ -902,51 +1131,12 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
                 if not rendered2:
                     continue
                 soup2 = BeautifulSoup(rendered2, "html.parser")
-                for a in soup2.find_all("a", href=True):
-                    raw_href = a["href"].strip()
-                    if raw_href.startswith("//"):
-                        href2 = parsed.scheme + ":" + raw_href
-                    elif raw_href.startswith("/"):
-                        href2 = base_dom + raw_href
-                    elif not raw_href.startswith("http"):
-                        href2 = urljoin(subpage_url, raw_href)
-                    else:
-                        href2 = raw_href
-                    if not href2.lower().endswith(".pdf") or href2 in seen:
-                        continue
-                    seen.add(href2)
-                    filename  = href2.split("/")[-1].split("?")[0] or "document.pdf"
-                    link_text = a.get_text(" ", strip=True)
-                    label     = (link_text + " " + filename + " " + href2).lower()
-                    if any(kw in label for kw in EXCLUDE_KEYWORDS):
-                        continue
-                    pdf_type, priority = "other", 99
-                    for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
-                        hit_any = any(kw in label for kw in any_kws) if any_kws else True
-                        hit_all = all(kw in label for kw in all_kws) if all_kws else True
-                        if hit_any and hit_all:
-                            pdf_type, priority = t, p
-                            break
-                    if pdf_type == "other":
-                        if _EU_PDF_ANNUAL.search(label):
-                            pdf_type, priority = "annual_report", 3
-                        elif _EU_PDF_INTERIM.search(label):
-                            pdf_type, priority = "interim_report", 4
-                        else:
-                            continue
-                    year_match = re.search(r"20[12][0-9]", label)
-                    year = int(year_match.group()) if year_match else 0
-                    found.append({
-                        "url": href2, "filename": filename, "type": pdf_type,
-                        "priority": priority, "year": year, "text": link_text,
-                        "format": "pdf", "source": "Playwright sub-page PDF",
-                    })
+                _scan_html_for_pdfs(rendered2, soup2, "Playwright sub-page PDF")
                 if found:
                     break
 
             if found:
-                found.sort(key=lambda x: (x["priority"], -x["year"]))
-                return found[:4]
+                return _deduplicate_and_spread(found)
 
     # ── Stage 2: HTML links with IR keyword anchors ───────────────────────────
     print(f"      Keine PDFs gefunden auf {ir_url[:60]} — suche HTML IR-Links...")
@@ -1012,8 +1202,7 @@ def find_ir_pdfs(ir_url: str, ticker: str = "") -> list[dict]:
         })
 
     if html_found:
-        html_found.sort(key=lambda x: (x["priority"], -x["year"]))
-        return html_found[:4]
+        return _deduplicate_and_spread(html_found)
 
     # ── Stage 3: SEC EDGAR fallback for US tickers ───────────────────────────
     if ticker and _sec_is_us_ticker(ticker):

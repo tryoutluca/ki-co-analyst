@@ -600,5 +600,5 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
 
 
 if __name__ == "__main__":
-    result = run_fundamental_agent("LONN.SW")
+    result = run_fundamental_agent("UBSG.SW")
     print(json.dumps(result, indent=2, ensure_ascii=False))
