@@ -333,14 +333,58 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
 
     # ── Vollständige Finanzübersicht (historisch + Forward) ───────────────────
     print(f"      Erstelle vollständige Finanzübersicht...")
+
+    def _sf(v):
+        try:
+            return float(v) if v not in (None, "-", "n/v", "not found", "") else None
+        except (TypeError, ValueError):
+            return None
+
+    # Aktuelle Nettoverschuldung für Forward ND/EBITDA
+    _net_debt_bn = _sf(ir_analysis.get("net_debt_bn")) if ir_analysis else None
+    if _net_debt_bn is None:
+        _d = _sf(stock_info.get("totalDebt"))
+        _c = _sf(stock_info.get("totalCash"))
+        if _d is not None:
+            _net_debt_bn = round((_d or 0) / 1e9 - (_c or 0) / 1e9, 2)
+
+    # Aktueller EV für Forward EV/EBITDA
+    _mc_bn = all_multiples.get("_price_data", {}).get("market_cap_bn") if all_multiples else None
+    _ev_bn = round(_mc_bn + _net_debt_bn, 2) if (_mc_bn is not None and _net_debt_bn is not None) else None
+
+    # Letztes bekanntes DPS (flach fortschreiben)
+    _last_dps = _sf((ir_analysis or {}).get("dividend_per_share"))
+    if _last_dps is None and hist_data:
+        for _y in sorted(hist_data.keys(), reverse=True):
+            _d = _sf(hist_data[_y].get("dps"))
+            if _d is not None:
+                _last_dps = _d
+                break
+
     forward_estimates_list = []
     for yr, est in (forward_estimates.get("estimates") or {}).items():
+        rev   = _sf(est.get("revenue_bn"))
+        ebitda_m = _sf(est.get("ebitda_margin_pct"))
+        ebit_m   = _sf(est.get("ebit_margin_pct"))
+        fcf_fwd  = _sf(est.get("fcf_bn"))
+
+        ebitda_bn = round(rev * ebitda_m / 100, 2) if (rev and ebitda_m) else None
+        ev_ebitda_fwd = round(_ev_bn / ebitda_bn, 1) if (_ev_bn and ebitda_bn and ebitda_bn > 0) else None
+        nd_ebitda_fwd = round(_net_debt_bn / ebitda_bn, 2) if (_net_debt_bn is not None and ebitda_bn and ebitda_bn > 0) else None
+
         forward_estimates_list.append({
             "year":              yr,
             "type":              "E",
-            "revenue_bn":        est.get("revenue_bn"),
-            "ebitda_margin_pct": est.get("ebitda_margin_pct"),
+            "revenue_bn":        rev,
+            "ebitda_bn":         ebitda_bn,
+            "ebitda_margin_pct": ebitda_m,
+            "ebit_margin_pct":   ebit_m,
             "eps_adj":           est.get("eps"),
+            "dps":               _last_dps,
+            "fcf_bn":            fcf_fwd,
+            "net_debt_bn":       _net_debt_bn,
+            "nd_ebitda":         nd_ebitda_fwd,
+            "ev_ebitda_fwd":     ev_ebitda_fwd,
             "forward_pe":        est.get("forward_pe"),
             "source":            est.get("source", forward_estimates.get("source", "-")),
         })

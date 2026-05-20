@@ -256,12 +256,15 @@ class PeerCompanyData(BaseModel):
     ticker: str
     country: str
     ev_ebitda: float | str
+    ev_sales: float | str = "-"
     forward_pe: float | str
+    p_b: float | str = "-"
     ebit_margin_pct: float | str
     nd_ebitda: float | str
     dividend_yield_pct: float | str
     revenue_growth_pct: float | str
     roic_pct: float | str
+    fcf_yield_pct: float | str = "-"
 
 
 class PeerComparisonTable(BaseModel):

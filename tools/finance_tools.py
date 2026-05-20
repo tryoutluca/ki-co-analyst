@@ -1560,10 +1560,14 @@ def get_peer_financials(ticker: str) -> dict:
             op_margin = info.get("operatingMargins")
             ebit_margin = round(op_margin * 100, 1) if op_margin is not None else "-"
 
-            div_yield = info.get("dividendYield") or 0
-            div_raw = float(div_yield)
-            # yfinance dividendYield: decimal (0.031) → * 100; already-% (3.1) → keep
-            div_pct = round(div_raw * 100 if div_raw < 1.0 else div_raw, 2)
+            # Dividend Yield: dividendRate / price ist zuverlässiger als dividendYield
+            div_rate  = info.get("dividendRate") or 0
+            price_raw = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+            if price_raw and float(price_raw) > 0 and float(div_rate) > 0:
+                div_pct = round(float(div_rate) / float(price_raw) * 100, 2)
+            else:
+                div_raw = float(info.get("dividendYield") or 0)
+                div_pct = round(div_raw * 100, 2) if div_raw < 0.5 else round(div_raw, 2)
 
             rev_growth = info.get("revenueGrowth")
             rev_growth_pct = round((rev_growth or 0) * 100, 1)
@@ -1571,31 +1575,38 @@ def get_peer_financials(ticker: str) -> dict:
             roe = info.get("returnOnEquity")
             roic = round(roe * 100, 1) if roe is not None else "-"
 
-            ev_ebitda = info.get("enterpriseToEbitda", "-")
-            if ev_ebitda is not None and ev_ebitda not in ("n/v", "-"):
+            def _safe_r(val, decimals=1):
                 try:
-                    ev_ebitda = round(float(ev_ebitda), 1)
+                    v = float(val)
+                    return round(v, decimals) if v not in (float("inf"), float("-inf")) else "-"
                 except (TypeError, ValueError):
-                    ev_ebitda = "-"
+                    return "-"
 
-            fwd_pe = info.get("forwardPE", "-")
-            if fwd_pe is not None and fwd_pe not in ("n/v", "-"):
-                try:
-                    fwd_pe = round(float(fwd_pe), 1)
-                except (TypeError, ValueError):
-                    fwd_pe = "-"
+            ev_ebitda  = _safe_r(info.get("enterpriseToEbitda"))
+            ev_sales   = _safe_r(info.get("enterpriseToRevenue"))
+            fwd_pe     = _safe_r(info.get("forwardPE"))
+            p_b        = _safe_r(info.get("priceToBook"))
+
+            mktcap_raw = info.get("marketCap")
+            fcf_raw    = info.get("freeCashflow")
+            fcf_yield  = "-"
+            if mktcap_raw and fcf_raw and float(mktcap_raw) > 0:
+                fcf_yield = round(float(fcf_raw) / float(mktcap_raw) * 100, 1)
 
             return {
                 "company":            info.get("longName", t),
                 "ticker":             t,
                 "country":            info.get("country", "N/A"),
                 "ev_ebitda":          ev_ebitda,
+                "ev_sales":           ev_sales,
                 "forward_pe":         fwd_pe,
+                "p_b":                p_b,
                 "ebit_margin_pct":    ebit_margin,
                 "nd_ebitda":          nd_ebitda,
                 "dividend_yield_pct": div_pct,
                 "revenue_growth_pct": rev_growth_pct,
                 "roic_pct":           roic,
+                "fcf_yield_pct":      fcf_yield,
             }
         except Exception:
             return None
@@ -1620,8 +1631,9 @@ def get_peer_financials(ticker: str) -> dict:
 
     # ── Schritt 4: Sektor-Durchschnitte (Ausreisser entfernen) ───────────────
     numeric_fields = [
-        "ev_ebitda", "forward_pe", "ebit_margin_pct",
-        "nd_ebitda", "dividend_yield_pct", "revenue_growth_pct", "roic_pct",
+        "ev_ebitda", "ev_sales", "forward_pe", "p_b",
+        "ebit_margin_pct", "nd_ebitda", "dividend_yield_pct",
+        "revenue_growth_pct", "roic_pct", "fcf_yield_pct",
     ]
 
     def _avg_clean(values: list) -> float | str:

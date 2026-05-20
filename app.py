@@ -985,13 +985,17 @@ if st.session_state.result:
             rows_fin = []
             for yr in full_fin:
                 is_est = yr.get("type") == "E"
+                # EV/EBITDA: für Estimate-Jahre forward berechnet, für Istzahlen n/v
+                ev_ebitda_val = yr.get("ev_ebitda_fwd", "n/v") if is_est else "n/v"
                 rows_fin.append({
                     "Jahr":           ("📊 " if is_est else "") + str(yr.get("year", "")),
                     "Umsatz (Mrd.)":  yr.get("revenue_bn",        "n/v"),
                     "EBITDA (Mrd.)":  yr.get("ebitda_bn",         "n/v"),
                     "EBITDA-%":       yr.get("ebitda_margin_pct", "-"),
+                    "EV/EBITDA":      ev_ebitda_val,
                     "EBIT-%":         yr.get("ebit_margin_pct",   "n/v"),
                     "EPS (adj.)":     yr.get("eps_adj",           "n/v"),
+                    "Fwd. KGV":       yr.get("forward_pe",        "n/v") if is_est else "n/v",
                     "DPS":            yr.get("dps",               "n/v"),
                     "FCF (Mrd.)":     yr.get("fcf_bn",            "n/v"),
                     "ND/EBITDA":      yr.get("nd_ebitda",         "n/v"),
@@ -1026,35 +1030,56 @@ if st.session_state.result:
                 + ", ".join(relevant)
             )
 
+            # Div.-Yield Normalisierung für gecachte Daten (alte Analysen hatten *100 Bug)
+            def _norm_div(v):
+                try:
+                    f = float(v)
+                    return round(f / 100, 2) if f > 20 else round(f, 2)
+                except (TypeError, ValueError):
+                    return v
+
             # Mapping: mögliche Kennzahl-Namen → (Spaltenheader, Datenfeld)
             _PEER_METRIC_MAP = {
-                "EV/EBITDA":          ("EV/EBITDA",      "ev_ebitda"),
-                "EV/Sales":           ("EV/EBITDA",      "ev_ebitda"),
-                "Forward P/E":        ("Fwd. P/E",       "forward_pe"),
-                "Fwd. P/E":           ("Fwd. P/E",       "forward_pe"),
-                "P/E":                ("Fwd. P/E",       "forward_pe"),
-                "EBIT-Marge":         ("EBIT-%",         "ebit_margin_pct"),
-                "EBIT-%":             ("EBIT-%",         "ebit_margin_pct"),
-                "FCF-Marge":          ("EBIT-%",         "ebit_margin_pct"),
-                "ND/EBITDA":          ("ND/EBITDA",      "nd_ebitda"),
-                "Net Debt/EBITDA":    ("ND/EBITDA",      "nd_ebitda"),
-                "Dividend-Yield":     ("Div.-Yield",     "dividend_yield_pct"),
-                "Div.-Yield":         ("Div.-Yield",     "dividend_yield_pct"),
-                "FCF-Yield":          ("Div.-Yield",     "dividend_yield_pct"),
-                "Umsatzwachstum":     ("Umsatz-Wachstum","revenue_growth_pct"),
-                "Umsatz-Wachstum":    ("Umsatz-Wachstum","revenue_growth_pct"),
-                "ROE":                ("ROE",            "roic_pct"),
-                "ROIC":               ("ROIC",           "roic_pct"),
-                "P/B":                ("EV/EBITDA",      "ev_ebitda"),
-                "P/FFO":              ("EV/EBITDA",      "ev_ebitda"),
-                "NAV-Discount":       ("EV/EBITDA",      "ev_ebitda"),
+                "EV/EBITDA":               ("EV/EBITDA",      "ev_ebitda"),
+                "EV/Sales":                ("EV/Sales",       "ev_sales"),
+                "EV/Umsatz":               ("EV/Sales",       "ev_sales"),
+                "Forward P/E":             ("Fwd. P/E",       "forward_pe"),
+                "Fwd. P/E":                ("Fwd. P/E",       "forward_pe"),
+                "P/E":                     ("Fwd. P/E",       "forward_pe"),
+                "EBIT-Marge":              ("EBIT-%",         "ebit_margin_pct"),
+                "EBIT-%":                  ("EBIT-%",         "ebit_margin_pct"),
+                "FCF-Marge":               ("EBIT-%",         "ebit_margin_pct"),
+                "ND/EBITDA":               ("ND/EBITDA",      "nd_ebitda"),
+                "Net Debt/EBITDA":         ("ND/EBITDA",      "nd_ebitda"),
+                "Dividend-Yield":          ("Div.-Yield %",   "dividend_yield_pct"),
+                "Div.-Yield":              ("Div.-Yield %",   "dividend_yield_pct"),
+                "FCF-Yield":               ("FCF-Yield %",    "fcf_yield_pct"),
+                "Free Cash Flow Yield":    ("FCF-Yield %",    "fcf_yield_pct"),
+                "FCF Yield":               ("FCF-Yield %",    "fcf_yield_pct"),
+                "Umsatzwachstum":          ("Umsatz-Wachstum","revenue_growth_pct"),
+                "Umsatz-Wachstum":         ("Umsatz-Wachstum","revenue_growth_pct"),
+                "ROE":                     ("ROE %",          "roic_pct"),
+                "ROIC":                    ("ROIC %",         "roic_pct"),
+                "P/B":                     ("P/B",            "p_b"),
+                "P/FFO":                   ("P/B",            "p_b"),
+                "NAV-Discount":            ("P/B",            "p_b"),
+                "PEG Ratio":               ("Fwd. P/E",       "forward_pe"),
+                "R&D/Sales":               ("EBIT-%",         "ebit_margin_pct"),
+                "Net Interest Margin":     ("EBIT-%",         "ebit_margin_pct"),
+                "Cost-Income-Ratio":       ("EBIT-%",         "ebit_margin_pct"),
+                "CET1-Ratio":              ("P/B",            "p_b"),
+                "LTV":                     ("ND/EBITDA",      "nd_ebitda"),
             }
             _FALLBACK_COLS = [
                 ("EV/EBITDA",      "ev_ebitda"),
+                ("EV/Sales",       "ev_sales"),
                 ("Fwd. P/E",       "forward_pe"),
+                ("P/B",            "p_b"),
                 ("EBIT-%",         "ebit_margin_pct"),
                 ("ND/EBITDA",      "nd_ebitda"),
-                ("Div.-Yield",     "dividend_yield_pct"),
+                ("Div.-Yield %",   "dividend_yield_pct"),
+                ("FCF-Yield %",    "fcf_yield_pct"),
+                ("ROE %",          "roic_pct"),
                 ("Umsatz-Wachstum","revenue_growth_pct"),
             ]
 
@@ -1084,7 +1109,11 @@ if st.session_state.result:
                     "Land":        p.get("country", ""),
                 }
                 for col_label, col_key in dyn_cols:
-                    row[col_label] = p.get(col_key, "-")
+                    val = p.get(col_key, "-")
+                    # Normalisiere Div.-Yield für gecachte Daten (Bug: *100 in alten Analysen)
+                    if col_key == "dividend_yield_pct":
+                        val = _norm_div(val)
+                    row[col_label] = val
                 rows_peer.append(row)
 
             df_peer = pd.DataFrame(rows_peer)
