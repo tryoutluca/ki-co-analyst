@@ -193,6 +193,17 @@ def run_fundamental_agent(
     )
     relevant_multiples = get_relevant_multiples(sector)
 
+    # ── Forward-KGV deterministisch berechnen ────────────────────────────────
+    _fwd_price = all_multiples.get("_price_data", {}).get("current_price") if all_multiples else None
+    if _fwd_price and forward_estimates.get("estimates"):
+        for _yr_data in forward_estimates["estimates"].values():
+            try:
+                _eps_f = float(_yr_data.get("eps") or 0)
+                if _eps_f > 0:
+                    _yr_data["forward_pe"] = round(_fwd_price / _eps_f, 1)
+            except (TypeError, ValueError):
+                pass
+
     # ── Peer-Vergleich (vor LLM — wird für Estimate-Anker benötigt) ──────────
     print(f"      Erstelle Peer-Vergleich...")
     peer_comparison = get_peer_financials(ticker)
@@ -325,12 +336,13 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
     forward_estimates_list = []
     for yr, est in (forward_estimates.get("estimates") or {}).items():
         forward_estimates_list.append({
-            "year":             yr,
-            "type":             "E",
-            "revenue_bn":       est.get("revenue_bn"),
+            "year":              yr,
+            "type":              "E",
+            "revenue_bn":        est.get("revenue_bn"),
             "ebitda_margin_pct": est.get("ebitda_margin_pct"),
-            "eps_adj":          est.get("eps"),
-            "source":           est.get("source", forward_estimates.get("source", "-")),
+            "eps_adj":           est.get("eps"),
+            "forward_pe":        est.get("forward_pe"),
+            "source":            est.get("source", forward_estimates.get("source", "-")),
         })
 
     full_financials = build_full_financials(
@@ -584,10 +596,12 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
         f"Konfidenz: {forward_estimates.get('confidence', '-')})"
     )
     for year, est in forward_estimates.get("estimates", {}).items():
+        fpe = est.get("forward_pe")
+        fpe_str = f" | Forward-KGV {fpe}x" if fpe is not None else ""
         lines.append(
             f"  {year}: Umsatz {est.get('revenue_bn', '-')} Mrd. | "
             f"EBITDA-Marge {est.get('ebitda_margin_pct', '-')}% | "
-            f"EPS {est.get('eps', '-')} "
+            f"EPS {est.get('eps', '-')}{fpe_str} "
             f"[{est.get('source', '-')}]"
         )
     for assumption in forward_estimates.get("key_assumptions", []):
@@ -600,5 +614,5 @@ def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
 
 
 if __name__ == "__main__":
-    result = run_fundamental_agent("UBSG.SW")
+    result = run_fundamental_agent("YPSN.SW")
     print(json.dumps(result, indent=2, ensure_ascii=False))
