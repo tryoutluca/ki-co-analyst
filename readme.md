@@ -61,7 +61,7 @@ Ein KI-gestütztes Multi-Agent System (MAS) zur professionellen Fundamentalanaly
 ## Agent-Beschreibungen
 
 ### Fundamental Agent — `agents/fundamental_agent.py`
-**Modell:** GPT-4o-mini
+**Modell:** GPT-5.4-mini
 
 Erstellt eine vollständige Fundamentalanalyse nach Buy-Side-Standard:
 
@@ -75,7 +75,7 @@ Erstellt eine vollständige Fundamentalanalyse nach Buy-Side-Standard:
 - **5-stufige Empfehlung:** KAUFEN / ÜBERGEWICHTEN / HALTEN / UNTERGEWICHTEN / VERKAUFEN (basierend auf DCF-Upside, mit Adjustierung für Bewertungsniveau und FCF-Qualität)
 
 ### News Agent — `agents/news_agent.py`
-**Modell:** GPT-4o-mini
+**Modell:** GPT-5.4-mini
 
 Analysiert Nachrichtenlage, Makro und Industrie-Dynamiken:
 
@@ -86,7 +86,7 @@ Analysiert Nachrichtenlage, Makro und Industrie-Dynamiken:
 - Trennt strukturelle Veränderungen (CEO-Wechsel, M&A, Regulierung) von täglichem Rauschen
 
 ### Risk Agent — `agents/risk_agent.py`
-**Modell:** GPT-4o-mini
+**Modell:** GPT-5.4-mini
 
 Agiert als Advocatus Diaboli — hinterfragt die bestehende Investmentthese:
 
