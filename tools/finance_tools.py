@@ -1488,11 +1488,15 @@ def get_dynamic_peers(
     return fallback
 
 
-def get_peer_financials(ticker: str) -> dict:
+def get_peer_financials(ticker: str, peers_override: list | None = None) -> dict:
     """
     Erstellt einen Peer-Vergleich mit sektorspezifischen Kennzahlen.
 
     Schritt 1: Peer-Liste via get_dynamic_peers (Tavily → Finnhub → Fallback)
+               ODER via peers_override (Phase 2: Geschäftsmodell-Peers vom
+               Classifier-Agenten — übersteuert die automatische Discovery,
+               weil GICS-Sektor-Peers bei Spezialfällen wie Quantum-Hardware
+               irreführend sind, z.B. Seagate/WDC für Rigetti)
     Schritt 2: Sektor-relevante Multiples via LLM bestimmen
     Schritt 3: Kennzahlen pro Peer via yfinance holen
     Schritt 4: Sektor-Median berechnen (Ausreisser bereinigen)
@@ -1525,7 +1529,11 @@ def get_peer_financials(ticker: str) -> dict:
         industry = "N/A"
         company_name = ticker
 
-    peer_tickers = get_dynamic_peers(ticker, company_name, sector, industry)
+    if peers_override:
+        peer_tickers = [p for p in peers_override if isinstance(p, str) and p.strip()][:6]
+        print(f"      Peers via Classifier-Override (Phase 2): {peer_tickers}")
+    else:
+        peer_tickers = get_dynamic_peers(ticker, company_name, sector, industry)
 
     # ── Schritt 2: Sektor-relevante Multiples ─────────────────────────────────
     relevant_multiples = SECTOR_MULTIPLES.get(sector, DEFAULT_MULTIPLES)

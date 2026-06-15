@@ -16,7 +16,138 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+try:
+    import plotly.graph_objects as go
+    _PLOTLY = True
+except ImportError:
+    _PLOTLY = False
+
 from tools.finance_tools import search_ticker
+
+
+# ── Chart-Helfer (laienfreundliche Visualisierung) ───────────────────────────
+def _parse_num(val):
+    """Extrahiert eine Zahl aus '12.3x', '15%', '1.2 Mrd' etc."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    if not isinstance(val, str):
+        return None
+    import re
+    m = re.search(r"-?\d+[.,]?\d*", val.replace(",", "."))
+    return float(m.group()) if m else None
+
+
+# Einheitliche Farbpalette
+_C_PRIMARY = "#1a2f45"
+_C_ACCENT = "#2e6fb0"
+_C_GOOD = "#2e9e5b"
+_C_WARN = "#b8860b"
+_C_BAD = "#c0392b"
+_C_PEER = "#9bb4cc"
+_C_HIST = "#cbb994"
+
+
+def chart_scenarios(scenarios, ccy, current_price=None):
+    """Balkendiagramm der Bear/Base/Bull-Kursziele mit Wahrscheinlichkeiten."""
+    if not _PLOTLY or not scenarios:
+        return None
+    names, targets, probs, colors = [], [], [], []
+    cmap = {"Bear Case": _C_BAD, "Base Case": _C_ACCENT, "Bull Case": _C_GOOD}
+    for s in scenarios:
+        nm = s.get("name", "") if isinstance(s, dict) else getattr(s, "name", "")
+        pt = s.get("price_target") if isinstance(s, dict) else getattr(s, "price_target", None)
+        pr = s.get("probability_pct") if isinstance(s, dict) else getattr(s, "probability_pct", None)
+        pt = _parse_num(pt)
+        if pt is None:
+            continue
+        names.append(nm)
+        targets.append(pt)
+        probs.append(pr)
+        colors.append(cmap.get(nm, _C_ACCENT))
+    if not targets:
+        return None
+    text = [f"{ccy} {t:.2f}<br>{p}%" if p is not None else f"{ccy} {t:.2f}"
+            for t, p in zip(targets, probs)]
+    fig = go.Figure(go.Bar(
+        x=names, y=targets, text=text, textposition="outside",
+        marker_color=colors, width=0.55,
+    ))
+    if current_price:
+        fig.add_hline(
+            y=current_price, line_dash="dash", line_color=_C_PRIMARY,
+            annotation_text=f"Aktueller Kurs ({ccy} {current_price:.2f})",
+            annotation_position="top left",
+        )
+    fig.update_layout(
+        title="Mögliche Kursziele je Szenario",
+        height=340, margin=dict(t=50, b=30, l=20, r=20),
+        plot_bgcolor="white", showlegend=False,
+        yaxis_title=f"Kursziel ({ccy})",
+    )
+    return fig
+
+
+def chart_margin_trend(consensus_estimates):
+    """Linienchart der EBITDA-Margen-Entwicklung (Ist + Schätzung)."""
+    if not _PLOTLY or not consensus_estimates:
+        return None
+    years, margins, is_est = [], [], []
+    for row in consensus_estimates:
+        y = row.get("year", "") if isinstance(row, dict) else ""
+        m = _parse_num(row.get("ebitda_margin_pct") if isinstance(row, dict) else None)
+        if y and m is not None:
+            years.append(y)
+            margins.append(m)
+            is_est.append((row.get("type") == "E") if isinstance(row, dict) else False)
+    if len(years) < 2:
+        return None
+    # Ist-Linie durchgezogen, Schätzung gestrichelt
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=years, y=margins, mode="lines+markers+text",
+        text=[f"{m:.1f}%" for m in margins], textposition="top center",
+        line=dict(color=_C_ACCENT, width=3),
+        marker=dict(size=9, color=[_C_GOOD if e else _C_ACCENT for e in is_est]),
+    ))
+    fig.update_layout(
+        title="Gewinnmarge im Zeitverlauf (grün = Schätzung)",
+        height=320, margin=dict(t=50, b=30, l=20, r=20),
+        plot_bgcolor="white", showlegend=False,
+        yaxis_title="EBITDA-Marge (%)",
+    )
+    return fig
+
+
+def chart_valuation_vs_peers(valuation_table):
+    """Gruppiertes Balkendiagramm: aktuelle Multiples vs Peer-Ø vs Hist-Ø."""
+    if not _PLOTLY or not valuation_table:
+        return None
+    metrics, cur, peer, hist = [], [], [], []
+    for row in valuation_table:
+        if not isinstance(row, dict):
+            continue
+        c = _parse_num(row.get("current_value"))
+        p = _parse_num(row.get("peer_average"))
+        h = _parse_num(row.get("historical_average"))
+        if c is None:
+            continue
+        metrics.append(row.get("metric", ""))
+        cur.append(c)
+        peer.append(p)
+        hist.append(h)
+    if not metrics:
+        return None
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name="Aktuell", x=metrics, y=cur, marker_color=_C_ACCENT))
+    fig.add_trace(go.Bar(name="Ähnliche Firmen (Ø)", x=metrics, y=peer, marker_color=_C_PEER))
+    fig.add_trace(go.Bar(name="Eigener Schnitt (Hist.)", x=metrics, y=hist, marker_color=_C_HIST))
+    fig.update_layout(
+        title="Ist die Aktie teuer? Vergleich der Bewertungs-Kennzahlen",
+        height=360, margin=dict(t=50, b=30, l=20, r=20),
+        plot_bgcolor="white", barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
 
 # ── Page Config (muss als erstes Streamlit-Call stehen) ──────────────────────
 st.set_page_config(
@@ -325,6 +456,18 @@ def _build_word_memo(data: dict, ticker: str, date: str, ccy: str) -> bytes:
     p.runs[-1].bold = True
     p.add_run(f"{rec}   |   Kursziel: {ccy} {pt:.2f}   |   Aktueller Kurs: {ccy} {cp:.2f}")
 
+    # Das Wichtigste in Kürze (laientauglich)
+    bottom_line = data.get("summary_bottom_line", "")
+    exec_sum = data.get("executive_summary", "")
+    if bottom_line or exec_sum:
+        add_heading("Das Wichtigste in Kürze", 1)
+        if bottom_line:
+            p_bl = doc.add_paragraph()
+            run_bl = p_bl.add_run(bottom_line)
+            run_bl.bold = True
+        if exec_sum:
+            doc.add_paragraph(exec_sum)
+
     # Unternehmensbeschreibung
     add_heading("Unternehmensbeschreibung", 1)
     doc.add_paragraph(data.get("company_description", "-"))
@@ -625,19 +768,40 @@ if run_button and selected_ticker:
     from agents.fundamental_agent import run_fundamental_agent
     from agents.news_agent import run_news_agent
     from agents.risk_agent import run_risk_agent
+    from agents.classifier_agent import run_classifier_agent
+    from tools.estimate_revision import apply_estimate_adjustments
     from graph.supervisor import synthesize_memo
 
     try:
         with st.status(f"Analyse läuft für **{ticker}**…", expanded=True) as status:
 
+            # ── Schritt 0: Business-Model-Classifier (Phase 1) ─────────────
+            st.write("🏷️ **Classifier** — Geschäftsmodell-Klassifikation…")
+            try:
+                business_model_classification = run_classifier_agent(ticker)
+                bmt = business_model_classification.get("business_model_type", "?")
+                bm_conf = business_model_classification.get("classification_confidence", 0.0)
+                dcf_ok = business_model_classification.get("dcf_applicable", True)
+                st.write(
+                    f"   ✅ Typ: **{bmt}** | Confidence: {bm_conf:.2f} | "
+                    f"DCF: {'ja' if dcf_ok else 'nein'}"
+                )
+            except Exception as e:
+                st.write(f"   ⚠ Classifier-Fallback: {e}")
+                business_model_classification = None
+
             # ── Schritt 1: Fundamental-Agent ─────────────────────────────────
             st.write("🔍 **Fundamental-Agent** — Daten abrufen & DCF-Bewertung…")
-            fundamental_output = run_fundamental_agent(ticker)
+            fundamental_output = run_fundamental_agent(
+                ticker,
+                business_model_context=business_model_classification,
+            )
             rec   = fundamental_output.get("recommendation", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "recommendation", "-")
             fv    = fundamental_output.get("fair_value_estimate", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "fair_value_estimate", "-")
             updn  = fundamental_output.get("upside_downside_pct", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "upside_downside_pct", "-")
             val   = fundamental_output.get("valuation_assessment", "-") if isinstance(fundamental_output, dict) else getattr(fundamental_output, "valuation_assessment", "-")
-            st.write(f"   ✅ Empfehlung: **{rec}** | Fair Value: {fv} | Upside: {updn}% | Bewertung: {val}")
+            f_conf = fundamental_output.get("self_confidence", 0.70) if isinstance(fundamental_output, dict) else getattr(fundamental_output, "self_confidence", 0.70)
+            st.write(f"   ✅ Empfehlung: **{rec}** | Fair Value: {fv} | Upside: {updn}% | Bewertung: {val} | Conf: {f_conf:.2f}")
 
             # Investment Case Bullets
             ic = fundamental_output.get("investment_case", []) if isinstance(fundamental_output, dict) else getattr(fundamental_output, "investment_case", [])
@@ -651,11 +815,127 @@ if run_button and selected_ticker:
             fundamental_context = (
                 f"Empfehlung: {rec}, Fair Value: {fv}, Bewertung: {val}"
             )
-            news_output = run_news_agent(ticker, fundamental_context)
+            news_output = run_news_agent(
+                ticker, fundamental_context,
+                business_model_context=business_model_classification,
+            )
             sentiment    = news_output.get("overall_sentiment_score", "-") if isinstance(news_output, dict) else getattr(news_output, "overall_sentiment_score", "-")
             st_outlook   = news_output.get("short_term_outlook", "-") if isinstance(news_output, dict) else getattr(news_output, "short_term_outlook", "-")
             macro_dir    = news_output.get("overall_macro_direction", "-") if isinstance(news_output, dict) else getattr(news_output, "overall_macro_direction", "-")
-            st.write(f"   ✅ Sentiment: **{sentiment}/10** | Kurzfrist-Outlook: {st_outlook} | Makro: {macro_dir}")
+            n_conf       = news_output.get("self_confidence", 0.70) if isinstance(news_output, dict) else getattr(news_output, "self_confidence", 0.70)
+            st.write(f"   ✅ Sentiment: **{sentiment}/10** | Kurzfrist-Outlook: {st_outlook} | Makro: {macro_dir} | Conf: {n_conf:.2f}")
+
+            # ── Schritt 2b: Makro-Estimate-Revision (Phase 2) ────────────────
+            revised_estimates = None
+            _adjs = news_output.get("estimate_adjustments", []) if isinstance(news_output, dict) else getattr(news_output, "estimate_adjustments", [])
+            if _adjs:
+                st.write("📐 **Estimate-Revision** — Makro-Treiber werden deterministisch angewendet…")
+                try:
+                    _f_dict = fundamental_output if isinstance(fundamental_output, dict) else fundamental_output.model_dump()
+                    revised_estimates = apply_estimate_adjustments(
+                        fundamental_output=_f_dict,
+                        adjustments=_adjs if isinstance(_adjs, list) else [],
+                        news_agent_confidence=float(n_conf) if isinstance(n_conf, (int, float)) else 0.70,
+                    )
+                    st.write(
+                        f"   ✅ {len(revised_estimates['adjustments_applied'])} Adjustments | "
+                        f"Umsatz-Δ: {revised_estimates['revenue_delta_pct']:+.2f}% | "
+                        f"EPS-Δ: {revised_estimates['eps_delta_pct']:+.2f}%"
+                    )
+                except Exception as e:
+                    st.write(f"   ⚠ Revision übersprungen: {e}")
+                    revised_estimates = None
+
+            # ── Schritt 2b2: Thematic-Agent (Phase 3, Megatrends) ────────────
+            thematic_analysis = None
+            try:
+                from agents.thematic_agent import run_thematic_agent
+                st.write("🌐 **Thematic-Agent** — Megatrends & Adoptionskurven…")
+                _f_dict_t = fundamental_output if isinstance(fundamental_output, dict) else fundamental_output.model_dump()
+                thematic_analysis = run_thematic_agent(
+                    ticker=ticker,
+                    fundamental_output=_f_dict_t,
+                    news_output=news_output if isinstance(news_output, dict) else news_output.model_dump(),
+                    business_model_context=business_model_classification,
+                )
+                if thematic_analysis:
+                    st.write(
+                        f"   ✅ {len(thematic_analysis.get('trends', []))} Trends | "
+                        f"Netto: {thematic_analysis.get('net_thematic_assessment','?')}"
+                    )
+                    for t in thematic_analysis.get("trends", [])[:4]:
+                        st.write(
+                            f"   • {t.get('trend','?')} ({t.get('adoption_stage','?')}): "
+                            f"{t.get('growth_contribution','')}"
+                        )
+                else:
+                    st.write("   ℹ Keine relevanten Trends")
+            except Exception as e:
+                st.write(f"   ⚠ Thematic-Agent übersprungen: {e}")
+                thematic_analysis = None
+
+            # ── Schritt 2b3: Optionality-Sub-Agent (Phase 4, nur Pre-Revenue) ─
+            optionality_analysis = None
+            try:
+                _bmc = business_model_classification or {}
+                _is_opt = (_bmc.get("business_model_type") == "optionality_play") or \
+                          bool(_bmc.get("requires_optionality_analysis"))
+                if _is_opt:
+                    from agents.optionality_agent import run_optionality_agent
+                    st.write("🎲 **Optionality-Agent** — Real-Options-Bewertung (Cash-Runway, TAM × Adoption)…")
+                    optionality_analysis = run_optionality_agent(
+                        ticker=ticker,
+                        fundamental_output=fundamental_output if isinstance(fundamental_output, dict) else fundamental_output.model_dump(),
+                        thematic_context=thematic_analysis,
+                        news_output=news_output if isinstance(news_output, dict) else news_output.model_dump(),
+                        business_model_context=_bmc,
+                    )
+                    if optionality_analysis:
+                        st.write(
+                            f"   ✅ Fair Value: {optionality_analysis.get('probability_weighted_value','n/v')} | "
+                            f"Runway: {optionality_analysis.get('runway_months','n/v')} Mt | "
+                            f"Verwässerung: {optionality_analysis.get('dilution_risk','?')}"
+                        )
+                    else:
+                        st.write("   ℹ Keine Optionality-Bewertung")
+            except Exception as e:
+                st.write(f"   ⚠ Optionality-Agent übersprungen: {e}")
+                optionality_analysis = None
+
+            # ── Schritt 2c: Forward-Estimate-Agent (Wachstums-Projektion) ────
+            st.write("📈 **Forward-Estimate-Agent** — Wachstums-These & Projektion…")
+            forward_estimates = None
+            try:
+                from agents.forward_estimate_agent import run_forward_estimate_agent
+                from tools.finance_tools import get_consensus_estimates
+                try:
+                    _consensus = get_consensus_estimates(ticker)
+                except Exception:
+                    _consensus = None
+                _f_dict = fundamental_output if isinstance(fundamental_output, dict) else fundamental_output.model_dump()
+                forward_estimates = run_forward_estimate_agent(
+                    ticker=ticker,
+                    fundamental_output=_f_dict,
+                    news_output=news_output if isinstance(news_output, dict) else news_output.model_dump(),
+                    business_model_context=business_model_classification,
+                    thematic_context=thematic_analysis,
+                    consensus_estimates=_consensus,
+                )
+                if forward_estimates:
+                    th = forward_estimates.get("overall_thesis", "")
+                    st.write(f"   ✅ These: {th}")
+                    for p in forward_estimates.get("projections", []):
+                        flag = p.get("plausibility_flag", "")
+                        st.write(
+                            f"   • {p.get('year')}: {p.get('revenue_growth_pct'):+.0f}% Umsatz "
+                            f"→ {p.get('revenue_bn')} Mrd, EPS {p.get('eps')}"
+                            + (f"  {flag}" if flag else "")
+                        )
+                else:
+                    st.write("   ℹ Keine Projektion möglich")
+            except Exception as e:
+                st.write(f"   ⚠ Forward-Estimate übersprungen: {e}")
+                forward_estimates = None
 
             # Top-News
             news_items = news_output.get("news_items", []) if isinstance(news_output, dict) else getattr(news_output, "news_items", [])
@@ -668,10 +948,14 @@ if run_button and selected_ticker:
 
             # ── Schritt 3: Risk/Advocatus-Agent ──────────────────────────────
             st.write("⚖️ **Risk-Agent** — Advocatus Diaboli & Szenarien…")
-            risk_output  = run_risk_agent(ticker, fundamental_output, news_output)
+            risk_output  = run_risk_agent(
+                ticker, fundamental_output, news_output,
+                business_model_context=business_model_classification,
+            )
             risk_rec     = risk_output.get("original_recommendation", "-") if isinstance(risk_output, dict) else getattr(risk_output, "original_recommendation", "-")
             counter      = risk_output.get("counter_position", "") if isinstance(risk_output, dict) else getattr(risk_output, "counter_position", "")
-            st.write(f"   ✅ Gegenposition zu **{risk_rec}**: {counter}")
+            r_conf       = risk_output.get("self_confidence", 0.70) if isinstance(risk_output, dict) else getattr(risk_output, "self_confidence", 0.70)
+            st.write(f"   ✅ Gegenposition zu **{risk_rec}** (Conf: {r_conf:.2f}): {counter}")
 
             scenarios = risk_output.get("scenarios", []) if isinstance(risk_output, dict) else getattr(risk_output, "scenarios", [])
             for sc in scenarios:
@@ -699,7 +983,20 @@ if run_button and selected_ticker:
 
             # ── Schritt 5: Supervisor-Synthese ────────────────────────────────
             st.write("✍️ **Supervisor** — Finales Investment Memo wird synthetisiert…")
-            result = synthesize_memo(ticker, fundamental_output, news_output, risk_output)
+            agent_confidence_scores = {
+                "fundamental": float(f_conf) if isinstance(f_conf, (int, float)) else 0.70,
+                "news":        float(n_conf) if isinstance(n_conf, (int, float)) else 0.70,
+                "risk":        float(r_conf) if isinstance(r_conf, (int, float)) else 0.70,
+            }
+            result = synthesize_memo(
+                ticker, fundamental_output, news_output, risk_output,
+                business_model_classification=business_model_classification,
+                agent_confidence_scores=agent_confidence_scores,
+                revised_estimates=revised_estimates,
+                forward_estimates=forward_estimates,
+                thematic_analysis=thematic_analysis,
+                optionality_analysis=optionality_analysis,
+            )
             final_rec = result.get("final_recommendation", "-")
             conviction = result.get("conviction_level", "-")
             pt         = result.get("price_target", "-")
@@ -812,6 +1109,38 @@ if st.session_state.result:
           <div class="label">Conviction</div>
           <div class="value" style="font-size:1.3rem;">{conviction_stars}</div>
           <div class="sub">{conv}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Executive Summary (laientauglich, prominent) ──────────────────────────
+    exec_sum = data.get("executive_summary", "")
+    bottom_line = data.get("summary_bottom_line", "")
+    if exec_sum or bottom_line:
+        rec_color = {
+            "KAUFEN": "#1a7a3f", "ÜBERGEWICHTEN": "#2e9e5b",
+            "HALTEN": "#b8860b", "UNTERGEWICHTEN": "#cc6b2e",
+            "VERKAUFEN": "#c0392b",
+        }.get(rec, "#1a2f45")
+        bl_html = (
+            f'<div style="font-size:1.05rem; font-weight:700; color:{rec_color}; '
+            f'margin-bottom:0.6rem;">💡 {bottom_line}</div>' if bottom_line else ""
+        )
+        es_html = (
+            f'<div style="font-size:0.95rem; line-height:1.75; color:#2c3e50;">'
+            f'{exec_sum}</div>' if exec_sum else ""
+        )
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#f8fbff 0%,#eef4fb 100%);
+                    border-left:4px solid {rec_color}; border-radius:10px;
+                    padding:1.3rem 1.5rem; margin-bottom:0.5rem;
+                    box-shadow:0 2px 8px rgba(26,47,69,0.06);">
+          <div style="font-size:0.75rem; font-weight:700; text-transform:uppercase;
+                      letter-spacing:0.08em; color:#6c757d; margin-bottom:0.7rem;">
+            Das Wichtigste in Kürze
+          </div>
+          {bl_html}
+          {es_html}
         </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -940,6 +1269,14 @@ if st.session_state.result:
             st.caption("🔴 ELEVATED = über Peer/Hist. Durchschnitt  |  "
                        "🟢 FAIR = im normalen Bereich  |  "
                        "🔵 DISCOUNT = unter Durchschnitt")
+
+            # Chart: Bewertung vs Peers (laienfreundlich)
+            _fig_val = chart_valuation_vs_peers(vt)
+            if _fig_val:
+                st.plotly_chart(_fig_val, use_container_width=True)
+                st.caption("📖 So liest du das: Ist der blaue Balken (Aktuell) "
+                           "höher als die anderen, ist die Aktie im Vergleich eher "
+                           "teuer. Niedriger = eher günstig.")
         else:
             st.info("Keine Bewertungsdaten verfügbar.")
 
@@ -975,6 +1312,14 @@ if st.session_state.result:
                 }
             )
             st.caption("📊 = Schätzwerte (E = Estimate)")
+
+            # Chart: Margen-Entwicklung im Zeitverlauf
+            _fig_margin = chart_margin_trend(ce)
+            if _fig_margin:
+                st.plotly_chart(_fig_margin, use_container_width=True)
+                st.caption("📖 So liest du das: Die Linie zeigt, wie profitabel "
+                           "das Unternehmen pro Jahr wirtschaftet. Steigt sie, "
+                           "verdient die Firma an jedem Franken Umsatz mehr.")
 
         # ── SEKTION A: Vollständige Finanzübersicht ───────────────────────────
         st.markdown('<div class="section-header">Finanzübersicht (6 Jahre)</div>',
@@ -1190,11 +1535,65 @@ if st.session_state.result:
     # TAB 4: Risiken & Szenarien
     # ────────────────────────────────────────────────────────────────────────
     with tab4:
+        # ── Optionality-Bewertung (nur bei Pre-Revenue/Deep-Tech) ─────────────
+        opt = data.get("optionality_analysis")
+        if opt and isinstance(opt, dict):
+            risk_color = {
+                "niedrig": "#2e9e5b", "mittel": "#b8860b",
+                "hoch": "#cc6b2e", "akut": "#c0392b",
+            }.get(opt.get("dilution_risk", "mittel"), "#b8860b")
+            st.markdown('<div class="section-header">🎲 Optionality-Bewertung (Real Options)</div>',
+                       unsafe_allow_html=True)
+            oc1, oc2, oc3 = st.columns(3)
+            with oc1:
+                st.metric("Cash-Runway",
+                          f"{opt.get('runway_months','n/v')} Mt" if opt.get('runway_months') not in (None,'n/v') else "n/v")
+            with oc2:
+                st.metric("Fairer Wert (gewichtet)",
+                          f"{ccy} {opt.get('probability_weighted_value','n/v')}")
+            with oc3:
+                st.markdown(f"""
+                <div style="padding:0.3rem 0;">
+                  <div style="font-size:0.8rem; color:#6c757d;">Verwässerungsrisiko</div>
+                  <div style="font-size:1.3rem; font-weight:700; color:{risk_color};">
+                    {opt.get('dilution_risk','?').upper()}
+                  </div>
+                </div>""", unsafe_allow_html=True)
+            if opt.get("optionality_thesis"):
+                st.markdown(f"**These:** {opt['optionality_thesis']}")
+            if opt.get("binary_risk_warning"):
+                st.warning(f"⚠️ {opt['binary_risk_warning']}")
+            # Szenario-Pfade
+            paths = opt.get("scenario_paths", [])
+            if paths:
+                rows = [{
+                    "Pfad": p.get("name",""),
+                    "Wahrsch.": f"{p.get('probability_pct','-')}%",
+                    "Wert/Aktie": f"{ccy} {p.get('value_per_share','-')}",
+                    "Auslöser": p.get("key_milestone",""),
+                } for p in paths]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption("📖 So liest du das: Bei Pre-Revenue-Firmen lässt sich kein "
+                       "klassischer Wert berechnen. Stattdessen werden mögliche "
+                       "Zukünfte mit ihrer Wahrscheinlichkeit gewichtet. Der "
+                       "Cash-Runway zeigt, wie lange das Geld noch reicht.")
+            st.markdown("<br>", unsafe_allow_html=True)
+
         # Szenarien
         st.markdown('<div class="section-header">Szenarien</div>',
                    unsafe_allow_html=True)
         scenarios = data.get("scenarios", [])
         if scenarios:
+            # Chart: Szenario-Kursziele (laienfreundlich, ganz oben)
+            _fig_scen = chart_scenarios(
+                scenarios, ccy, _parse_num(data.get("current_price"))
+            )
+            if _fig_scen:
+                st.plotly_chart(_fig_scen, use_container_width=True)
+                st.caption("📖 So liest du das: Die Balken zeigen, wohin der Kurs "
+                           "gehen könnte — im schlechten (rot), erwarteten (blau) "
+                           "und guten Fall (grün). Die Prozentzahl ist die "
+                           "geschätzte Eintrittswahrscheinlichkeit.")
             cols = st.columns(len(scenarios))
             css_map = {
                 "Bear Case": "scenario-bear",

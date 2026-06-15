@@ -3,10 +3,15 @@ from langgraph.graph import StateGraph, END
 
 from graph.state import AnalysisState
 from graph.nodes import (
+    classifier_node,
     fundamental_node,
     anomaly_check_node,
     corporate_actions_node,
     news_node,
+    estimate_revision_node,
+    thematic_node,
+    optionality_node,
+    forward_estimate_node,
     risk_node,
     quality_node,
     supervisor_review_node,
@@ -49,10 +54,15 @@ def build_analysis_graph():
     graph = StateGraph(AnalysisState)
 
     # ── Bestehende Knoten ────────────────────────────────────────────────────
+    graph.add_node("classifier",        classifier_node)
     graph.add_node("fundamental",       fundamental_node)
     graph.add_node("update_fund_retry", update_fundamental_retry)
     graph.add_node("news",              news_node)
     graph.add_node("update_news_retry", update_news_retry)
+    graph.add_node("estimate_revision", estimate_revision_node)
+    graph.add_node("thematic",          thematic_node)
+    graph.add_node("optionality",       optionality_node)
+    graph.add_node("forward_estimate",  forward_estimate_node)
     graph.add_node("risk",              risk_node)
     graph.add_node("quality",           quality_node)
     graph.add_node("supervisor",        supervisor_node)
@@ -66,8 +76,9 @@ def build_analysis_graph():
     graph.add_node("news_critique",         news_critique_node)
     graph.add_node("risk_critique",         risk_critique_node)
 
-    # ── Entry Point ──────────────────────────────────────────────────────────
-    graph.set_entry_point("fundamental")
+    # ── Entry Point: Phase 1 Classifier läuft VOR Fundamental ───────────────
+    graph.set_entry_point("classifier")
+    graph.add_edge("classifier", "fundamental")
 
     # ── Fundamental → Anomalie-Check ────────────────────────────────────────
     graph.add_conditional_edges(
@@ -92,17 +103,21 @@ def build_analysis_graph():
     )
     graph.add_edge("corporate_actions", "news")
 
-    # ── News → Risk ──────────────────────────────────────────────────────────
+    # ── News → Estimate-Revision (Phase 2) → Risk ────────────────────────────
     graph.add_conditional_edges(
         "news",
         route_after_news,
         {
-            "proceed_risk":              "risk",
-            "proceed_risk_with_warning": "risk",
+            "proceed_risk":              "estimate_revision",
+            "proceed_risk_with_warning": "estimate_revision",
             "retry_news":                "update_news_retry",
         },
     )
     graph.add_edge("update_news_retry", "news")
+    graph.add_edge("estimate_revision", "thematic")
+    graph.add_edge("thematic", "optionality")
+    graph.add_edge("optionality", "forward_estimate")
+    graph.add_edge("forward_estimate", "risk")
 
     # ── Risk → Quality → Senior Review ──────────────────────────────────────
     graph.add_edge("risk",              "quality")
@@ -170,6 +185,17 @@ def run_analysis(ticker: str) -> dict:
         "supervisor_critique_target": None,
         "supervisor_review_action":   None,
         "supervisor_rounds":          0,
+        # Phase 1: Classifier + Confidence
+        "business_model_classification": None,
+        "agent_confidence_scores":       None,
+        # Phase 2: Makro-Estimate-Revision
+        "revised_estimates":             None,
+        # Forward-Estimate-Agent (Wachstums-Projektion)
+        "forward_estimates":             None,
+        # Phase 3: Thematic-Agent
+        "thematic_analysis":             None,
+        # Phase 4: Optionality-Sub-Agent
+        "optionality_analysis":          None,
     }
 
     print(f"\n{'='*60}")

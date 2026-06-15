@@ -64,8 +64,14 @@ def run_risk_agent(
     fundamental_output: FundamentalAgentOutput,
     news_output: NewsAgentOutput,
     supervisor_critique: str | None = None,
+    business_model_context: dict | None = None,
 ) -> RiskAgentOutput:
-    """Führt Advocatus-Diaboli-Analyse durch — gibt strukturiertes JSON zurück."""
+    """Führt Advocatus-Diaboli-Analyse durch — gibt strukturiertes JSON zurück.
+
+    Args:
+        business_model_context: Output des Classifier-Agenten (Phase 1).
+            Beeinflusst, welche Risikokategorien priorisiert werden.
+    """
 
     stock_info = get_stock_info.invoke(ticker)
     price_history = get_price_history.invoke(ticker)
@@ -106,6 +112,54 @@ def run_risk_agent(
             f"Adressiere dieses Feedback EXPLIZIT in deiner Analyse.\n"
         )
 
+    # ── Phase 1: Klassifikations-Kontext + Confidence ─────────────────────
+    classification_block = ""
+    if business_model_context and isinstance(business_model_context, dict):
+        bmt = business_model_context.get("business_model_type", "unknown")
+        risk_focus_map = {
+            "mature_cashflow": (
+                "Fokussiere auf: Disruption, Margen-Erosion, Kapitalallokation. "
+                "DCF-Sensitivität (WACC, Terminal Growth) sollte hinterfragt werden."
+            ),
+            "growth_with_revenue": (
+                "Fokussiere auf: Wachstumsverlangsamung, Wettbewerbsdruck, "
+                "Profitabilitäts-Trajektorie, Verwässerung durch SBC."
+            ),
+            "optionality_play": (
+                "⚠️ KRITISCH bei Optionality-Plays:\n"
+                "  • Cash-Runway: wann geht die Liquidität aus?\n"
+                "  • Verwässerungsrisiko durch Kapitalerhöhungen\n"
+                "  • Tech-Risiko: was wenn die Technologie nicht skaliert?\n"
+                "  • Wettbewerber, die früher kommerzialisieren\n"
+                "Die Wahrscheinlichkeit eines Total-Loss-Szenarios (>80% Drawdown) "
+                "ist real und MUSS in den Szenarien explizit auftauchen."
+            ),
+            "cyclical": (
+                "Zyklus-spezifische Risiken zwingend abdecken:\n"
+                "  • Wo stehen wir im Zyklus? (early/mid/late/trough)\n"
+                "  • Was passiert bei Rezession? (Margen-Kompression, Volumen)\n"
+                "  • Sind die aktuellen Margen nachhaltig oder zyklisch überhöht?"
+            ),
+            "financial_institution": (
+                "Bank-/Versicherungs-spezifisch: Kreditzyklus, NPL-Bildung, "
+                "Zinsmargen-Sensitivität, regulatorische Capital-Anforderungen."
+            ),
+        }
+        guidance = risk_focus_map.get(bmt, "")
+        classification_block = (
+            f"\n=== GESCHÄFTSMODELL-KONTEXT (Phase 1 Classifier) ===\n"
+            f"Klassifikation: {bmt}\n"
+            f"{guidance}\n"
+        )
+
+    confidence_block = (
+        "\n=== SELBST-CONFIDENCE ===\n"
+        "Setze self_confidence (0.0–1.0) und confidence_rationale:\n"
+        "  ≥0.80: Klar identifizierbare Conviction Killers mit harten Triggers.\n"
+        "  0.55–0.80: Risiken klar benennbar, aber Triggers schwerer zu monitoren.\n"
+        "  <0.55: Risiken bleiben weitgehend spekulativ.\n"
+    )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", RISK_PROMPT),
         ("human", """Hinterfrage kritisch diese Analyse für {ticker} ({company}):
@@ -118,6 +172,8 @@ NEWS-ANALYSE (JSON):
 
 {macro_text}
 {industry_text}
+{classification_block}
+{confidence_block}
 {senior_feedback_block}
 
 AKTUELLE MARKTDATEN (yfinance):
@@ -144,6 +200,8 @@ Erstelle EXAKT 3 Szenarien (Bear/Base/Bull) deren Wahrscheinlichkeiten sich auf 
         "news_json":            json.dumps(news_output, indent=2, ensure_ascii=False),
         "macro_text":           macro_text,
         "industry_text":        industry_text,
+        "classification_block": classification_block,
+        "confidence_block":     confidence_block,
         "senior_feedback_block": senior_feedback_block,
         "recommendation":       recommendation,
         "stock_info":           stock_info,

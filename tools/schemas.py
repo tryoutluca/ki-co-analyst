@@ -47,6 +47,303 @@ class NewsRisk(BaseModel):
     source_headline: str = Field(description="Headline der Quelle die dieses Risiko belegt")
     source_url: str = Field(description="URL der Quelle")
 
+class ForwardYearProjection(BaseModel):
+    """Eine projizierte Forward-Jahr-Zeile mit begründeter Wachstumsannahme."""
+    year: str = Field(description="z.B. '2026E'")
+    revenue_growth_pct: float = Field(
+        description="Projizierte Umsatzwachstumsrate YoY in % (kann negativ sein)"
+    )
+    revenue_bn: float = Field(description="Resultierender Umsatz (Vorjahr × (1+Wachstum))")
+    ebitda_margin_pct: float = Field(description="Projizierte EBITDA-Marge in %")
+    ebitda_bn: float = Field(description="Resultierendes EBITDA")
+    eps: float = Field(description="Projiziertes EPS")
+    growth_rationale: str = Field(
+        description=(
+            "Begründung der Wachstumsrate für DIESES Jahr: welche Treiber "
+            "(Sektor-Nachfrage, Thematic, Makro, Unternehmensposition, Zyklus) "
+            "in welcher Stärke einfliessen. Konkret und quantifiziert."
+        )
+    )
+    margin_rationale: str = Field(
+        description="Begründung der Margenannahme (Skaleneffekte, Kostendruck, Mix)"
+    )
+    consensus_revenue_growth_pct: float | str = Field(
+        default="n/v",
+        description="Konsens-Wachstum für dieses Jahr (Fussnote/Abgleich), 'n/v' wenn fehlt"
+    )
+    deviation_from_consensus: str = Field(
+        default="",
+        description=(
+            "Falls eigene Projektion vom Konsens abweicht: Richtung + Begründung. "
+            "z.B. 'Aggressiver als Konsens (+45% vs +18%), weil KI-Capex-Zyklus "
+            "in Konsens noch nicht eingepreist'. Leer wenn kein Konsens vorliegt."
+        )
+    )
+    plausibility_flag: str = Field(
+        default="",
+        description=(
+            "Automatische Plausibilitätswarnung, wird vom System gesetzt "
+            "(z.B. bei >80% YoY-Wachstum). Vom LLM leer lassen."
+        )
+    )
+
+
+class ForwardEstimateOutput(BaseModel):
+    """Output des Forward-Estimate-Agenten — das Herzstück der Projektion."""
+    ticker: str
+    base_year: str = Field(description="Letztes Ist-Jahr, von dem projiziert wird")
+    base_revenue_bn: float = Field(description="Umsatz des Basisjahrs")
+    base_year_is_normalized: bool = Field(
+        default=False,
+        description=(
+            "True wenn das Basisjahr um Sondereffekte bereinigt wurde "
+            "(z.B. Veräußerungsgewinn herausgerechnet)"
+        )
+    )
+    projections: list[ForwardYearProjection] = Field(
+        description="Projektionen für die Forward-Jahre (typisch 3 Jahre)"
+    )
+    key_growth_drivers: list[str] = Field(
+        description=(
+            "3-5 zentrale Wachstumstreiber, die die Projektion tragen, "
+            "in absteigender Wichtigkeit"
+        )
+    )
+    overall_thesis: str = Field(
+        description=(
+            "2-3 Sätze: Die übergreifende Wachstums-These. Wie entwickelt sich "
+            "das Unternehmen über den Projektionszeitraum und warum?"
+        )
+    )
+    self_confidence: float = Field(
+        default=0.65, ge=0.0, le=1.0,
+        description="Selbsteinschätzung der Projektionssicherheit (0.0–1.0)"
+    )
+    confidence_rationale: str = Field(default="")
+
+
+class ThematicTrend(BaseModel):
+    """Ein struktureller Megatrend mit Bezug zum Unternehmen."""
+    trend: str = Field(
+        description=(
+            "Name des Megatrends, z.B. 'KI-Rechenzentren-Capex', "
+            "'Energiewende/Elektrifizierung', 'Quantum-Computing-Adoption', "
+            "'Reshoring/Deglobalisierung', 'Demografie/Healthcare', "
+            "'Verteidigungs-Aufrüstung'"
+        )
+    )
+    relevance: Literal["kern", "moderat", "peripher"] = Field(
+        description=(
+            "kern: Trend ist zentral für die These des Unternehmens. "
+            "moderat: spürbarer Einfluss. peripher: am Rande relevant."
+        )
+    )
+    time_horizon: Literal["kurzfristig", "mittelfristig", "langfristig"] = Field(
+        description="kurzfristig <2J, mittelfristig 2-5J, langfristig >5J"
+    )
+    adoption_stage: Literal[
+        "früh", "beschleunigung", "reife", "saettigung"
+    ] = Field(
+        description=(
+            "Position auf der Adoptionskurve. 'beschleunigung' ist die Phase "
+            "mit dem stärksten Wachstumsbeitrag (S-Kurve steilster Punkt)."
+        )
+    )
+    tam_impact: str = Field(
+        description=(
+            "Wirkung auf den adressierbaren Markt (TAM) des Unternehmens, "
+            "quantifiziert wenn möglich, z.B. 'TAM-Wachstum +35% p.a. bis 2028' "
+            "oder 'verdoppelt den Servicemarkt bis 2030'"
+        )
+    )
+    company_positioning: str = Field(
+        description=(
+            "Wie gut ist DIESES Unternehmen positioniert, um vom Trend zu "
+            "profitieren? Marktanteil, Produkte, Pipeline, Wettbewerbsvorteil."
+        )
+    )
+    growth_contribution: str = Field(
+        description=(
+            "Geschätzter Beitrag zum Umsatzwachstum, der DIREKT in die "
+            "Forward-Estimates einfliessen soll, z.B. '+15-25pp zusätzliches "
+            "Umsatzwachstum FY26-27' oder 'stützt Marge durch Premium-Mix'"
+        )
+    )
+    evidence: str = Field(
+        description="Beleg/Quelle für den Trend und seine Stärke, 'nicht verfügbar' wenn fehlt"
+    )
+
+
+class ThematicAgentOutput(BaseModel):
+    """Output des Thematic-Agenten (4. Junior, Phase 3)."""
+    ticker: str
+    company: str
+    trends: list[ThematicTrend] = Field(
+        description=(
+            "1-4 relevante Megatrends, absteigend nach Relevanz. Leere Liste "
+            "ist valide, wenn das Unternehmen nicht trend-getrieben ist "
+            "(z.B. defensiver Versorger)."
+        )
+    )
+    net_thematic_assessment: Literal[
+        "starker rückenwind", "rückenwind", "neutral", "gegenwind", "starker gegenwind"
+    ] = Field(
+        description="Netto-Einschätzung aller Trends zusammen für das Unternehmen"
+    )
+    thematic_thesis: str = Field(
+        description=(
+            "2-3 Sätze: Die thematische These. Wie verändern strukturelle "
+            "Trends die Wachstums- und Margenaussichten über 3-5 Jahre?"
+        )
+    )
+    growth_rate_implication: str = Field(
+        description=(
+            "Konkrete Implikation für die Forward-Wachstumsraten, die der "
+            "Forward-Estimate-Agent nutzen soll. z.B. 'Thematic stützt "
+            "Umsatzwachstum von 40-55% in FY26, abklingend auf 20% FY28'"
+        )
+    )
+    summary: str = Field(
+        description=(
+            "Kompakte Zusammenfassung für den Forward-Estimate-Agent "
+            "(wird als thematic_context.summary übergeben). Enthält die "
+            "wichtigsten Trends + ihre quantifizierten Wachstumsbeiträge."
+        )
+    )
+    self_confidence: float = Field(
+        default=0.60, ge=0.0, le=1.0,
+        description="Selbsteinschätzung (Trends sind inhärent unsicherer als Fundamentals)"
+    )
+    confidence_rationale: str = Field(default="")
+
+
+class OptionalityScenarioPath(BaseModel):
+    """Ein möglicher Zukunftspfad für ein Optionality-Play."""
+    name: str = Field(description="z.B. 'Kommerzialisierung gelingt früh', 'Verwässerungs-Spirale'")
+    probability_pct: float = Field(description="Eintrittswahrscheinlichkeit in %")
+    value_per_share: float = Field(description="Wert je Aktie in diesem Pfad")
+    key_milestone: str = Field(description="Das entscheidende Ereignis, das diesen Pfad auslöst")
+
+
+class OptionalityOutput(BaseModel):
+    """
+    Output des Optionality-Sub-Agenten (Phase 4).
+    Bewertet Pre-Revenue/Deep-Tech-Unternehmen über Real-Options-Logik
+    statt DCF: TAM × Adoption-Probability × Marktanteil + Cash-Runway.
+    """
+    ticker: str
+    company: str
+
+    # ── Cash-Runway-Analyse ───────────────────────────────────
+    cash_position_mn: float | str = Field(
+        default="n/v", description="Liquide Mittel in Mio."
+    )
+    annual_burn_mn: float | str = Field(
+        default="n/v", description="Jährlicher Cash-Burn in Mio. (negativer FCF)"
+    )
+    runway_months: float | str = Field(
+        default="n/v",
+        description="Wie viele Monate reicht die Liquidität beim aktuellen Burn?"
+    )
+    dilution_risk: Literal["niedrig", "mittel", "hoch", "akut"] = Field(
+        default="mittel",
+        description="Verwässerungsrisiko. 'akut' wenn Runway < 12 Monate."
+    )
+    runway_assessment: str = Field(
+        default="",
+        description="1-2 Sätze: Wie kritisch ist die Liquiditätslage?"
+    )
+
+    # ── TAM × Adoption Bewertung ──────────────────────────────
+    tam_estimate_bn: float | str = Field(
+        default="n/v",
+        description="Geschätzter adressierbarer Gesamtmarkt (TAM) in Mrd. zum Zielhorizont"
+    )
+    tam_horizon_year: str = Field(
+        default="",
+        description="Jahr, für das der TAM geschätzt wird (z.B. '2032')"
+    )
+    adoption_probability_pct: float | str = Field(
+        default="n/v",
+        description="Wahrscheinlichkeit, dass sich die Technologie kommerziell durchsetzt (%)"
+    )
+    expected_market_share_pct: float | str = Field(
+        default="n/v",
+        description="Erwarteter Marktanteil des Unternehmens bei erfolgreicher Adoption (%)"
+    )
+
+    # ── Real-Options-Bewertung ────────────────────────────────
+    scenario_paths: list[OptionalityScenarioPath] = Field(
+        default_factory=list,
+        description="3-4 Zukunftspfade (Erfolg/Teilerfolg/Misserfolg/Total-Loss) mit Wahrscheinlichkeiten"
+    )
+    probability_weighted_value: float | str = Field(
+        default="n/v",
+        description="Wahrscheinlichkeits-gewichteter Wert je Aktie = Σ(prob × value)"
+    )
+    current_price: float | str = Field(default="n/v")
+    upside_downside_pct: float | str = Field(default="n/v")
+
+    # ── Gesamteinschätzung ────────────────────────────────────
+    optionality_thesis: str = Field(
+        description="2-3 Sätze: Die Optionality-These. Worauf wettet der Investor?"
+    )
+    binary_risk_warning: str = Field(
+        default="",
+        description="Warnung zum binären Charakter (hohe Verlustwahrscheinlichkeit)"
+    )
+    self_confidence: float = Field(
+        default=0.45, ge=0.0, le=1.0,
+        description="Optionality-Bewertung ist inhärent unsicher — Default niedrig"
+    )
+    confidence_rationale: str = Field(default="")
+
+
+class EstimateAdjustment(BaseModel):
+    """
+    Phase 2: Strukturierter Makro-/Sektor-Treiber mit quantifiziertem
+    Effekt auf die Forward-Estimates. Wird vom News-Agent generiert und
+    von der Estimate-Revision-Engine deterministisch angewendet.
+    """
+    driver: str = Field(
+        description=(
+            "Der konkrete Makro-/Sektor-Treiber, z.B. 'SNB-Leitzinssenkung -50bp', "
+            "'EUR/CHF-Abwertung -4% YTD', 'US-Zölle auf Stahlimporte +25%', "
+            "'AI-Capex-Zyklus der Hyperscaler +40% YoY', 'Ölpreis -18% seit Q1'"
+        )
+    )
+    driver_category: Literal[
+        "zinsen", "waehrung", "rohstoffe", "regulierung",
+        "sektor_nachfrage", "konjunktur", "geopolitik", "technologie_adoption"
+    ] = Field(description="Kategorie des Treibers")
+    affected_metric: Literal["revenue_growth", "ebitda_margin", "eps"] = Field(
+        description="Welche Forward-Kennzahl betroffen ist"
+    )
+    delta_pct_low: float = Field(
+        description="Untere Grenze des geschätzten Effekts in Prozentpunkten (z.B. +1.5 oder -3.0)"
+    )
+    delta_pct_high: float = Field(
+        description="Obere Grenze des geschätzten Effekts in Prozentpunkten"
+    )
+    confidence: Literal["hoch", "mittel", "niedrig"] = Field(
+        description=(
+            "hoch: Transmission empirisch belegt + Treiber bereits eingetreten. "
+            "mittel: plausible Transmission, Treiber wahrscheinlich. "
+            "niedrig: spekulative Verknüpfung."
+        )
+    )
+    transmission_chain: str = Field(
+        description=(
+            "Explizite Wirkungskette vom Treiber zur Kennzahl, z.B. "
+            "'SNB -50bp → Hypothekarzinsen sinken → Baubewilligungen +8% (BFS) → "
+            "Zementnachfrage CH +5% → Holcim CH-Segment-Umsatz +2-3%'"
+        )
+    )
+    evidence_source: str = Field(
+        description="Quelle/Beleg für den Treiber (URL oder Publikation), 'nicht verfügbar' wenn fehlend"
+    )
+
+
 class NewsAgentOutput(BaseModel):
     ticker: str
     company: str
@@ -83,6 +380,32 @@ class NewsAgentOutput(BaseModel):
             "2-3 Sätze: Wie beeinflusst das aktuelle Makro- und Industrieumfeld "
             "dieses spezifische Unternehmen?"
         )
+    )
+    # ── Phase 2: Quantifizierte Makro-Estimate-Adjustments ─────────────────
+    estimate_adjustments: list[EstimateAdjustment] = Field(
+        default_factory=list,
+        description=(
+            "0-4 quantifizierte Makro-/Sektor-Treiber mit Transmission-Chain, "
+            "die in den Konsens-Forward-Estimates noch NICHT eingepreist sind. "
+            "NUR aufnehmen wenn: (1) der Treiber konkret belegbar ist, "
+            "(2) die Transmission zum Unternehmen explizit herleitbar ist, "
+            "(3) der Effekt quantifizierbar ist. Leere Liste ist ein "
+            "valides und oft korrektes Ergebnis."
+        )
+    )
+    # ── Phase 1: Selbst-Confidence des Agenten ─────────────────────────────
+    self_confidence: float = Field(
+        default=0.70,
+        ge=0.0, le=1.0,
+        description=(
+            "Selbsteinschätzung der News/Makro-Analyse (0.0–1.0). "
+            "Hoch bei klarem Makro-Bild und vielen relevanten Tier-1-Quellen. "
+            "Niedrig bei dünner Nachrichtenlage oder widersprüchlichen Signalen."
+        )
+    )
+    confidence_rationale: str = Field(
+        default="",
+        description="Kurzbegründung (1-2 Sätze) für self_confidence."
     )
 
 
@@ -130,6 +453,24 @@ class FundamentalAgentOutput(BaseModel):
     key_metrics: dict = Field(description="Wichtigste Kennzahlen als Key-Value Paare")
     cashflow_metrics: CashflowMetrics = Field(
         description="Detaillierte Cashflow- und Kapitaleffizienzkennzahlen"
+    )
+    # ── Phase 1: Selbst-Confidence des Agenten ─────────────────────────────
+    self_confidence: float = Field(
+        default=0.70,
+        ge=0.0, le=1.0,
+        description=(
+            "Selbsteinschätzung der Analyse-Qualität (0.0–1.0). "
+            "Hoch bei stabilen Fundamentals + reichhaltigen IR-Daten + "
+            "DCF anwendbar. Niedrig bei Pre-Revenue, fehlenden IR-Daten, "
+            "stark verzerrten Multiples oder anderen Datenlücken."
+        )
+    )
+    confidence_rationale: str = Field(
+        default="",
+        description=(
+            "Kurzbegründung (1-2 Sätze) für den self_confidence-Score. "
+            "Welche Daten sind solide, wo bestehen Unsicherheiten?"
+        )
     )
 
 
@@ -227,6 +568,20 @@ class RiskAgentOutput(BaseModel):
     )
     condition_for_original_recommendation: str = Field(
         description="Unter welcher Bedingung wäre die ursprüngliche Empfehlung gerechtfertigt"
+    )
+    # ── Phase 1: Selbst-Confidence des Agenten ─────────────────────────────
+    self_confidence: float = Field(
+        default=0.70,
+        ge=0.0, le=1.0,
+        description=(
+            "Selbsteinschätzung der Risk-Analyse (0.0–1.0). "
+            "Hoch bei klar identifizierbaren Conviction Killers + "
+            "guter Datenbasis. Niedrig wenn Risiken spekulativ bleiben."
+        )
+    )
+    confidence_rationale: str = Field(
+        default="",
+        description="Kurzbegründung (1-2 Sätze) für self_confidence."
     )
 
 
@@ -326,6 +681,27 @@ class SupervisorOutput(BaseModel):
     current_price: float
     upside_downside_pct: float
     currency: str
+
+    # ── Executive Summary (laientauglich, kein Fachjargon) ────
+    executive_summary: str = Field(
+        default="",
+        description=(
+            "3-5 Sätze in EINFACHER Sprache für Nicht-Experten. KEIN Fachjargon "
+            "(kein 'EV/EBITDA', 'DCF', 'Multiple'). Erklärt in Alltagssprache: "
+            "Was macht die Firma? Ist die Aktie aktuell teuer oder günstig? "
+            "Was ist die Empfehlung und der EINE wichtigste Grund dafür? "
+            "Was ist das grösste Risiko? Ein interessierter Laie ohne "
+            "Finanzausbildung muss es verstehen können."
+        )
+    )
+    summary_bottom_line: str = Field(
+        default="",
+        description=(
+            "EIN einziger Satz (max. 25 Wörter) in einfacher Sprache: die "
+            "Kernaussage. z.B. 'Solides Unternehmen, aber die Aktie ist aktuell "
+            "fair bewertet — abwarten lohnt sich.'"
+        )
+    )
 
     # ── Qualitätsprüfung ──────────────────────────────────────
     quality_checks: list[QualityCheck] = Field(

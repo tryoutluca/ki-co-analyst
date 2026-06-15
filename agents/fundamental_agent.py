@@ -137,8 +137,15 @@ def run_fundamental_agent(
     ticker: str,
     supervisor_critique: str | None = None,
     structural_context: str | None = None,
+    business_model_context: dict | None = None,
 ) -> FundamentalAgentOutput:
-    """Führt Fundamentalanalyse durch — gibt strukturiertes JSON zurück."""
+    """Führt Fundamentalanalyse durch — gibt strukturiertes JSON zurück.
+
+    Args:
+        business_model_context: Output des Classifier-Agenten (Phase 1).
+            Enthält business_model_type, dcf_applicable, suggested_peers etc.
+            Wenn None: Agent verhält sich wie vorher (Default DCF-zentriert).
+    """
 
     print(f"      Hole Unternehmensdaten...")
     stock_info    = get_stock_info.invoke(ticker)
@@ -206,7 +213,15 @@ def run_fundamental_agent(
 
     # ── Peer-Vergleich (vor LLM — wird für Estimate-Anker benötigt) ──────────
     print(f"      Erstelle Peer-Vergleich...")
-    peer_comparison = get_peer_financials(ticker)
+    # Phase 2: Geschäftsmodell-Peers vom Classifier übersteuern die
+    # automatische Sektor-Discovery (verhindert GICS-Fehlzuordnungen wie
+    # Seagate/WDC als "Peers" für Quantum-Hardware)
+    _suggested_peers = None
+    if business_model_context and isinstance(business_model_context, dict):
+        _sp = business_model_context.get("suggested_peers")
+        if isinstance(_sp, list) and _sp:
+            _suggested_peers = _sp
+    peer_comparison = get_peer_financials(ticker, peers_override=_suggested_peers)
 
     # ── Estimate-Anker deterministisch berechnen ──────────────────────────────
     print(f"      Berechne Estimate-Anker...")
@@ -259,6 +274,90 @@ def run_fundamental_agent(
             f"Stelle klar, dass absolute YoY-Vergleiche durch diese Corporate Action verzerrt sind.\n"
         )
 
+    # ── Phase 1: Business-Model-Klassifikation einbinden ──────────────────────
+    classification_block = ""
+    if business_model_context and isinstance(business_model_context, dict):
+        bmt = business_model_context.get("business_model_type", "unknown")
+        dcf_ok = business_model_context.get("dcf_applicable", True)
+        rationale = business_model_context.get("rationale", "")
+        methods = business_model_context.get("valuation_methods_recommended", [])
+        conf = business_model_context.get("classification_confidence", 0.0)
+
+        method_guidance = ""
+        if bmt == "optionality_play" or not dcf_ok:
+            method_guidance = (
+                "⚠️ DCF IST NICHT ANWENDBAR FÜR DIESES UNTERNEHMEN.\n"
+                "Begründung: Pre-Revenue / negativer FCF / hochspekulative Cashflows.\n"
+                "ANWEISUNG:\n"
+                "  • Verzichte auf DCF als primären Anker für das Price Target.\n"
+                "  • Wenn der Valuation-Engine trotzdem ein DCF liefert: Markiere es "
+                "explizit als 'nicht aussagekräftig' und nutze es NUR als nachrichtliche Info.\n"
+                "  • Stütze Fair Value primär auf: TAM × Adoption-Probability, "
+                "Peer-EV/Sales-Multiples für vergleichbare Pre-Revenue-Plays, "
+                "und Cash-Runway-Analyse (wie lange reicht die Liquidität?).\n"
+                "  • Setze self_confidence ≤ 0.55 — diese Bewertung ist strukturell "
+                "unsicher und das soll im Score reflektiert werden.\n"
+                "  • Empfehlung: HALTEN ist häufig defensiv korrekt, wenn Optionality "
+                "nicht quantifizierbar; KAUFEN/VERKAUFEN nur bei klarem Cash-Runway-Signal "
+                "oder bei extremen Bewertungsdivergenzen zu Peers.\n"
+            )
+        elif bmt == "cyclical":
+            method_guidance = (
+                "ZYKLISCHES UNTERNEHMEN — passe Bewertungslogik an:\n"
+                "  • Verwende NICHT die TTM-Margen für Forward-Schätzungen — sie können "
+                "Peak oder Trough sein.\n"
+                "  • Nutze Mid-Cycle-Margen (5-10 Jahres-Durchschnitt) für normalisiertes EBITDA.\n"
+                "  • Multipliziere mit normalisiertem EV/EBITDA-Multiple, NICHT mit aktuellem.\n"
+                "  • Erwähne explizit die aktuelle Zyklusposition im investment_case.\n"
+            )
+        elif bmt == "financial_institution":
+            method_guidance = (
+                "FINANZINSTITUT — angepasste Bewertung:\n"
+                "  • DCF ist nicht direkt anwendbar (Bilanzsumme >> Marktkap).\n"
+                "  • Primäre Multiples: P/B, P/TBV, ROE, Dividend Yield.\n"
+                "  • Fair Value via: Justified P/B = (ROE − g) / (Cost of Equity − g).\n"
+            )
+        elif bmt == "growth_with_revenue":
+            method_guidance = (
+                "WACHSTUMSUNTERNEHMEN — hybride Bewertung:\n"
+                "  • DCF mit hohem Terminal Value (>70% des Werts) ist legitim, "
+                "aber Sensitivität zu Discount-Rate und Terminal Growth zwingend ausweisen.\n"
+                "  • Cross-Check via EV/Sales und Rule-of-40 (Wachstum % + FCF-Margin %).\n"
+                "  • self_confidence typischerweise 0.55–0.75.\n"
+            )
+        else:  # mature_cashflow
+            method_guidance = (
+                "MATURE CASHFLOW-UNTERNEHMEN — Standardvorgehen:\n"
+                "  • DCF ist primärer Anker.\n"
+                "  • Bestätige via EV/EBITDA + FCF-Yield.\n"
+                "  • self_confidence typischerweise 0.70–0.90.\n"
+            )
+
+        classification_block = (
+            f"\n=== GESCHÄFTSMODELL-KLASSIFIKATION (Phase 1 Classifier) ===\n"
+            f"Typ: {bmt} (Confidence des Classifiers: {conf:.2f})\n"
+            f"DCF anwendbar: {'JA' if dcf_ok else 'NEIN'}\n"
+            f"Empfohlene Bewertungsmethoden: {', '.join(methods)}\n"
+            f"Begründung: {rationale}\n\n"
+            f"{method_guidance}\n"
+        )
+
+    # ── Phase 1: Selbst-Confidence-Anforderung ────────────────────────────────
+    confidence_block = (
+        "\n=== SELBST-CONFIDENCE (Phase 1 Anforderung) ===\n"
+        "Setze am Ende deiner Analyse self_confidence (0.0–1.0) und "
+        "confidence_rationale. Richtwerte:\n"
+        "  ≥0.85: Reiche IR-Daten, klare Multiples, DCF aussagekräftig, "
+        "Forward-Estimates gut abgesichert.\n"
+        "  0.65–0.85: Standardfall, leichte Datenlücken oder moderate Volatilität.\n"
+        "  0.45–0.65: Verzerrte Multiples ODER fehlende IR-Daten ODER hohe "
+        "Unsicherheit bei Forward-Estimates.\n"
+        "  <0.45: Pre-Revenue/Optionality, DCF nicht aussagekräftig, "
+        "strukturelle Datenlücken. Recommendation tendiert dann zu HALTEN.\n"
+        "Sei ehrlich — niedrige Confidence ist KEIN Versagen, sondern Information "
+        "für den Supervisor.\n"
+    )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", FUNDAMENTAL_PROMPT),
         ("human", """Analysiere {ticker} ({company}) im Sektor {sector}.
@@ -288,6 +387,10 @@ KURSENTWICKLUNG 3 MONATE (Quelle: yfinance):
 
 {structural_block}
 
+{classification_block}
+
+{confidence_block}
+
 {senior_feedback_block}
 
 AUFGABEN:
@@ -315,6 +418,8 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
         "multiples_context":    multiples_context,
         "estimate_context":     estimate_context,
         "structural_block":     structural_block,
+        "classification_block": classification_block,
+        "confidence_block":     confidence_block,
         "senior_feedback_block": senior_feedback_block,
         "format_instructions":  parser.get_format_instructions(),
     })

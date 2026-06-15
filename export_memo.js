@@ -121,6 +121,8 @@ function buildMemo(DATA) {
   const mktcap  = safeStr(DATA.market_cap || "n/v");
   const desc    = safeStr(DATA.company_description || "");
   const finalR  = safeStr(DATA.final_reasoning || "");
+  const execSum = safeStr(DATA.executive_summary || "");
+  const botLine = safeStr(DATA.summary_bottom_line || "");
 
   const children = [];
 
@@ -173,6 +175,19 @@ function buildMemo(DATA) {
       ], { width: mW, bg: C.LIGHT_GRAY }))
     })]
   }));
+
+  // ══════════════════════════════════════════════════════
+  // DAS WICHTIGSTE IN KÜRZE (laientauglich)
+  // ══════════════════════════════════════════════════════
+  if (botLine || execSum) {
+    children.push(sectionHead("Das Wichtigste in Kürze"));
+    if (botLine) {
+      children.push(para([txt(botLine, { size: 18, bold: true })], { after: 80 }));
+    }
+    if (execSum) {
+      children.push(para([txt(execSum, { size: 16 })], { after: 120 }));
+    }
+  }
 
   // ══════════════════════════════════════════════════════
   // 1. UNTERNEHMENSBESCHREIBUNG

@@ -139,8 +139,14 @@ def run_news_agent(
     ticker: str,
     fundamental_summary: str = "",
     supervisor_critique: str | None = None,
+    business_model_context: dict | None = None,
 ) -> NewsAgentOutput:
-    """Analysiert News, Makro und Industrie-Faktoren — gibt strukturiertes JSON zurück."""
+    """Analysiert News, Makro und Industrie-Faktoren — gibt strukturiertes JSON zurück.
+
+    Args:
+        business_model_context: Output des Classifier-Agenten (Phase 1).
+            Beeinflusst, wie stark Makro/Sektor-Treiber gewichtet werden.
+    """
 
     # Batch 1: News + Stock-Info parallel (Stock-Info zuerst nötig für Swiss-Check)
     with ThreadPoolExecutor(max_workers=2) as ex:
@@ -207,6 +213,84 @@ def run_news_agent(
             f"Adressiere dieses Feedback EXPLIZIT in deiner Analyse.\n"
         )
 
+    # ── Phase 1: Klassifikations-Kontext + Confidence ─────────────────────
+    classification_block = ""
+    if business_model_context and isinstance(business_model_context, dict):
+        bmt = business_model_context.get("business_model_type", "unknown")
+        guidance_map = {
+            "mature_cashflow": (
+                "Makro-Sensitivität ist moderat. Fokussiere auf strukturelle Trends "
+                "und unternehmensspezifische News, nicht auf Tagesrauschen."
+            ),
+            "growth_with_revenue": (
+                "Sektor-Dynamik und Adoption-Trends sind ENTSCHEIDEND. "
+                "Beobachte TAM-Expansion, Wettbewerber-Moves, Regulierungstrends."
+            ),
+            "optionality_play": (
+                "⚠️ Bei Optionality-Plays sind Thematic-Trends und Adoption-Curve "
+                "DOMINANT für die These. Tech-Breakthroughs, Regulierungsfortschritt, "
+                "Cash-Runway-News verdienen höchste Aufmerksamkeit. "
+                "Bewerte explizit, ob sich die ZUKUNFTS-OPTIONALITÄT verbessert oder verschlechtert."
+            ),
+            "cyclical": (
+                "⚠️ ZYKLUS-SENSITIVITÄT ist hoch. Makro-Indikatoren (Zinsen, PMI, "
+                "Bauinvestitionen, Industrieproduktion) müssen IM DETAIL mit "
+                "Transmissionsmechanismus zum Unternehmen verknüpft werden."
+            ),
+            "financial_institution": (
+                "Zins- und Regulierungs-News sind dominante Treiber. "
+                "Beobachte Notenbank-Politik, Basel-Regulierung, Kreditzyklus."
+            ),
+        }
+        guidance = guidance_map.get(bmt, "")
+        classification_block = (
+            f"\n=== GESCHÄFTSMODELL-KONTEXT (Phase 1 Classifier) ===\n"
+            f"Klassifikation: {bmt}\n"
+            f"{guidance}\n"
+        )
+
+    # ── Phase 2: Makro-Estimate-Adjustments (generisch, alle Treiberklassen) ──
+    adjustment_block = (
+        "\n=== MAKRO-ESTIMATE-ADJUSTMENTS (Phase 2 — Kernaufgabe) ===\n"
+        "Identifiziere 0-4 makroökonomische oder sektorale Treiber, die in den\n"
+        "Konsens-Forward-Estimates wahrscheinlich noch NICHT eingepreist sind,\n"
+        "und quantifiziere ihren Effekt. Prüfe systematisch ALLE Treiberklassen:\n"
+        "  • zinsen: Notenbank-Pfade (SNB/EZB/Fed), Hypothekar-/Kreditzinsen\n"
+        "  • waehrung: FX-Bewegungen (CHF-Stärke, USD, EUR) auf Umsatz/Margen\n"
+        "  • rohstoffe: Energie, Metalle, Agrar — Input-Kosten oder Absatzpreise\n"
+        "  • regulierung: Zölle, Subventionen, Sanktionen, Branchenregulierung\n"
+        "  • sektor_nachfrage: Endmarkt-Zyklen (Bau, Auto, AI-Capex, Konsum, Pharma)\n"
+        "  • konjunktur: BIP, PMI, Arbeitsmarkt, Konsumklima\n"
+        "  • geopolitik: Lieferketten, Handelskonflikte, regionale Risiken\n"
+        "  • technologie_adoption: Adoptionskurven, die Nachfrage verschieben\n"
+        "\n"
+        "STRENGE REGELN für jedes Adjustment:\n"
+        "  1. Der Treiber muss KONKRET und belegbar sein (Quelle angeben) —\n"
+        "     keine allgemeinen Vermutungen ('Wirtschaft könnte sich abkühlen').\n"
+        "  2. Die transmission_chain muss JEDEN Schritt vom Makro-Treiber bis\n"
+        "     zur Unternehmens-Kennzahl explizit machen. Beispielformat:\n"
+        "     'Treiber → Zwischeneffekt (Beleg) → Sektoreffekt → Firmeneffekt auf Metrik'.\n"
+        "  3. delta_pct_low/high ehrlich schätzen — lieber breite Range mit\n"
+        "     confidence='niedrig' als falsche Präzision.\n"
+        "  4. BEIDE Richtungen prüfen: Rückenwinde (upside) UND Gegenwinde\n"
+        "     (downside als negative Deltas). Kein Bias zu positiven Adjustments.\n"
+        "  5. Eine LEERE Liste ist ein valides, oft korrektes Ergebnis — wenn\n"
+        "     das Makro-Umfeld bereits im Konsens steckt, erfinde nichts.\n"
+        "  6. Doppelzählung vermeiden: Wenn ein Treiber bereits explizit in\n"
+        "     der Fundamentalanalyse/Guidance berücksichtigt ist, NICHT nochmals\n"
+        "     als Adjustment aufführen.\n"
+    )
+
+    confidence_block = (
+        "\n=== SELBST-CONFIDENCE ===\n"
+        "Setze self_confidence (0.0–1.0) basierend auf:\n"
+        "  ≥0.80: viele Tier-1-Quellen (Bloomberg/Reuters/FT), klares Makro-Bild, "
+        "konkrete Transmissionsmechanismen identifiziert.\n"
+        "  0.55–0.80: solide Datenlage, einige Lücken oder widersprüchliche Signale.\n"
+        "  <0.55: dünne Newslage, viele Spekulationen, unklarer Makro-Outlook.\n"
+        "Begründe in confidence_rationale.\n"
+    )
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", NEWS_PROMPT),
         ("human", """Analysiere {ticker} ({company}, Sektor: {sector}, Industrie: {industry}, Währung: {currency}).
@@ -219,12 +303,16 @@ def run_news_agent(
 
 {industry_text}
 {fundamental_context}
+{classification_block}
+{adjustment_block}
+{confidence_block}
 {senior_feedback_block}
 
 Erstelle die vollständige Analyse als JSON.
 - Gewichte strategische Meilensteine am stärksten (30%)
 - macro_indicators: mindestens 3 Einträge basierend auf den Makrodaten
 - industry_factors: mindestens 3 Einträge basierend auf den Industrie-News
+- estimate_adjustments: 0-4 quantifizierte Treiber nach den Regeln oben
 - Bei fehlenden URLs: schreibe "nicht verfügbar"
 - sentiment_vs_fundamentals_reasoning: kontrastiere aktiv Fundamentaldaten mit News-Signalen"""),
     ])
@@ -242,6 +330,9 @@ Erstelle die vollständige Analyse als JSON.
         "macro_text":           macro_text,
         "industry_text":        industry_text,
         "fundamental_context":  fundamental_context,
+        "classification_block": classification_block,
+        "adjustment_block":     adjustment_block,
+        "confidence_block":     confidence_block,
         "senior_feedback_block": senior_feedback_block,
         "format_instructions":  parser.get_format_instructions(),
     })

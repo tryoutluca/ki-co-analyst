@@ -43,3 +43,39 @@ class AnalysisState(TypedDict):
     supervisor_critique_target: Optional[str]  # "fundamental" | "news" | "risk"
     supervisor_review_action:   Optional[str]  # "approve" | "request_critique"
     supervisor_rounds:          int            # Anzahl Critique-Runden (max 2)
+
+    # ── Phase 1: Business-Model-Classifier ───────────────────
+    business_model_classification: Optional[dict]
+
+    # ── Phase 1: Confidence Scores pro Agent ─────────────────
+    agent_confidence_scores: Optional[dict]
+    # Struktur: {"fundamental": float, "news": float, "risk": float}
+
+    # ── Phase 2: Makro-Estimate-Revision ─────────────────────
+    # Deterministisch berechnete Revision der Forward-Estimates basierend
+    # auf den estimate_adjustments des News-Agenten.
+    revised_estimates: Optional[dict]
+    # Struktur:
+    # {
+    #   "adjustments_applied": [ {driver, affected_metric, applied_delta_pct, ...} ],
+    #   "revenue_delta_pct":   float,   # kumulierter Netto-Effekt auf Umsatz FY+1
+    #   "eps_delta_pct":       float,   # kumulierter Netto-Effekt auf EPS FY+1
+    #   "indicative_fair_value_adjusted": float | None,
+    #   "summary": str,
+    # }
+
+    # ── Forward-Estimate-Agent (Wachstums-Projektion) ────────
+    # Das Herzstück: hergeleitete Forward-Estimates aus einer Wachstums-These
+    # (Sektor-Nachfrage, Thematic, Makro, Unternehmensposition), NICHT aus dem
+    # Median der Vergangenheit. Bestimmt direkt das 12-Monats-Kursziel.
+    forward_estimates: Optional[dict]
+
+    # ── Phase 3: Thematic-Agent (4. Junior) ──────────────────
+    # Strukturelle Megatrends + ihr quantifizierter Beitrag zu den
+    # Forward-Wachstumsraten. Speist thematic_context in den Forward-Agent.
+    thematic_analysis: Optional[dict]
+
+    # ── Phase 4: Optionality-Sub-Agent ───────────────────────
+    # Real-Options-Bewertung für Pre-Revenue/Deep-Tech (nur bei
+    # optionality_play). Cash-Runway + TAM×Adoption + Szenario-Pfade.
+    optionality_analysis: Optional[dict]

@@ -9,12 +9,257 @@ try:
     from agents.fundamental_agent import run_fundamental_agent
     from agents.news_agent import run_news_agent
     from agents.risk_agent import run_risk_agent
+    from agents.classifier_agent import run_classifier_agent
 except ImportError:
     from graph.fundamental_agent import run_fundamental_agent
     from graph.news_agent import run_news_agent
     from graph.risk_agent import run_risk_agent
+    from graph.classifier_agent import run_classifier_agent
 
 from graph.supervisor import _build_quality_checks, synthesize_memo
+from tools.estimate_revision import apply_estimate_adjustments
+
+try:
+    from agents.forward_estimate_agent import run_forward_estimate_agent
+except ImportError:
+    from graph.forward_estimate_agent import run_forward_estimate_agent
+
+try:
+    from agents.thematic_agent import run_thematic_agent
+except ImportError:
+    from graph.thematic_agent import run_thematic_agent
+
+try:
+    from agents.optionality_agent import run_optionality_agent
+except ImportError:
+    from graph.optionality_agent import run_optionality_agent
+
+
+def optionality_node(state: AnalysisState) -> dict:
+    """
+    Phase 4: Optionality-Sub-Agent. Real-Options-Bewertung für
+    Pre-Revenue/Deep-Tech-Plays (Cash-Runway + TAM×Adoption + Szenario-Pfade).
+    Läuft nach thematic (nutzt Adoptionskurven), greift nur bei
+    optionality_play — bei allen anderen Unternehmen No-op.
+    """
+    bmc = state.get("business_model_classification") or {}
+    is_opt = (bmc.get("business_model_type") == "optionality_play") or \
+             bool(bmc.get("requires_optionality_analysis"))
+
+    if not is_opt:
+        return {
+            "optionality_analysis": None,
+            "routing_log": state.get("routing_log", []) + ["[optionality] ⏭ kein optionality_play"],
+        }
+
+    print(f"\n[optionality] Knoten läuft für {state['ticker']}...")
+    try:
+        oa = run_optionality_agent(
+            ticker=state["ticker"],
+            fundamental_output=state.get("fundamental_output"),
+            thematic_context=state.get("thematic_analysis"),
+            news_output=state.get("news_output"),
+            business_model_context=bmc,
+        )
+        if not oa:
+            return {
+                "optionality_analysis": None,
+                "routing_log": state.get("routing_log", []) + ["[optionality] ℹ keine Bewertung"],
+            }
+        log_entry = (
+            f"[optionality] ✅ Fair Value: {oa.get('probability_weighted_value','n/v')} | "
+            f"Runway: {oa.get('runway_months','n/v')} Mt | "
+            f"Risiko: {oa.get('dilution_risk','?')}"
+        )
+        return {
+            "optionality_analysis": oa,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[optionality] ⚠ Fehler — übersprungen: {e}"
+        print(f"      {log_entry}")
+        return {
+            "optionality_analysis": None,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def thematic_node(state: AnalysisState) -> dict:
+    """
+    Phase 3: Thematic-Agent (4. Junior). Mappt Megatrends auf das Unternehmen
+    und liefert quantifizierte Wachstumsbeiträge. Läuft nach estimate_revision,
+    vor forward_estimate (damit der Forward-Agent die Trends nutzen kann).
+    """
+    print(f"\n[thematic] Knoten läuft für {state['ticker']}...")
+
+    try:
+        ta = run_thematic_agent(
+            ticker=state["ticker"],
+            fundamental_output=state.get("fundamental_output"),
+            news_output=state.get("news_output"),
+            business_model_context=state.get("business_model_classification"),
+        )
+        if not ta:
+            return {
+                "thematic_analysis": None,
+                "routing_log": state.get("routing_log", []) + ["[thematic] ℹ keine Trends"],
+            }
+        n = len(ta.get("trends", []))
+        log_entry = (
+            f"[thematic] ✅ {n} Trends | "
+            f"Netto: {ta.get('net_thematic_assessment', '?')} | "
+            f"Conf: {ta.get('self_confidence', 0):.2f}"
+        )
+        return {
+            "thematic_analysis": ta,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[thematic] ⚠ Fehler — übersprungen: {e}"
+        print(f"      {log_entry}")
+        return {
+            "thematic_analysis": None,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def forward_estimate_node(state: AnalysisState) -> dict:
+    """
+    Forward-Estimate-Agent: leitet die Forward-Estimates aus einer
+    Wachstums-These her (Sektor/Thematic/Makro/Position), nicht aus dem
+    Median der Vergangenheit. Läuft nach estimate_revision, vor risk.
+    """
+    print(f"\n[forward_estimate] Knoten läuft für {state['ticker']}...")
+    f_out = state.get("fundamental_output") or {}
+
+    try:
+        from tools.finance_tools import get_consensus_estimates
+        try:
+            consensus = get_consensus_estimates(state["ticker"])
+        except Exception:
+            consensus = None
+
+        fe = run_forward_estimate_agent(
+            ticker=state["ticker"],
+            fundamental_output=f_out,
+            news_output=state.get("news_output"),
+            business_model_context=state.get("business_model_classification"),
+            thematic_context=state.get("thematic_analysis"),  # Phase 3, optional
+            consensus_estimates=consensus,
+        )
+
+        if not fe:
+            log_entry = "[forward_estimate] ℹ Keine Projektion möglich — übersprungen"
+            return {
+                "forward_estimates": None,
+                "routing_log": state.get("routing_log", []) + [log_entry],
+            }
+
+        n = len(fe.get("projections", []))
+        warns = sum(1 for p in fe["projections"] if p.get("plausibility_flag"))
+        log_entry = (
+            f"[forward_estimate] ✅ {n} Jahre projiziert | "
+            f"Conf: {fe.get('self_confidence', 0):.2f} | "
+            f"Plausibilitäts-Warnungen: {warns}"
+        )
+        return {
+            "forward_estimates": fe,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[forward_estimate] ⚠ Fehler — übersprungen: {e}"
+        print(f"      {log_entry}")
+        return {
+            "forward_estimates": None,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def classifier_node(state: AnalysisState) -> dict:
+    """Knoten 0 (Phase 1): Geschäftsmodell-Klassifikation vor allen Agenten."""
+    ticker = state["ticker"]
+    print(f"\n[classifier] Knoten läuft für {ticker}...")
+
+    try:
+        classification = run_classifier_agent(ticker)
+        log_entry = (
+            f"[classifier] ✅ {classification['business_model_type']} "
+            f"(Conf: {classification['classification_confidence']:.2f}, "
+            f"DCF: {'ja' if classification['dcf_applicable'] else 'nein'})"
+        )
+        return {
+            "business_model_classification": classification,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[classifier] ⚠ Fehler — Fallback auf growth_with_revenue: {e}"
+        print(f"      {log_entry}")
+        return {
+            "business_model_classification": {
+                "business_model_type": "growth_with_revenue",
+                "classification_confidence": 0.30,
+                "rationale": f"Classifier-Fehler: {e}",
+                "valuation_methods_recommended": ["DCF", "EV/EBITDA"],
+                "dcf_applicable": True,
+                "suggested_weights": {
+                    "fundamental": 0.70, "news": 0.15,
+                    "risk": 0.15, "thematic": 0.0,
+                },
+                "suggested_peers": [],
+                "requires_optionality_analysis": False,
+                "cycle_position": "unknown",
+            },
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+
+def estimate_revision_node(state: AnalysisState) -> dict:
+    """
+    Knoten (Phase 2): Makro-Estimate-Revision.
+
+    Läuft NACH dem News-Agent und VOR dem Risk-Agent. Wendet die vom
+    News-Agent identifizierten estimate_adjustments (Makro-/Sektor-Treiber
+    mit Transmission-Chain) DETERMINISTISCH auf die Forward-Estimates des
+    Fundamental-Agenten an. Kein LLM-Call — reine Python-Berechnung.
+    """
+    print(f"\n[estimate_revision] Knoten läuft für {state['ticker']}...")
+
+    n_out = state.get("news_output") or {}
+    f_out = state.get("fundamental_output") or {}
+    adjustments = n_out.get("estimate_adjustments", []) if isinstance(n_out, dict) else []
+
+    if not adjustments:
+        log_entry = "[estimate_revision] ℹ Keine Makro-Adjustments identifiziert — übersprungen"
+        print(f"      {log_entry}")
+        return {
+            "revised_estimates": None,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+
+    try:
+        news_conf = (state.get("agent_confidence_scores") or {}).get("news", 0.70)
+        revised = apply_estimate_adjustments(
+            fundamental_output=f_out,
+            adjustments=adjustments,
+            news_agent_confidence=news_conf,
+        )
+        log_entry = (
+            f"[estimate_revision] ✅ {len(revised['adjustments_applied'])} Adjustments | "
+            f"Umsatz-Δ: {revised['revenue_delta_pct']:+.2f}% | "
+            f"EPS-Δ: {revised['eps_delta_pct']:+.2f}%"
+        )
+        print(f"      {log_entry}")
+        return {
+            "revised_estimates": revised,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
+    except Exception as e:
+        log_entry = f"[estimate_revision] ⚠ Fehler — Revision übersprungen: {e}"
+        print(f"      {log_entry}")
+        return {
+            "revised_estimates": None,
+            "routing_log": state.get("routing_log", []) + [log_entry],
+        }
 
 
 def fundamental_node(state: AnalysisState) -> dict:
@@ -29,6 +274,7 @@ def fundamental_node(state: AnalysisState) -> dict:
         output = run_fundamental_agent(
             ticker,
             structural_context=state.get("structural_context"),
+            business_model_context=state.get("business_model_classification"),
         )
 
         if hasattr(output, "model_dump"):
@@ -36,14 +282,19 @@ def fundamental_node(state: AnalysisState) -> dict:
         elif not isinstance(output, dict):
             output = dict(output)
 
+        agent_conf = state.get("agent_confidence_scores") or {}
+        agent_conf = {**agent_conf, "fundamental": float(output.get("self_confidence", 0.70))}
+
         log_entry = (
             f"[fundamental] ✅ Erfolgreich | "
             f"Fair Value: {output.get('fair_value_estimate')} | "
-            f"Empfehlung: {output.get('recommendation')}"
+            f"Empfehlung: {output.get('recommendation')} | "
+            f"Conf: {agent_conf['fundamental']:.2f}"
         )
 
         return {
             "fundamental_output": output,
+            "agent_confidence_scores": agent_conf,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -72,21 +323,31 @@ def news_node(state: AnalysisState) -> dict:
     )
 
     try:
-        output = run_news_agent(ticker, fundamental_context)
+        output = run_news_agent(
+            ticker,
+            fundamental_context,
+            business_model_context=state.get("business_model_classification"),
+        )
 
         if hasattr(output, "model_dump"):
             output = output.model_dump()
         elif not isinstance(output, dict):
             output = dict(output)
 
+        agent_conf = state.get("agent_confidence_scores") or {}
+        agent_conf = {**agent_conf, "news": float(output.get("self_confidence", 0.70))}
+
         log_entry = (
             f"[news] ✅ Erfolgreich | "
             f"Sentiment: {output.get('overall_sentiment_score')}/10 | "
-            f"Outlook: {output.get('short_term_outlook')}"
+            f"Outlook: {output.get('short_term_outlook')} | "
+            f"Adjustments: {len(output.get('estimate_adjustments', []))} | "
+            f"Conf: {agent_conf['news']:.2f}"
         )
 
         return {
             "news_output": output,
+            "agent_confidence_scores": agent_conf,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -109,7 +370,10 @@ def risk_node(state: AnalysisState) -> dict:
     n_out = state.get("news_output") or {}
 
     try:
-        output = run_risk_agent(ticker, f_out, n_out)
+        output = run_risk_agent(
+            ticker, f_out, n_out,
+            business_model_context=state.get("business_model_classification"),
+        )
 
         if hasattr(output, "model_dump"):
             output = output.model_dump()
@@ -127,14 +391,19 @@ def risk_node(state: AnalysisState) -> dict:
             else getattr(bear, "price_target", "N/A")
         ) if bear else "N/A"
 
+        agent_conf = state.get("agent_confidence_scores") or {}
+        agent_conf = {**agent_conf, "risk": float(output.get("self_confidence", 0.70))}
+
         log_entry = (
             f"[risk] ✅ Erfolgreich | "
             f"Bear-Case: {bear_price} | "
-            f"Conviction Killers: {len(output.get('conviction_killers', []))}"
+            f"Conviction Killers: {len(output.get('conviction_killers', []))} | "
+            f"Conf: {agent_conf['risk']:.2f}"
         )
 
         return {
             "risk_output": output,
+            "agent_confidence_scores": agent_conf,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -434,19 +703,25 @@ def fundamental_critique_node(state: AnalysisState) -> dict:
             ticker,
             supervisor_critique=critique,
             structural_context=state.get("structural_context"),
+            business_model_context=state.get("business_model_classification"),
         )
         if hasattr(output, "model_dump"):
             output = output.model_dump()
         elif not isinstance(output, dict):
             output = dict(output)
 
+        agent_conf = state.get("agent_confidence_scores") or {}
+        agent_conf = {**agent_conf, "fundamental": float(output.get("self_confidence", 0.70))}
+
         log_entry = (
             f"[fundamental_critique] ✅ Re-Analyse | "
             f"Fair Value: {output.get('fair_value_estimate')} | "
-            f"Empfehlung: {output.get('recommendation')}"
+            f"Empfehlung: {output.get('recommendation')} | "
+            f"Conf: {agent_conf['fundamental']:.2f}"
         )
         return {
             "fundamental_output": output,
+            "agent_confidence_scores": agent_conf,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:
@@ -474,18 +749,24 @@ def news_critique_node(state: AnalysisState) -> dict:
             ticker,
             fundamental_context,
             supervisor_critique=critique,
+            business_model_context=state.get("business_model_classification"),
         )
         if hasattr(output, "model_dump"):
             output = output.model_dump()
         elif not isinstance(output, dict):
             output = dict(output)
 
+        agent_conf = state.get("agent_confidence_scores") or {}
+        agent_conf = {**agent_conf, "news": float(output.get("self_confidence", 0.70))}
+
         log_entry = (
             f"[news_critique] ✅ Re-Analyse | "
-            f"Sentiment: {output.get('overall_sentiment_score')}/10"
+            f"Sentiment: {output.get('overall_sentiment_score')}/10 | "
+            f"Conf: {agent_conf['news']:.2f}"
         )
         return {
             "news_output": output,
+            "agent_confidence_scores": agent_conf,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:
@@ -511,18 +792,24 @@ def risk_critique_node(state: AnalysisState) -> dict:
             f_out,
             n_out,
             supervisor_critique=critique,
+            business_model_context=state.get("business_model_classification"),
         )
         if hasattr(output, "model_dump"):
             output = output.model_dump()
         elif not isinstance(output, dict):
             output = dict(output)
 
+        agent_conf = state.get("agent_confidence_scores") or {}
+        agent_conf = {**agent_conf, "risk": float(output.get("self_confidence", 0.70))}
+
         log_entry = (
             f"[risk_critique] ✅ Re-Analyse | "
-            f"Conviction Killers: {len(output.get('conviction_killers', []))}"
+            f"Conviction Killers: {len(output.get('conviction_killers', []))} | "
+            f"Conf: {agent_conf['risk']:.2f}"
         )
         return {
             "risk_output": output,
+            "agent_confidence_scores": agent_conf,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:
@@ -553,6 +840,12 @@ def supervisor_node(state: AnalysisState) -> dict:
             ticker, f_out, n_out, r_out,
             quality_checks=checks,
             consistency_score=score,
+            business_model_classification=state.get("business_model_classification"),
+            agent_confidence_scores=state.get("agent_confidence_scores"),
+            revised_estimates=state.get("revised_estimates"),
+            forward_estimates=state.get("forward_estimates"),
+            thematic_analysis=state.get("thematic_analysis"),
+            optionality_analysis=state.get("optionality_analysis"),
         )
 
         if hasattr(memo, "model_dump"):
@@ -562,6 +855,13 @@ def supervisor_node(state: AnalysisState) -> dict:
 
         memo["routing_log"] = state.get("routing_log", [])
         memo["fundamental_retry_count"] = state.get("fundamental_retry_count", 0)
+        # Phase 1/2: Transparenz-Felder ins Memo
+        memo["business_model_classification"] = state.get("business_model_classification")
+        memo["agent_confidence_scores"] = state.get("agent_confidence_scores")
+        memo["revised_estimates"] = state.get("revised_estimates")
+        memo["forward_estimates"] = state.get("forward_estimates")
+        memo["thematic_analysis"] = state.get("thematic_analysis")
+        memo["optionality_analysis"] = state.get("optionality_analysis")
 
         log_entry = (
             f"[supervisor] ✅ Memo erstellt | "
