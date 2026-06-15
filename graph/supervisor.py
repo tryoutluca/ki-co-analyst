@@ -29,60 +29,38 @@ Dokumentiere JEDEN Qualitätscheck mit Ergebnis: bestanden/Warnung/fehlgeschlage
 
 SCHRITT 2 — SYNTHESE nach professionellen Buy-Side Standards:
 
-GEWICHTUNG (Fundamentalanalyse dominiert):
-- Fundamental: 80% Basisgewicht
-  → Bleibt 80% in allen Normalszenarien (positives, neutrales oder leicht negatives Sentiment)
-  → Reduziere auf 60% NUR wenn Sentiment ≤ 3/10 (sehr schlechtes Sentiment)
-- News/Sentiment: 10% Basisgewicht
-  → Erhöhe auf 20% NUR wenn Sentiment ≤ 3/10 (sehr schlechtes Sentiment, z.B. akute Krise, Krieg, Regulierungsschock)
-  → Bleibt 10% bei neutralem oder positivem Sentiment — Soft-News ohne operativen Bezug haben keinen Einfluss
-- Risk/Advocatus: 10% Basisgewicht
-  → Erhöhe auf 20% NUR wenn Sentiment ≤ 3/10 UND Conviction Killers aktiv
-  → Bleibt 10% wenn Gegenargumente schwach oder spekulativ
+GEWICHTUNG — ⚠️ ZWINGEND aus der AGGREGATIONS-DIREKTIVE im Human-Prompt:
+- Die effektiven Gewichte (Fundamental/News/Risk/Thematic) werden NICHT hier
+  festgelegt, sondern stehen deterministisch berechnet in der
+  AGGREGATIONS-DIREKTIVE weiter unten. Sie hängen ab von Geschäftsmodell-Typ,
+  Agent-Confidence, Sentiment und DCF-Anwendbarkeit.
+- Verwende AUSSCHLIESSLICH die dort vorgegebenen Gewichte und die dort
+  vorgegebene Score-Formel. Erfinde KEINE eigene 80/10/10-Gewichtung.
+- Falls die Direktive z.B. Fundamental 55%, News 20%, Risk 15%, Thematic 10%
+  vorgibt, nutze GENAU diese Werte — nicht die früheren Standardwerte.
 
 EMPFEHLUNGS-SKALA (5-stufig — Buy-Side Standard):
 
-  Basis-Schwellenwerte (Upside/Downside zum Price Target):
-    KAUFEN         > +15%  UND Conviction hoch
-    ÜBERGEWICHTEN  +5% bis +15%  ODER Conviction mittel mit positivem Makro
-    HALTEN         -5% bis +5%   ODER widersprüchliche Agenten-Signale
-    UNTERGEWICHTEN -15% bis -5%  ODER Conviction niedrig mit negativem Makro
-    VERKAUFEN      < -15%  ODER aktive Conviction Killers + negatives Makro
+  Die Score→Empfehlung-Schwellen stehen ebenfalls in der AGGREGATIONS-DIREKTIVE.
+  Mappe den dort berechneten Score auf:
+    KAUFEN / ÜBERGEWICHTEN / HALTEN / UNTERGEWICHTEN / VERKAUFEN
+  gemäss den Schwellen in der Direktive.
 
   WICHTIG — Upside ist NICHT alleiniger Faktor:
-  Gewichtete Formel (Normalszenario, Sentiment > 3/10):
-    Score = (Upside_Pct × 0.70)
-           + (Sentiment_Score/10 × 100 × 0.10)
-           + (Risk_Adjustment × 0.20)
+  Der Score kombiniert Upside, Sentiment, Risk (und ggf. Thematic) mit den
+  dynamischen Gewichten aus der Direktive. Die genaue Formel steht dort.
 
-  Gewichtete Formel (Sentiment ≤ 3/10 — sehr schlechtes Sentiment):
-    Score = (Upside_Pct × 0.50)
-           + (Sentiment_Score/10 × 100 × 0.20)
-           + (Risk_Adjustment × 0.30)
-
-  Risk_Adjustment:
+  Risk_Adjustment (Bestandteil der Score-Formel):
     Keine Conviction Killers aktiv:     +10
     1 Conviction Killer aktiv:           0
     2+ Conviction Killers aktiv:        -15
     Makro headwind:                      -5
     Makro tailwind:                      +5
 
-  Beispiel bei 11% Upside, Sentiment 6/10 (Normalszenario):
-    Keine Conviction Killers + neutrales Makro:
-    Score = (11 × 0.70) + (60 × 0.10) + (10 × 0.20)
-           = 7.7 + 6 + 2 = 15.7 → ÜBERGEWICHTEN
-
-  Beispiel bei 11% Upside, Sentiment 2/10 (sehr schlechtes Sentiment):
-    1 Conviction Killer + Makro headwind:
-    Score = (11 × 0.50) + (20 × 0.20) + (-5 × 0.30)
-           = 5.5 + 4 - 1.5 = 8.0 → HALTEN (korrekt wegen Krise)
-
-  Score → Empfehlung Mapping:
-    Score > 25:          KAUFEN
-    Score 15 bis 25:     ÜBERGEWICHTEN
-    Score 5 bis 15:      HALTEN
-    Score -5 bis 5:      UNTERGEWICHTEN
-    Score < -5:          VERKAUFEN
+  Die konkrete Score-Formel mit den effektiven Gewichten und das
+  Score→Empfehlung-Mapping stehen in der AGGREGATIONS-DIREKTIVE im
+  Human-Prompt. Nutze AUSSCHLIESSLICH diese — sie ist die einzige
+  Quelle der Wahrheit für Gewichte, Formel und Schwellen.
 
   CONVICTION LEVEL bei 5-stufiger Skala:
     hoch:    KAUFEN oder VERKAUFEN (klare Richtung)
