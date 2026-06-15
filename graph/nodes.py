@@ -846,6 +846,8 @@ def supervisor_node(state: AnalysisState) -> dict:
             forward_estimates=state.get("forward_estimates"),
             thematic_analysis=state.get("thematic_analysis"),
             optionality_analysis=state.get("optionality_analysis"),
+            anomaly_flags=state.get("anomaly_flags") or [],
+            structural_context=state.get("structural_context"),
         )
 
         if hasattr(memo, "model_dump"):

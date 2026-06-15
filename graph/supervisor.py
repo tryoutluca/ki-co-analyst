@@ -597,6 +597,8 @@ def synthesize_memo(
     forward_estimates: dict | None = None,
     thematic_analysis: dict | None = None,
     optionality_analysis: dict | None = None,
+    anomaly_flags: list | None = None,
+    structural_context: str | None = None,
 ) -> dict:
     """
     Führt nur die Supervisor-Synthese durch — Agenten-Outputs bereits vorhanden.
@@ -676,6 +678,24 @@ def synthesize_memo(
                 f"{k}: {v}" for k, v in vs_avg.items()
             ) + "\n"
 
+    # ── Anomalie-Kontext (corporate_actions_node) ──────────────────────────────
+    anomaly_context = ""
+    if anomaly_flags:
+        anomaly_context = "\n### ⚠ STRUKTURELLE ANOMALIEN (automatisch erkannt):\n"
+        for fl in anomaly_flags:
+            if isinstance(fl, dict):
+                anomaly_context += f"  • [{fl.get('type', '?')}] {fl.get('note', '')}\n"
+            else:
+                anomaly_context += f"  • {fl}\n"
+        if structural_context:
+            anomaly_context += (
+                f"\nKontext / Erklärung (Corporate Actions):\n{structural_context}\n"
+                "ANWEISUNG: Erwähne diese strukturellen Anomalien im final_reasoning "
+                "und in einem quality_check-Eintrag. YoY-Vergleiche ggf. als "
+                "Pro-forma-Basis kennzeichnen.\n"
+            )
+        anomaly_context += "\n"
+
     # ── Phase 1/2: Confidence-gewichtete Aggregation (deterministisch) ────────
     aggregation_block = _build_aggregation_block(
         fundamental_output=fundamental_output,
@@ -704,6 +724,7 @@ def synthesize_memo(
 ## RISK/ADVOCATUS-DIABOLI-ANALYSE:
 {risk_json}
 
+{anomaly_context}
 {macro_context}
 {industry_context}
 {risk_context}
@@ -765,6 +786,7 @@ Gib das Ergebnis als JSON zurück."""),
         ),
         "news_json": json.dumps(news_output, indent=2, ensure_ascii=False),
         "risk_json": json.dumps(risk_output, indent=2, ensure_ascii=False),
+        "anomaly_context": anomaly_context,
         "macro_context": macro_context,
         "industry_context": industry_context,
         "risk_context": risk_context,

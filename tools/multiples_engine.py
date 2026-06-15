@@ -73,12 +73,17 @@ class MultiplesEngine:
         rev = safe_f(ir_analysis.get("revenue_bn"))
         if rev is None: rev = safe_f(yf_info.get("totalRevenue"), 1e-9)
 
-        # EBITDA
+        # EBITDA — 4-stufige Fallback-Kette (CH/EU-Titel: yfinance "ebitda" oft None)
         ebitda = safe_f(ir_analysis.get("ebitda_bn"))
         if ebitda is None:
             ebitda_m = safe_f(ir_analysis.get("ebitda_margin_pct"))
             if rev and ebitda_m: ebitda = rev * (ebitda_m / 100)
         if ebitda is None: ebitda = safe_f(yf_info.get("ebitda"), 1e-9)
+        if ebitda is None:
+            # ebitdaMargins × totalRevenue als letzter Fallback
+            em = safe_f(yf_info.get("ebitdaMargins"))
+            tr = safe_f(yf_info.get("totalRevenue"), 1e-9)
+            if em and tr: ebitda = em * tr
 
         # EBIT
         ebit = safe_f(ir_analysis.get("ebit_bn"))

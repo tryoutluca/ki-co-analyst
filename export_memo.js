@@ -104,6 +104,154 @@ function signalColor(s) {
   return C.GOLD_TXT;
 }
 
+// ── Hilfsfunktion: Wahrscheinlichkeits-Band für Szenarien ────────────────────
+function buildScenarioBand(scenarios, currentPrice, ccy) {
+  if (!scenarios || scenarios.length < 2) return [];
+
+  const bear = scenarios.find(s => (s.name || '').toLowerCase().includes('bear'));
+  const bull = scenarios.find(s => (s.name || '').toLowerCase().includes('bull'));
+  const base = scenarios.find(s => {
+    const n = (s.name || '').toLowerCase();
+    return !n.includes('bear') && !n.includes('bull');
+  });
+  const ordered = [bear, base, bull].filter(Boolean);
+  if (ordered.length < 2) return [];
+
+  const totalProb = ordered.reduce((sum, s) => sum + parseFloat(s.probability_pct || 0), 0);
+  if (totalProb <= 0) return [];
+
+  const widths = ordered.map(s => Math.round(parseFloat(s.probability_pct || 0) / totalProb * PAGE_W));
+  const wSum = widths.reduce((a, b) => a + b, 0);
+  widths[widths.length - 1] += PAGE_W - wSum;
+
+  const bgs   = ['FFCDD2', 'FFF9C4', 'C8E6C9'];
+  const fgCol = [C.RED_TXT, 'B8860B', C.GREEN_TXT];
+  const icons  = ['🐻', '⚖️', '🐂'];
+
+  const curFloat = parseFloat(currentPrice);
+  const pts = ordered.map(s => parseFloat(s.price_target)).filter(p => !isNaN(p));
+  const minPt = Math.min(...pts);
+  const maxPt = Math.max(...pts);
+
+  const curLabel = !isNaN(curFloat)
+    ? `Aktueller Kurs: ${ccy} ${curFloat.toFixed(1)}  |  `
+    : '';
+  const rangeLabel = pts.length >= 2
+    ? `Spanne: ${ccy} ${minPt.toFixed(1)} – ${ccy} ${maxPt.toFixed(1)}`
+    : '';
+
+  return [
+    para([txt('Wahrscheinlichkeits-Verteilung der Szenarien', { size: 14, bold: true, color: C.DARK_BLUE })],
+      { before: 80, after: 40 }),
+    new Table({
+      width: { size: PAGE_W, type: WidthType.DXA },
+      columnWidths: widths,
+      rows: [new TableRow({
+        children: ordered.map((sc, i) => {
+          const pt = parseFloat(sc.price_target);
+          return new TableCell({
+            borders,
+            width: { size: widths[i], type: WidthType.DXA },
+            shading: { fill: bgs[i], type: ShadingType.CLEAR },
+            margins: { top: 80, bottom: 80, left: 120, right: 120 },
+            children: [
+              para([txt(`${icons[i]}  ${sc.name || ''}`, { size: 14, bold: true, color: fgCol[i] })],
+                { align: AlignmentType.CENTER, after: 40 }),
+              para([txt(`${ccy} ${isNaN(pt) ? '-' : pt.toFixed(1)}`, { size: 20, bold: true, color: fgCol[i] })],
+                { align: AlignmentType.CENTER, after: 20 }),
+              para([txt(`P = ${sc.probability_pct || '-'}%`, { size: 12, bold: true, color: C.GRAY_TXT })],
+                { align: AlignmentType.CENTER, after: 0 }),
+            ],
+          });
+        }),
+      })],
+    }),
+    para([txt(`${curLabel}${rangeLabel}`, { size: 12, italic: true, color: C.GRAY_TXT })],
+      { before: 30, after: 80 }),
+  ];
+}
+
+// ── Hilfsfunktion: EBITDA-Margen-Balkenchart ──────────────────────────────────
+function buildMarginChart(fullFinancials) {
+  if (!fullFinancials || fullFinancials.length === 0) return [];
+
+  const data = fullFinancials
+    .map(row => ({
+      year:     String(row.year || ''),
+      ebitda_m: parseFloat(row.ebitda_margin_pct || row.ebitda_m || 0),
+      ebit_m:   parseFloat(row.ebit_margin_pct   || row.ebit_m  || 0),
+      isE:      String(row.year || '').includes('E'),
+    }))
+    .filter(d => !isNaN(d.ebitda_m) && d.ebitda_m > 0);
+
+  if (data.length < 2) return [];
+
+  const maxVal = Math.max(...data.map(d => Math.max(d.ebitda_m, d.ebit_m || 0)));
+  if (maxVal <= 0) return [];
+
+  const LABEL_W = 780;
+  const PCT_W   = 680;
+  const BAR_W   = PAGE_W - LABEL_W - PCT_W;
+  const BARS    = 30; // Unicode-Balkenbreite in Zeichen
+
+  return [
+    para([txt('EBITDA-Margen-Entwicklung', { size: 14, bold: true, color: C.DARK_BLUE })],
+      { before: 120, after: 40 }),
+    new Table({
+      width: { size: PAGE_W, type: WidthType.DXA },
+      columnWidths: [LABEL_W, BAR_W, PCT_W],
+      rows: [
+        // Header
+        new TableRow({
+          tableHeader: true,
+          children: [
+            cell([para([txt('Jahr', { size: 12, bold: true, color: C.WHITE })], { after: 0 })],
+              { width: LABEL_W, bg: C.DARK_BLUE }),
+            cell([para([txt('EBITDA-Marge (relativ zum Maximum)', { size: 12, bold: true, color: C.WHITE })], { after: 0 })],
+              { width: BAR_W, bg: C.DARK_BLUE }),
+            cell([para([txt('Marge %', { size: 12, bold: true, color: C.WHITE })],
+              { align: AlignmentType.CENTER, after: 0 })], { width: PCT_W, bg: C.DARK_BLUE }),
+          ],
+        }),
+        ...data.map((d, ri) => {
+          const barPct  = Math.min(d.ebitda_m / maxVal, 1);
+          const filled  = Math.max(Math.round(barPct * BARS), 1);
+          const empty   = BARS - filled;
+          const bar     = '█'.repeat(filled) + '░'.repeat(empty);
+          const barCol  = d.isE ? 'F9A825' : '43A047';
+          const rowBg   = d.isE ? 'FFF9C4' : (ri % 2 === 0 ? C.WHITE : C.LIGHT_GRAY);
+          const lblCol  = d.isE ? 'E65100' : C.DARK_BLUE;
+          return new TableRow({
+            children: [
+              new TableCell({
+                borders, width: { size: LABEL_W, type: WidthType.DXA },
+                shading: { fill: rowBg, type: ShadingType.CLEAR },
+                margins: { top: 50, bottom: 50, left: 100, right: 100 },
+                children: [para([txt(d.year, { size: 13, bold: true, color: lblCol })], { after: 0 })],
+              }),
+              new TableCell({
+                borders, width: { size: BAR_W, type: WidthType.DXA },
+                shading: { fill: 'FAFAFA', type: ShadingType.CLEAR },
+                margins: { top: 50, bottom: 50, left: 80, right: 80 },
+                children: [para([txt(bar, { size: 11, color: barCol })], { after: 0 })],
+              }),
+              new TableCell({
+                borders, width: { size: PCT_W, type: WidthType.DXA },
+                shading: { fill: rowBg, type: ShadingType.CLEAR },
+                margins: { top: 50, bottom: 50, left: 100, right: 100 },
+                children: [para([txt(`${d.ebitda_m.toFixed(1)}%`, { size: 13, bold: true, color: lblCol })],
+                  { align: AlignmentType.CENTER, after: 0 })],
+              }),
+            ],
+          });
+        }),
+      ],
+    }),
+    para([txt('A = Istzahlen (grün)  |  E = Schätzwert (orange)  |  Balkenlänge relativ zum höchsten Wert in der Tabelle',
+      { size: 11, italic: true, color: C.GRAY_TXT })], { after: 60 }),
+  ];
+}
+
 function buildMemo(DATA) {
   const ticker  = safeStr(DATA.ticker);
   const company = safeStr(DATA.company || DATA.company_name || ticker);
@@ -293,6 +441,9 @@ function buildMemo(DATA) {
     }));
   }
 
+  // EBITDA-Margen-Balkenchart (nach Finanzübersicht)
+  buildMarginChart(fin).forEach(el => children.push(el));
+
   // ══════════════════════════════════════════════════════
   // 4. BEWERTUNG gegenüber Peer und Historischen Kennzahlen
   // ══════════════════════════════════════════════════════
@@ -412,6 +563,9 @@ function buildMemo(DATA) {
   const scenarios = DATA.scenarios || [];
   if (scenarios.length > 0) {
     children.push(sectionHead("6.  Szenarien — Bear / Base / Bull Case"));
+
+    // Wahrscheinlichkeits-Band (visuell) vor den Detail-Karten
+    buildScenarioBand(scenarios, DATA.current_price, ccy).forEach(el => children.push(el));
 
     const nSc = Math.min(scenarios.length, 3);
     const scW = Math.floor(PAGE_W / nSc);

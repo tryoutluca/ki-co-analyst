@@ -1359,21 +1359,37 @@ def discover_peers_via_tavily(
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
 
-    # Schritt 1: Tavily Suche
+    # Schritt 1: Tavily Suche — Unternehmensbeschreibung für Kontextgenauigkeit
     try:
+        # Kurzbeschreibung aus yfinance holen (sagt "quantum hardware" statt
+        # nur "Semiconductors") und auf ~200 Zeichen kürzen
+        try:
+            _yf_desc = yf.Ticker(ticker).info.get("longBusinessSummary", "") or ""
+            _desc_snippet = _yf_desc[:200].rsplit(" ", 1)[0] if len(_yf_desc) > 200 else _yf_desc
+        except Exception:
+            _desc_snippet = ""
+
         search = TavilySearchResults(max_results=5)
         queries = [
-            f"main publicly listed competitors of {company_name} "
-            f"in {industry} with stock ticker symbols",
-            f"{company_name} {ticker} peer group comparable companies "
-            f"equity analysis ticker symbols",
+            # Query 1: Konkurrenten mit Geschäftsmodell-Kontext (nicht nur GICS-Sektor)
+            f"publicly listed stock competitors of {company_name} ({ticker}) "
+            f"same business segment market ticker symbols",
+            # Query 2: Peer-Group mit Beschreibung wenn vorhanden
+            (
+                f"{company_name} peer group comparable companies equity analysis "
+                f"ticker symbols — {_desc_snippet}"
+                if _desc_snippet
+                else f"{company_name} {ticker} comparable companies equity research peers"
+            ),
+            # Query 3: Spezifische Branche aus der Unternehmensbeschreibung
+            f"{ticker} {company_name} stock peers similar companies same technology",
         ]
         all_results = []
         for query in queries:
             all_results.extend(search.invoke(query))
         search_context = "\n\n".join([
             f"URL: {r.get('url', '')}\n{r.get('content', '')[:500]}"
-            for r in all_results[:6]
+            for r in all_results[:9]
         ])
     except Exception as e:
         print(f"      Tavily Fehler: {e}")
@@ -1402,7 +1418,7 @@ def discover_peers_via_tavily(
             "company": company_name,
             "ticker": ticker,
             "sector": sector,
-            "industry": industry,
+            "industry": _desc_snippet or industry,
             "context": search_context,
         })
         s, e = raw.find("["), raw.rfind("]") + 1
@@ -1450,6 +1466,40 @@ def get_dynamic_peers(
     2. Finnhub (nur für US-Titel ohne Suffix)
     3. Sektor-Fallback (letzter Ausweg)
     """
+    # Industrie-spezifische Fallbacks (Priorität vor Sektor-Fallback)
+    # Verhindert z.B. Chemiekonzerne als Peers für Zementhersteller
+    INDUSTRY_FALLBACK = {
+        # Basic Materials – Sub-Sektoren
+        "Building Materials":         ["CRH", "HEI.DE", "MLM", "VMC", "SIKA.SW"],
+        "Specialty Chemicals":        ["LIN", "SHW", "PPG", "ECL", "APD"],
+        "Steel":                      ["MT", "NUE", "STLD", "CLF", "X"],
+        "Copper":                     ["FCX", "SCCO", "HBM", "TGB"],
+        "Gold":                       ["NEM", "AEM", "WPM", "GOLD"],
+        "Agricultural Inputs":        ["NTR", "MOS", "CF", "ICL"],
+        # Technology – Sub-Sektoren
+        "Semiconductors":             ["NVDA", "AMD", "AVGO", "QCOM", "TXN"],
+        "Software - Application":     ["MSFT", "SAP", "CRM", "ORCL", "NOW"],
+        "Software - Infrastructure":  ["MSFT", "ORCL", "VMW", "NET", "DDOG"],
+        "Computer Hardware":          ["AAPL", "HPQ", "DELL", "HPE", "NTAP"],
+        "Electronic Components":      ["TEL", "APH", "GLW", "FLEX", "JABIL"],
+        # Healthcare – Sub-Sektoren
+        "Drug Manufacturers - General": ["LLY", "PFE", "MRK", "NVO", "AZN"],
+        "Biotechnology":              ["AMGN", "GILD", "REGN", "VRTX", "BIIB"],
+        "Medical Devices":            ["MDT", "ABT", "SYK", "BSX", "EW"],
+        "Medical Instruments":        ["DHR", "A", "TMO", "IDXX", "METTLER"],
+        # Industrials – Sub-Sektoren
+        "Specialty Industrial Machinery": ["EMR", "ROK", "PH", "ITW", "IR"],
+        "Aerospace & Defense":        ["RTX", "LMT", "BA", "NOC", "GD"],
+        "Waste Management":           ["WM", "RSG", "CWST", "SRCL"],
+        # Energy – Sub-Sektoren
+        "Oil & Gas Integrated":       ["XOM", "CVX", "SHEL", "TTE", "BP"],
+        "Oil & Gas E&P":              ["COP", "PXD", "EOG", "DVN", "MRO"],
+        # Financial Services – Sub-Sektoren
+        "Banks - Global":             ["JPM", "BAC", "HSBC", "BCS", "DB"],
+        "Insurance - Life":           ["MET", "PRU", "LNC", "UNM"],
+        "Asset Management":           ["BLK", "SCHW", "IVZ", "AMG"],
+    }
+
     SECTOR_FALLBACK = {
         "Technology":             ["MSFT", "GOOGL", "META", "AMZN"],
         "Healthcare":             ["LLY", "AZN", "NVO", "ABBV"],
@@ -1457,7 +1507,7 @@ def get_dynamic_peers(
         "Consumer Defensive":     ["UL", "MDLZ", "PG", "KO"],
         "Consumer Cyclical":      ["AMZN", "HD", "MCD", "NKE"],
         "Industrials":            ["HON", "ETN", "EMR", "CAT"],
-        "Basic Materials":        ["LIN", "APD", "SHW", "PPG"],
+        "Basic Materials":        ["CRH", "LIN", "SHW", "MLM"],
         "Energy":                 ["XOM", "CVX", "SHEL", "TTE"],
         "Communication Services": ["GOOGL", "META", "DIS", "NFLX"],
         "Utilities":              ["NEE", "DUK", "SO", "AEP"],
@@ -1470,21 +1520,55 @@ def get_dynamic_peers(
     if len(tavily_peers) >= 3:
         return tavily_peers
 
-    # Stufe 2: Finnhub (nur für US-Ticker ohne Börsensuffix)
+    # Stufe 2: Finnhub (nur für US-Ticker ohne Börsensuffix) — mit LLM-Gate
+    # Finnhub gruppiert nach SIC-Code, nicht Geschäftsmodell → falsche Peers
+    # möglich (z.B. WDC für Rigetti). LLM prüft Relevanz bevor wir sie akzeptieren.
     if "." not in ticker:
         try:
             client = get_finnhub_client()
             finnhub_peers = client.company_peers(ticker) or []
-            peers = [p for p in finnhub_peers if p != ticker][:5]
-            if len(peers) >= 3:
-                print(f"      Peers via Finnhub: {peers}")
-                return peers
+            candidates = [p for p in finnhub_peers if p != ticker][:8]
+            if len(candidates) >= 3:
+                try:
+                    # Kurzbeschreibungen der Kandidaten für LLM-Check
+                    cand_names = []
+                    for c in candidates[:6]:
+                        try:
+                            n = yf.Ticker(c).info.get("longName", c)
+                        except Exception:
+                            n = c
+                        cand_names.append(f"{c} ({n})")
+
+                    _llm_gate = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
+                    gate_prompt = (
+                        f"Unternehmen: {company_name} ({ticker}), Sektor: {sector}, "
+                        f"Industrie: {industry}.\n"
+                        f"Kandidaten-Peers (aus SIC-Gruppe): {', '.join(cand_names)}\n\n"
+                        f"Sind mindestens 3 dieser Kandidaten WIRKLICH direkte Geschäftsmodell-Peers "
+                        f"(gleicher Endmarkt, gleiches Geschäftsmodell) von {company_name}? "
+                        f"Antworte NUR mit 'JA' oder 'NEIN'."
+                    )
+                    gate_answer = _llm_gate.invoke([{"role": "user", "content": gate_prompt}])
+                    gate_ok = "JA" in (gate_answer.content or "").upper()
+                except Exception:
+                    gate_ok = True  # Im Zweifel Finnhub-Ergebnis nutzen
+
+                if gate_ok:
+                    peers = candidates[:5]
+                    print(f"      Peers via Finnhub (LLM-validiert): {peers}")
+                    return peers
+                else:
+                    print(f"      Finnhub-Peers abgelehnt (LLM-Gate): {candidates} — zu unähnlich")
         except Exception:
             pass
 
-    # Stufe 3: Sektor-Fallback
-    fallback = SECTOR_FALLBACK.get(sector, ["SPY"])[:5]
-    print(f"      Sektor-Fallback für '{sector}': {fallback}")
+    # Stufe 3: Industrie-spezifischer Fallback (präziser als Sektor)
+    if industry in INDUSTRY_FALLBACK:
+        fallback = INDUSTRY_FALLBACK[industry][:5]
+        print(f"      Industrie-Fallback für '{industry}': {fallback}")
+    else:
+        fallback = SECTOR_FALLBACK.get(sector, ["SPY"])[:5]
+        print(f"      Sektor-Fallback für '{sector}': {fallback}")
     return fallback
 
 
@@ -1590,13 +1674,29 @@ def get_peer_financials(ticker: str, peers_override: list | None = None) -> dict
                 except (TypeError, ValueError):
                     return "-"
 
-            ev_ebitda  = _safe_r(info.get("enterpriseToEbitda"))
-            ev_sales   = _safe_r(info.get("enterpriseToRevenue"))
-            fwd_pe     = _safe_r(info.get("forwardPE"))
-            p_b        = _safe_r(info.get("priceToBook"))
-
             mktcap_raw = info.get("marketCap")
-            fcf_raw    = info.get("freeCashflow")
+
+            # EV/EBITDA: manuell berechnen (robuster als yfinance-Vorberechnung,
+            # die bei CH/EU-Titeln und negativem EBITDA oft None liefert)
+            ev_ebitda = "-"
+            if mktcap_raw and ebitda and ebitda != 0:
+                ev = float(mktcap_raw) + float(total_debt) - float(total_cash)
+                ev_ebitda = _safe_r(ev / float(ebitda))
+            if ev_ebitda == "-":
+                ev_ebitda = _safe_r(info.get("enterpriseToEbitda"))
+
+            ev_sales = _safe_r(info.get("enterpriseToRevenue"))
+
+            # Forward P/E: yfinance-Feld, Fallback auf Kurs / forwardEps
+            fwd_pe = _safe_r(info.get("forwardPE"))
+            if fwd_pe == "-":
+                fwd_eps = info.get("forwardEps")
+                if fwd_eps and price_raw and float(price_raw) > 0 and float(fwd_eps) > 0:
+                    fwd_pe = _safe_r(float(price_raw) / float(fwd_eps))
+
+            p_b = _safe_r(info.get("priceToBook"))
+
+            fcf_raw = info.get("freeCashflow")
             fcf_yield  = "-"
             if mktcap_raw and fcf_raw and float(mktcap_raw) > 0:
                 fcf_yield = round(float(fcf_raw) / float(mktcap_raw) * 100, 1)
