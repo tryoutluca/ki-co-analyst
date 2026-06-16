@@ -1,152 +1,135 @@
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-from dotenv import load_dotenv
-import sys
-import os
+"""
+Fundamental Agent — Orchestrator + Lead-Synthese
+
+Architektur:
+  1. Daten einmalig laden (Finanz-Tools, IR-RAG, MultiplesEngine)
+  2. 4 Sub-Agents parallel via ThreadPoolExecutor:
+       Quality · Growth · Valuation · Capital Allocation
+  3. Lead-LLM synthetisiert Sub-Agent-Outputs → FundamentalAgentOutput
+
+Öffentliche Schnittstelle run_fundamental_agent() unverändert.
+"""
+
+from __future__ import annotations
+
 import json
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+
+from dotenv import load_dotenv
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from tools.finance_tools import (
-    get_stock_info, get_financial_statements, get_price_history,
-    get_cashflow_data, get_historical_multiples, get_peer_financials,
-    get_historical_financials, build_estimate_anchors,
+    build_estimate_anchors,
+    get_cashflow_data,
+    get_financial_statements,
+    get_historical_financials,
+    get_historical_multiples,
+    get_peer_financials,
+    get_price_history,
+    get_stock_info,
 )
-from tools.ir_rag_tool import get_ir_analysis, consensus_estimates_from_ir
-from tools.schemas import FundamentalAgentOutput
+from tools.ir_rag_tool import consensus_estimates_from_ir, get_ir_analysis
 from tools.multiples_engine import MultiplesEngine
+from tools.schemas import FundamentalAgentOutput
+from tools.valuation_engine import build_valuation_table, run_dcf
+
+from agents.sub.capital_allocation_agent import run_capital_allocation_agent
+from agents.sub.growth_agent import run_growth_agent
+from agents.sub.quality_agent import run_quality_agent
+from agents.sub.valuation_agent import run_valuation_agent
 
 load_dotenv()
 
-llm    = ChatOpenAI(model="gpt-5.4-mini")
-parser = JsonOutputParser(pydantic_object=FundamentalAgentOutput)
+_llm    = ChatOpenAI(model="gpt-5.4-mini")
+_parser = JsonOutputParser(pydantic_object=FundamentalAgentOutput)
 
-_DEFAULT_MULTIPLES = ["P/E", "EV/EBITDA", "P/B", "ROE"]
+# ── Lead-Syntheseprompt ───────────────────────────────────────────────────────
+
+_LEAD_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """Du bist der Fundamental-Lead eines Buy-Side-Research-Teams.
+Vier spezialisierte Sub-Agenten haben ihre Analyse abgeliefert.
+Deine Aufgabe: synthetisiere deren Ergebnisse zu einem kohärenten Investment-Urteil.
+
+DATENPRIORITÄT:
+1. IR-Dokumente (geprüfte Zahlen)
+2. Sub-Agent-Outputs (spezialisierte Analyse)
+3. yfinance (Ergänzung)
+
+EMPFEHLUNGS-LOGIK (basierend auf Valuation Sub-Agent):
+  upside > +10% → KAUFEN
+  +5% bis +10%  → ÜBERGEWICHTEN
+  -5% bis +5%   → HALTEN
+  -10% bis -5%  → UNTERGEWICHTEN
+  < -10%        → VERKAUFEN
+
+Adjustiere ±1 Stufe wenn:
+- Quality Score < 50 → eine Stufe schlechter
+- FCF Conversion < 70% oder > 130% → eine Stufe schlechter
+- Capital Allocation Score > 80 → eine Stufe besser
+
+KRITISCH: Antworte AUSSCHLIESSLICH mit validem JSON.
+{format_instructions}"""),
+
+    ("human", """Ticker: {ticker} | Sektor: {sector} | Kurs: {current_price}
+
+══════════════════════════════════════════
+QUALITY SUB-AGENT:
+{quality_output}
+
+══════════════════════════════════════════
+GROWTH SUB-AGENT:
+{growth_output}
+
+══════════════════════════════════════════
+VALUATION SUB-AGENT:
+{valuation_output}
+
+══════════════════════════════════════════
+CAPITAL ALLOCATION SUB-AGENT:
+{capital_output}
+
+══════════════════════════════════════════
+KERNDATEN FÜR SYNTHESE:
+{core_data}
+
+══════════════════════════════════════════
+SENIOR-FEEDBACK (falls vorhanden):
+{senior_feedback}
+
+AUFGABEN:
+1. Leite fair_value_estimate aus Valuation Sub-Agent ab.
+2. Setze recommendation nach Empfehlungs-Logik (oben).
+3. investment_case: 3-5 Punkte aus Quality + Growth + CapAlloc, mit Zahlen.
+4. risks: 2-3 Punkte aus allen Sub-Agents.
+5. key_metrics: kombiniere key_quality_metrics + key_growth_metrics + key_allocation_metrics.
+6. cashflow_metrics: aus Quality Sub-Agent.
+7. self_confidence: Durchschnitt der Sub-Agent-Scores / 100, adjustiert für Datenlücken.
+8. company_description: max. 3 Sätze aus core_data.
+"""),
+])
 
 
-def get_relevant_multiples(sector: str) -> list:
-    """Fragt das LLM welche Kennzahlen für den Sektor am relevantesten sind."""
-    try:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "Du bist ein erfahrener Finanzanalyst. Antworte ausschliesslich mit einem JSON-Array."),
-            ("human", (
-                "Welche 4-6 Bewertungskennzahlen (Multiples) sind für den Sektor '{sector}' "
-                "nach Standard-Finanzanalyse am relevantesten? "
-                "Antworte NUR mit einem JSON-Array von Strings, z.B. [\"P/E\", \"EV/EBITDA\"]. "
-                "Kein erklärender Text."
-            )),
-        ])
-        chain = prompt | llm | StrOutputParser()
-        raw = chain.invoke({"sector": sector})
-        start = raw.find("[")
-        end   = raw.rfind("]") + 1
-        if start == -1 or end == 0:
-            return _DEFAULT_MULTIPLES
-        multiples = json.loads(raw[start:end])
-        if isinstance(multiples, list) and multiples:
-            return multiples
-    except Exception:
-        pass
-    return _DEFAULT_MULTIPLES
-
-
-FUNDAMENTAL_PROMPT = """Du bist ein erfahrener Buy-Side Analyst.
-
-DATENPRIORITÄT (höchste zuerst):
-1. IR-Dokumente (geprüfte, bereinigte Zahlen direkt vom Unternehmen)
-2. Finnhub (institutionelle Datenqualität)
-3. yfinance (gute Abdeckung, gelegentlich verzögert oder bereinigungsbedingt verzerrt)
-Wenn Quellen widersprechen: IR-Dokument gewinnt immer.
-Differenzen zwischen Quellen immer explizit dokumentieren.
-
-WICHTIGE GRUNDSÄTZE:
-1. Verwende sektor-spezifische Kennzahlen
-2. Peer-Vergleich und historischer Vergleich sind zentral
-3. Gib bei jeder Kennzahl die exakte Datenquelle an (inkl. Seitenzahl bei IR)
-4. Keine Halluzinationen — fehlende Daten explizit markieren
-5. Investment Case braucht klare Herleitung mit Zahlen
-6. Unternehmensbeschreibung: maximal 3 Sätze
-
-KGV-VALIDIERUNG:
-- Prüfe das Feld pe_validation in stock_info
-- Wenn pe_validation.status = "verzerrt":
-  * Verwende trailing P/E NICHT als primäres Multiple
-  * Nutze stattdessen Forward P/E und EV/EBITDA als Hauptmultiples
-  * Schreibe explizit in investment_case:
-    "Trailing KGV nicht aussagekräftig wegen [pe_validation.warning] —
-     Forward P/E [Wert]x und EV/EBITDA [Wert]x als primäre Multiples"
-- Wenn pe_validation.status = "plausibel": Trailing P/E kann normal verwendet werden
-
-EMPFEHLUNGS-LOGIK FÜR FUNDAMENTAL-AGENT (5-stufige Skala):
-  Basiere Empfehlung primär auf DCF Fair Value vs. Kurs:
-    > +10%:          KAUFEN
-    +5% bis +10%:    ÜBERGEWICHTEN
-    -5% bis +5%:     HALTEN
-    -10% bis -5%:    UNTERGEWICHTEN
-    < -10%:          VERKAUFEN
-
-  Adjustiere um ±1 Stufe wenn:
-  - Bewertung mehrheitlich ELEVATED → eine Stufe schlechter
-  - Bewertung mehrheitlich DISCOUNT → eine Stufe besser
-  - FCF Conversion ausserhalb 70–130% → eine Stufe schlechter
-
-CASHFLOW-ANALYSE:
-- Nehme FCF-Kennzahlen immer in key_metrics auf:
-  FCF Yield, FCF Conversion, Net Debt/EBITDA, EV/FCF
-- FCF Conversion < 70%:  flag als "Potenzielle Ergebnisqualitäts-Warnung (hohe Accruals)"
-- FCF Conversion > 130%: flag als "Potenzielle Working-Capital-Anomalie — prüfen"
-- Setze ir_verification_recommended=true bei FCF Conversion außerhalb 70–130%
-- EV/FCF ist oft aussagekräftiger als KGV — nutze ihn als Cross-Check zur Bewertung
-
-IR-DOKUMENTE PRIORISIERUNG:
-- Wenn ir_analysis adjustierte EPS enthält (adjusted_eps_available=true):
-  VERWENDE diesen Wert statt yfinance EPS — IR-Zahlen sind primäre Quelle
-  Zitiere immer: "(Quelle: IR-Dokument, [adjusted_eps_source])"
-- Wenn IR-Zahl >10% von yfinance abweicht: dokumentiere die Diskrepanz explizit
-  Beispiel: "IR: EPS 4.52 CHF (Quelle: AR 2024, S. 45) vs. yfinance: 4.18 CHF (+8% Differenz)"
-- Nutze revenue_guidance und ebitda_guidance aus ir_analysis für Ausblick-Abschnitt
-
-FORWARD-SCHÄTZUNGEN:
-
-SCHRITT 0 — Estimate-Jahre dynamisch bestimmen:
-  Ermittle das letzte abgeschlossene Geschäftsjahr (A) aus den gelieferten Daten:
-  → Prüfe IR-Dokumente und yfinance: welches ist das aktuellste Jahr mit vollständigen Istzahlen?
-  → Berücksichtige abweichende Geschäftsjahre:
-      Standard (Dezember-Abschluss): 2025A → 2026E, 2027E, 2028E
-      März-Abschluss (z.B. Take-Two): FY2026A → FY2027E, FY2028E, FY2029E
-      Juni-Abschluss:                 FY2026A → FY2027E, FY2028E, FY2029E
-  → Das aktuellste A-Jahr ist das Ausgangsjahr für alle Wachstumsberechnungen
-  → Berechne immer genau 3 Forward-Jahre ab dem letzten A-Jahr
-  → Dokumentiere im Feld "estimate_base_year":
-      z.B. "2025A" oder "FY2026A (Abschluss März 2026)"
-  WICHTIG: Diese Bestimmung basiert ausschliesslich auf den gelieferten Daten.
-  Falls unklar: markiere als "Letztes verfügbares Jahr — Vollständigkeit nicht bestätigt"
-
-- Verwende forward_estimates für die Konsens-Tabelle (E+1/E+2/E+3) in key_metrics,
-  wobei E+1/E+2/E+3 die dynamisch bestimmten Forward-Jahre sind
-- Alle Jahresreferenzen in key_metrics und investment_case verwenden diese dynamischen Jahre
-- Dokumentiere das Konfidenz-Level der Schätzungen (forward_estimates.confidence)
-- Nehme den Disclaimer von forward_estimates.disclaimer in die sources-Liste auf
-
-KRITISCH: Antworte AUSSCHLIESSLICH mit validem JSON. Kein erklärender Text.
-
-{format_instructions}"""
-
+# ── Öffentliche Schnittstelle (unverändert) ───────────────────────────────────
 
 def run_fundamental_agent(
     ticker: str,
     supervisor_critique: str | None = None,
-    structural_context: str | None = None,
+    structural_context: str | None  = None,
     business_model_context: dict | None = None,
 ) -> FundamentalAgentOutput:
-    """Führt Fundamentalanalyse durch — gibt strukturiertes JSON zurück.
-
-    Args:
-        business_model_context: Output des Classifier-Agenten (Phase 1).
-            Enthält business_model_type, dcf_applicable, suggested_peers etc.
-            Wenn None: Agent verhält sich wie vorher (Default DCF-zentriert).
+    """
+    Orchestriert 4 parallele Sub-Agents und synthetisiert deren Outputs.
+    Signatur identisch zur Vorgänger-Version.
     """
 
+    # ── 1. Daten einmalig laden ───────────────────────────────────────────────
     print(f"      Hole Unternehmensdaten...")
     stock_info    = get_stock_info.invoke(ticker)
     financials    = get_financial_statements.invoke(ticker)
@@ -161,7 +144,7 @@ def run_fundamental_agent(
     print(f"      Analysiere IR-Dokumente (RAG)...")
     ir_analysis = get_ir_analysis.invoke(ticker)
 
-    print(f"      Hole historische Finanzdaten (Loop)...")
+    print(f"      Hole historische Finanzdaten...")
     hist_data = get_historical_financials.invoke(ticker)
 
     sector = stock_info.get("sector", "N/A")
@@ -178,44 +161,33 @@ def run_fundamental_agent(
             hist_data        = hist_data,
         )
         all_multiples = engine.compute_all()
-        _summary      = all_multiples.get("_summary", {})
-        _price_meta   = all_multiples.get("_price_data", {})
+        _sum  = all_multiples.get("_summary", {})
+        _pm   = all_multiples.get("_price_data", {})
         print(
             f"      ✅ MultiplesEngine: "
-            f"{_summary.get('valid', 0)}/{_summary.get('total_calculated', 0)} "
-            f"Kennzahlen berechnet | "
-            f"Kurs: {_price_meta.get('current_price')} "
-            f"{_price_meta.get('currency')} (yfinance)"
+            f"{_sum.get('valid',0)}/{_sum.get('total_calculated',0)} Kennzahlen | "
+            f"Kurs: {_pm.get('current_price')} {_pm.get('currency')}"
         )
     except Exception as e:
         print(f"      ⚠ MultiplesEngine Fehler: {e}")
         all_multiples = {}
 
-    print(f"      Berechne Konsensschätzungen (dynamische Vorwärtsjahre)...")
+    print(f"      Berechne Konsensschätzungen...")
     forward_estimates = consensus_estimates_from_ir(
-        ticker,
-        ir_analysis,
-        historical_multiples,
-        sector,
+        ticker, ir_analysis, historical_multiples, sector,
     )
-    relevant_multiples = get_relevant_multiples(sector)
 
-    # ── Forward-KGV deterministisch berechnen ────────────────────────────────
     _fwd_price = all_multiples.get("_price_data", {}).get("current_price") if all_multiples else None
     if _fwd_price and forward_estimates.get("estimates"):
-        for _yr_data in forward_estimates["estimates"].values():
+        for _yr in forward_estimates["estimates"].values():
             try:
-                _eps_f = float(_yr_data.get("eps") or 0)
-                if _eps_f > 0:
-                    _yr_data["forward_pe"] = round(_fwd_price / _eps_f, 1)
+                _eps = float(_yr.get("eps") or 0)
+                if _eps > 0:
+                    _yr["forward_pe"] = round(_fwd_price / _eps, 1)
             except (TypeError, ValueError):
                 pass
 
-    # ── Peer-Vergleich (vor LLM — wird für Estimate-Anker benötigt) ──────────
     print(f"      Erstelle Peer-Vergleich...")
-    # Phase 2: Geschäftsmodell-Peers vom Classifier übersteuern die
-    # automatische Sektor-Discovery (verhindert GICS-Fehlzuordnungen wie
-    # Seagate/WDC als "Peers" für Quantum-Hardware)
     _suggested_peers = None
     if business_model_context and isinstance(business_model_context, dict):
         _sp = business_model_context.get("suggested_peers")
@@ -223,7 +195,6 @@ def run_fundamental_agent(
             _suggested_peers = _sp
     peer_comparison = get_peer_financials(ticker, peers_override=_suggested_peers)
 
-    # ── Estimate-Anker deterministisch berechnen ──────────────────────────────
     print(f"      Berechne Estimate-Anker...")
     estimate_anchors = build_estimate_anchors(
         ticker          = ticker,
@@ -231,253 +202,157 @@ def run_fundamental_agent(
         ir_analysis     = ir_analysis or {},
         peer_comparison = peer_comparison,
     )
-    print(f"        {estimate_anchors.get('methodology')}")
 
-    estimate_context = (
-        f"=== ESTIMATE-ANKER (deterministisch berechnet) ===\n"
-        f"Historischer Revenue-CAGR:  {estimate_anchors.get('revenue_cagr_3y', '-')}% p.a.\n"
-        f"EBITDA-Marge Ø hist.:       {estimate_anchors.get('ebitda_margin_avg', '-')}%\n"
-        f"EBITDA-Marge Trend:         {estimate_anchors.get('ebitda_margin_trend', '-')}pp p.a.\n"
-        f"EPS-CAGR hist.:             {estimate_anchors.get('eps_cagr_3y', '-')}% p.a.\n"
-        f"Peer-Wachstum Median:       {estimate_anchors.get('peer_revenue_growth', '-')}%\n"
-        f"Empfohlenes Wachstum:       {estimate_anchors.get('recommended_growth', 3.0)}%\n"
-        f"Konfidenz:                  {estimate_anchors.get('confidence', 'niedrig')}\n"
-        f"Methodik:                   {estimate_anchors.get('methodology', '')}\n"
-        f"Management Guidance:        {estimate_anchors.get('management_guidance', {})}\n"
-        f"\n"
-        f"WICHTIG: Verwende diese Anker für Forward-Estimates.\n"
-        f"Weiche nur mit expliziter Begründung davon ab.\n"
-        f"Ein EPS-Sprung >200% in einem Jahr ist NICHT plausibel."
+    dcf_result = run_dcf(ir_analysis, financials, cashflow_data, stock_info)
+
+    # ── 2. Sub-Agents parallel ────────────────────────────────────────────────
+    print(f"      🚀 Starte 4 Sub-Agents parallel...")
+
+    sub_results: dict[str, dict] = {}
+
+    tasks = {
+        "quality": lambda: run_quality_agent(
+            ticker, sector, cashflow_data, financials,
+            hist_data, all_multiples, ir_analysis or {},
+        ),
+        "growth": lambda: run_growth_agent(
+            ticker, sector, hist_data, forward_estimates,
+            estimate_anchors, peer_comparison, ir_analysis or {},
+        ),
+        "valuation": lambda: run_valuation_agent(
+            ticker, sector, stock_info, all_multiples,
+            forward_estimates, cashflow_data, financials,
+            ir_analysis or {}, business_model_context, dcf_result,
+        ),
+        "capital_allocation": lambda: run_capital_allocation_agent(
+            ticker, sector, cashflow_data, financials,
+            hist_data, stock_info, ir_analysis or {},
+        ),
+    }
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                sub_results[name] = future.result()
+                print(f"      ✅ {name.upper()} Sub-Agent abgeschlossen")
+            except Exception as exc:
+                print(f"      ❌ {name.upper()} Sub-Agent Fehler: {exc}")
+                sub_results[name] = {"error": str(exc)}
+
+    # ── 3. Lead-Synthese ──────────────────────────────────────────────────────
+    print(f"      Lead synthetisiert Sub-Agent-Outputs...")
+
+    current_price = (
+        all_multiples.get("_price_data", {}).get("current_price")
+        or stock_info.get("currentPrice")
+        or 0
     )
 
-    # Build a concise IR context block for the prompt
-    ir_context = _format_ir_context(ir_analysis, forward_estimates)
-
-    # Build deterministic multiples context block
-    multiples_context = _format_multiples_context(all_multiples)
-
-    # ── Optionale Kontext-Blöcke (Senior-Feedback + Corporate Actions) ─────────
-    senior_feedback_block = ""
+    senior_feedback = ""
     if supervisor_critique:
-        senior_feedback_block = (
-            f"\n⚠️ SENIOR-ANALYST FEEDBACK (HÖCHSTE PRIORITÄT):\n"
-            f"{supervisor_critique}\n"
-            f"Adressiere dieses Feedback EXPLIZIT in deiner Analyse.\n"
-        )
-
-    structural_block = ""
+        senior_feedback = f"⚠️ SENIOR-ANALYST FEEDBACK:\n{supervisor_critique}"
     if structural_context:
-        structural_block = (
-            f"\n=== CORPORATE ACTIONS / STRUKTURELLE VERÄNDERUNG ===\n"
-            f"{structural_context}\n"
-            f"WICHTIG: Erkläre YoY-Änderungen auf Pro-forma-Basis. "
-            f"Stelle klar, dass absolute YoY-Vergleiche durch diese Corporate Action verzerrt sind.\n"
-        )
+        senior_feedback += f"\n\nCORPORATE ACTIONS:\n{structural_context}"
 
-    # ── Phase 1: Business-Model-Klassifikation einbinden ──────────────────────
-    classification_block = ""
-    if business_model_context and isinstance(business_model_context, dict):
-        bmt = business_model_context.get("business_model_type", "unknown")
-        dcf_ok = business_model_context.get("dcf_applicable", True)
-        rationale = business_model_context.get("rationale", "")
-        methods = business_model_context.get("valuation_methods_recommended", [])
-        conf = business_model_context.get("classification_confidence", 0.0)
+    core_data = {
+        "company":       stock_info.get("name", ticker),
+        "description":   stock_info.get("longBusinessSummary", "")[:400],
+        "current_price": current_price,
+        "currency":      stock_info.get("currency", ""),
+        "market_cap":    stock_info.get("marketCap"),
+        "sector":        sector,
+        "date":          datetime.now().strftime("%Y-%m-%d"),
+        "price_3m":      price_history,
+        "ir_quality":    (ir_analysis or {}).get("data_quality"),
+    }
 
-        method_guidance = ""
-        if bmt == "optionality_play" or not dcf_ok:
-            method_guidance = (
-                "⚠️ DCF IST NICHT ANWENDBAR FÜR DIESES UNTERNEHMEN.\n"
-                "Begründung: Pre-Revenue / negativer FCF / hochspekulative Cashflows.\n"
-                "ANWEISUNG:\n"
-                "  • Verzichte auf DCF als primären Anker für das Price Target.\n"
-                "  • Wenn der Valuation-Engine trotzdem ein DCF liefert: Markiere es "
-                "explizit als 'nicht aussagekräftig' und nutze es NUR als nachrichtliche Info.\n"
-                "  • Stütze Fair Value primär auf: TAM × Adoption-Probability, "
-                "Peer-EV/Sales-Multiples für vergleichbare Pre-Revenue-Plays, "
-                "und Cash-Runway-Analyse (wie lange reicht die Liquidität?).\n"
-                "  • Setze self_confidence ≤ 0.55 — diese Bewertung ist strukturell "
-                "unsicher und das soll im Score reflektiert werden.\n"
-                "  • Empfehlung: HALTEN ist häufig defensiv korrekt, wenn Optionality "
-                "nicht quantifizierbar; KAUFEN/VERKAUFEN nur bei klarem Cash-Runway-Signal "
-                "oder bei extremen Bewertungsdivergenzen zu Peers.\n"
-            )
-        elif bmt == "cyclical":
-            method_guidance = (
-                "ZYKLISCHES UNTERNEHMEN — passe Bewertungslogik an:\n"
-                "  • Verwende NICHT die TTM-Margen für Forward-Schätzungen — sie können "
-                "Peak oder Trough sein.\n"
-                "  • Nutze Mid-Cycle-Margen (5-10 Jahres-Durchschnitt) für normalisiertes EBITDA.\n"
-                "  • Multipliziere mit normalisiertem EV/EBITDA-Multiple, NICHT mit aktuellem.\n"
-                "  • Erwähne explizit die aktuelle Zyklusposition im investment_case.\n"
-            )
-        elif bmt == "financial_institution":
-            method_guidance = (
-                "FINANZINSTITUT — angepasste Bewertung:\n"
-                "  • DCF ist nicht direkt anwendbar (Bilanzsumme >> Marktkap).\n"
-                "  • Primäre Multiples: P/B, P/TBV, ROE, Dividend Yield.\n"
-                "  • Fair Value via: Justified P/B = (ROE − g) / (Cost of Equity − g).\n"
-            )
-        elif bmt == "growth_with_revenue":
-            method_guidance = (
-                "WACHSTUMSUNTERNEHMEN — hybride Bewertung:\n"
-                "  • DCF mit hohem Terminal Value (>70% des Werts) ist legitim, "
-                "aber Sensitivität zu Discount-Rate und Terminal Growth zwingend ausweisen.\n"
-                "  • Cross-Check via EV/Sales und Rule-of-40 (Wachstum % + FCF-Margin %).\n"
-                "  • self_confidence typischerweise 0.55–0.75.\n"
-            )
-        else:  # mature_cashflow
-            method_guidance = (
-                "MATURE CASHFLOW-UNTERNEHMEN — Standardvorgehen:\n"
-                "  • DCF ist primärer Anker.\n"
-                "  • Bestätige via EV/EBITDA + FCF-Yield.\n"
-                "  • self_confidence typischerweise 0.70–0.90.\n"
-            )
-
-        classification_block = (
-            f"\n=== GESCHÄFTSMODELL-KLASSIFIKATION (Phase 1 Classifier) ===\n"
-            f"Typ: {bmt} (Confidence des Classifiers: {conf:.2f})\n"
-            f"DCF anwendbar: {'JA' if dcf_ok else 'NEIN'}\n"
-            f"Empfohlene Bewertungsmethoden: {', '.join(methods)}\n"
-            f"Begründung: {rationale}\n\n"
-            f"{method_guidance}\n"
-        )
-
-    # ── Phase 1: Selbst-Confidence-Anforderung ────────────────────────────────
-    confidence_block = (
-        "\n=== SELBST-CONFIDENCE (Phase 1 Anforderung) ===\n"
-        "Setze am Ende deiner Analyse self_confidence (0.0–1.0) und "
-        "confidence_rationale. Richtwerte:\n"
-        "  ≥0.85: Reiche IR-Daten, klare Multiples, DCF aussagekräftig, "
-        "Forward-Estimates gut abgesichert.\n"
-        "  0.65–0.85: Standardfall, leichte Datenlücken oder moderate Volatilität.\n"
-        "  0.45–0.65: Verzerrte Multiples ODER fehlende IR-Daten ODER hohe "
-        "Unsicherheit bei Forward-Estimates.\n"
-        "  <0.45: Pre-Revenue/Optionality, DCF nicht aussagekräftig, "
-        "strukturelle Datenlücken. Recommendation tendiert dann zu HALTEN.\n"
-        "Sei ehrlich — niedrige Confidence ist KEIN Versagen, sondern Information "
-        "für den Supervisor.\n"
-    )
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", FUNDAMENTAL_PROMPT),
-        ("human", """Analysiere {ticker} ({company}) im Sektor {sector}.
-
-RELEVANTE KENNZAHLEN FÜR DIESEN SEKTOR: {multiples}
-
-UNTERNEHMENSDATEN (Quelle: yfinance — inkl. KGV-Validierung):
-{stock_info}
-
-FINANZKENNZAHLEN (Quelle: yfinance):
-{financials}
-
-CASHFLOW-DATEN (Quelle: yfinance):
-{cashflow_data}
-
-HISTORISCHE MULTIPLES (Quelle: Finnhub):
-{historical_multiples}
-
-KURSENTWICKLUNG 3 MONATE (Quelle: yfinance):
-{price_history}
-
-{ir_context}
-
-{multiples_context}
-
-{estimate_context}
-
-{structural_block}
-
-{classification_block}
-
-{confidence_block}
-
-{senior_feedback_block}
-
-AUFGABEN:
-1. Erstelle die strukturierte Fundamentalanalyse als JSON.
-2. Für cashflow_metrics: übernimm die Rohdaten aus CASHFLOW-DATEN und setze \
-ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
-3. Wenn pe_validation.status="verzerrt": verwende Forward P/E + EV/EBITDA als primäre Multiples.
-4. Wenn IR adjustierte EPS verfügbar: verwende diese als primären EPS-Wert mit Quellenangabe.
-5. Markiere fehlende Daten mit "nicht verfügbar — manuelle Ergänzung empfohlen"."""),
-    ])
-
-    chain = prompt | llm | parser
-
-    result = chain.invoke({
-        "ticker":               ticker,
-        "company":              stock_info.get("name", ticker),
-        "sector":               sector,
-        "multiples":            ", ".join(relevant_multiples),
-        "stock_info":           json.dumps(stock_info,           ensure_ascii=False),
-        "financials":           json.dumps(financials,           ensure_ascii=False),
-        "cashflow_data":        json.dumps(cashflow_data,        ensure_ascii=False),
-        "historical_multiples": json.dumps(historical_multiples, ensure_ascii=False),
-        "price_history":        json.dumps(price_history,        ensure_ascii=False),
-        "ir_context":           ir_context,
-        "multiples_context":    multiples_context,
-        "estimate_context":     estimate_context,
-        "structural_block":     structural_block,
-        "classification_block": classification_block,
-        "confidence_block":     confidence_block,
-        "senior_feedback_block": senior_feedback_block,
-        "format_instructions":  parser.get_format_instructions(),
+    lead_chain = _LEAD_PROMPT | _llm | _parser
+    result = lead_chain.invoke({
+        "ticker":           ticker,
+        "sector":           sector,
+        "current_price":    current_price,
+        "quality_output":   json.dumps(sub_results.get("quality",{}),           ensure_ascii=False),
+        "growth_output":    json.dumps(sub_results.get("growth",{}),            ensure_ascii=False),
+        "valuation_output": json.dumps(sub_results.get("valuation",{}),         ensure_ascii=False),
+        "capital_output":   json.dumps(sub_results.get("capital_allocation",{}), ensure_ascii=False),
+        "core_data":        json.dumps(core_data,                               ensure_ascii=False),
+        "senior_feedback":  senior_feedback,
+        "format_instructions": _parser.get_format_instructions(),
     })
 
-    # ── MultiplesEngine Post-Processing ──────────────────────────────────────
-    # Deterministische Werte überschreiben LLM-Output für Kennzahlen
-    if isinstance(result, dict) and all_multiples:
-        sector = result.get("sector", "")
-        result["valuation_table"] = _build_valuation_table(all_multiples, sector)
-        result["all_multiples"]   = all_multiples
-        p = all_multiples.get("_price_data", {})
+    # ── 4. Post-Processing (deterministisch, wie bisher) ─────────────────────
+    if isinstance(result, dict):
+        # Valuation-Engine-Werte überschreiben LLM-Output
+        if all_multiples:
+            result["valuation_table"] = _build_valuation_table(all_multiples, sector)
+            result["all_multiples"]   = all_multiples
+        p = all_multiples.get("_price_data", {}) if all_multiples else {}
         if p.get("current_price"):
             result["current_price"] = p["current_price"]
         if p.get("market_cap_bn"):
             result["market_cap_bn"] = p["market_cap_bn"]
 
-    # ── Vollständige Finanzübersicht (historisch + Forward) ───────────────────
-    print(f"      Erstelle vollständige Finanzübersicht...")
+        # Sub-Agent-Outputs für Supervisor anhängen
+        result["_sub_agents"] = sub_results
 
+        # Vollständige Finanzübersicht
+        print(f"      Erstelle vollständige Finanzübersicht...")
+        forward_list = _build_forward_list(forward_estimates, all_multiples, ir_analysis, stock_info)
+        result["_full_financials"] = build_full_financials(
+            hist_data         = hist_data,
+            ir_analysis       = ir_analysis or {},
+            forward_estimates = forward_list,
+            n_years           = 5,
+        )
+        result["_peer_comparison"]  = peer_comparison
+        result["_valuation_engine"] = {
+            "dcf_inputs":      dcf_result,
+            "valuation_table": build_valuation_table(dcf_result),
+        }
+
+    return result
+
+
+# ── Hilfsfunktionen (unverändert) ────────────────────────────────────────────
+
+def _build_forward_list(
+    forward_estimates: dict,
+    all_multiples: dict,
+    ir_analysis: dict | None,
+    stock_info: dict,
+) -> list:
     def _sf(v):
         try:
             return float(v) if v not in (None, "-", "n/v", "not found", "") else None
         except (TypeError, ValueError):
             return None
 
-    # Aktuelle Nettoverschuldung für Forward ND/EBITDA
-    _net_debt_bn = _sf(ir_analysis.get("net_debt_bn")) if ir_analysis else None
+    _net_debt_bn = _sf((ir_analysis or {}).get("net_debt_bn"))
     if _net_debt_bn is None:
         _d = _sf(stock_info.get("totalDebt"))
         _c = _sf(stock_info.get("totalCash"))
         if _d is not None:
             _net_debt_bn = round((_d or 0) / 1e9 - (_c or 0) / 1e9, 2)
 
-    # Aktueller EV für Forward EV/EBITDA
-    _mc_bn = all_multiples.get("_price_data", {}).get("market_cap_bn") if all_multiples else None
-    _ev_bn = round(_mc_bn + _net_debt_bn, 2) if (_mc_bn is not None and _net_debt_bn is not None) else None
+    _mc_bn = (all_multiples or {}).get("_price_data", {}).get("market_cap_bn")
+    _ev_bn = round(_mc_bn + _net_debt_bn, 2) if (_mc_bn and _net_debt_bn is not None) else None
 
-    # Letztes bekanntes DPS (flach fortschreiben)
     _last_dps = _sf((ir_analysis or {}).get("dividend_per_share"))
-    if _last_dps is None and hist_data:
-        for _y in sorted(hist_data.keys(), reverse=True):
-            _d = _sf(hist_data[_y].get("dps"))
-            if _d is not None:
-                _last_dps = _d
-                break
 
-    forward_estimates_list = []
+    rows = []
     for yr, est in (forward_estimates.get("estimates") or {}).items():
-        rev   = _sf(est.get("revenue_bn"))
+        rev      = _sf(est.get("revenue_bn"))
         ebitda_m = _sf(est.get("ebitda_margin_pct"))
         ebit_m   = _sf(est.get("ebit_margin_pct"))
         fcf_fwd  = _sf(est.get("fcf_bn"))
 
-        ebitda_bn = round(rev * ebitda_m / 100, 2) if (rev and ebitda_m) else None
+        ebitda_bn     = round(rev * ebitda_m / 100, 2) if (rev and ebitda_m) else None
         ev_ebitda_fwd = round(_ev_bn / ebitda_bn, 1) if (_ev_bn and ebitda_bn and ebitda_bn > 0) else None
         nd_ebitda_fwd = round(_net_debt_bn / ebitda_bn, 2) if (_net_debt_bn is not None and ebitda_bn and ebitda_bn > 0) else None
 
-        forward_estimates_list.append({
+        rows.append({
             "year":              yr,
             "type":              "E",
             "revenue_bn":        rev,
@@ -493,42 +368,15 @@ ir_verification_recommended=true wenn fcf_conversion_pct außerhalb 70–130%.
             "forward_pe":        est.get("forward_pe"),
             "source":            est.get("source", forward_estimates.get("source", "-")),
         })
-
-    full_financials = build_full_financials(
-        hist_data         = hist_data,
-        ir_analysis       = ir_analysis or {},
-        forward_estimates = forward_estimates_list,
-        n_years           = 5,
-    )
-
-    # ── Valuation Engine Inputs (DCF + Multiples) ─────────────────────────────
-    from tools.valuation_engine import run_dcf, build_valuation_table
-    valuation = {
-        "dcf_inputs":      run_dcf(ir_analysis, financials, cashflow_data, stock_info),
-        "valuation_table": build_valuation_table(
-            run_dcf(ir_analysis, financials, cashflow_data, stock_info)
-        ),
-    }
-
-    # Anhängen an result für Supervisor
-    if isinstance(result, dict):
-        result["_full_financials"]  = full_financials
-        result["_peer_comparison"]  = peer_comparison
-        result["_valuation_engine"] = valuation
-
-    return result
+    return rows
 
 
 def build_full_financials(
-    hist_data:         dict,
-    ir_analysis:       dict,
+    hist_data: dict,
+    ir_analysis: dict,
     forward_estimates: list,
-    n_years:           int = 5,
+    n_years: int = 5,
 ) -> list:
-    """
-    Kombiniert historische yfinance-Daten, IR-Override für letztes Jahr
-    und Forward-Estimates zu einer einheitlichen Finanzübersicht.
-    """
     if not hist_data:
         return forward_estimates or []
 
@@ -552,11 +400,9 @@ def build_full_financials(
         "dps":               safe_ir("dps"),
     }
 
-    applied = []
-    for key, val in overrides.items():
-        if val is not None:
-            hist_data[last_year][key] = val
-            applied.append(key)
+    applied = [k for k, v in overrides.items() if v is not None]
+    for key in applied:
+        hist_data[last_year][key] = overrides[key]
 
     if "ebitda_margin_pct" in applied or "revenue_bn" in applied:
         rev = hist_data[last_year].get("revenue_bn")
@@ -569,7 +415,6 @@ def build_full_financials(
         print(f"      IR-Override {last_year}: {applied}")
 
     years = sorted(hist_data.keys(), reverse=True)[:n_years]
-
     result = []
     for yr in sorted(years):
         d = hist_data[yr]
@@ -593,53 +438,11 @@ def build_full_financials(
             "gross_margin_pct":  d.get("gross_margin_pct"),
             "source":            d.get("source", "yfinance"),
         })
-
     result.extend(forward_estimates or [])
     return result
 
 
-def _format_multiples_context(all_multiples: dict) -> str:
-    """Baut den deterministischen Multiples-Block für den LLM-Prompt."""
-    if not all_multiples:
-        return ""
-
-    def fmt(key):
-        r = all_multiples.get(key, {})
-        if r.get("valid"):
-            return f"{r['value']} ({r['formula']})"
-        return "-"
-
-    ev_formula = all_multiples.get("_enterprise_value", {}).get("formula", "-")
-
-    return f"""=== DETERMINISTISCH BERECHNETE KENNZAHLEN ===
-(Kurs + MarktKap: yfinance | Fundamentaldaten: IR-Dokument)
-
-EV/EBITDA:       {fmt("ev_ebitda")}
-EV/EBIT:         {fmt("ev_ebit")}
-EV/Sales:        {fmt("ev_sales")}
-P/E:             {fmt("pe_ratio")}
-P/B:             {fmt("pb_ratio")}
-P/FCF:           {fmt("p_fcf")}
-Div-Yield:       {fmt("dividend_yield")}
-FCF-Yield:       {fmt("fcf_yield")}
-ND/EBITDA:       {fmt("nd_ebitda")}
-EBITDA-Marge:    {fmt("ebitda_margin")}
-EBIT-Marge:      {fmt("ebit_margin")}
-FCF-Conversion:  {fmt("fcf_conversion")}
-ROE:             {fmt("roe")}
-ROIC:            {fmt("roic")}
-Umsatz-Wachstum: {fmt("revenue_growth")}
-EPS-Wachstum:    {fmt("eps_growth")}
-
-Enterprise Value: {ev_formula}
-
-WICHTIG: Diese Werte sind DETERMINISTISCH BERECHNET.
-Das LLM darf sie NICHT ändern oder überschreiben.
-Verwende diese Werte direkt für valuation_table."""
-
-
 def _build_valuation_table(all_multiples: dict, sector: str) -> list:
-    """Baut valuation_table deterministisch aus MultiplesEngine-Ergebnissen."""
     sector_lower = sector.lower()
 
     if any(w in sector_lower for w in ["bank", "versicher", "financ"]):
@@ -650,10 +453,8 @@ def _build_valuation_table(all_multiples: dict, sector: str) -> list:
         primary = [("EV/Sales", "ev_sales"), ("EV/EBITDA", "ev_ebitda"), ("P/FCF", "p_fcf")]
     else:
         primary = [
-            ("EV/EBITDA", "ev_ebitda"),
-            ("P/E",       "pe_ratio"),
-            ("EV/Sales",  "ev_sales"),
-            ("P/FCF",     "p_fcf"),
+            ("EV/EBITDA", "ev_ebitda"), ("P/E", "pe_ratio"),
+            ("EV/Sales",  "ev_sales"),  ("P/FCF", "p_fcf"),
             ("Div-Yield", "dividend_yield"),
         ]
 
@@ -673,95 +474,6 @@ def _build_valuation_table(all_multiples: dict, sector: str) -> list:
     return table
 
 
-def _format_ir_context(ir_analysis: dict, forward_estimates: dict) -> str:
-    """Formats IR analysis and forward estimates as a readable prompt block."""
-    lines = ["=== IR-DOKUMENTE & FORWARD-SCHÄTZUNGEN ==="]
-
-    if ir_analysis.get("error"):
-        lines.append(f"IR-Analyse: Nicht verfügbar ({ir_analysis['error']})")
-    else:
-        sources = ir_analysis.get("ir_sources", [])
-        lines.append(f"IR-Quellen: {', '.join(sources) if sources else 'keine'}")
-        lines.append(f"Datenqualität: {ir_analysis.get('data_quality', '-')}")
-
-        # EPS
-        adj_eps = ir_analysis.get("adjusted_eps", "not found")
-        if adj_eps != "not found":
-            lines.append(
-                f"Adjusted EPS: {adj_eps} "
-                f"(Quelle: IR-Dokument, {ir_analysis.get('adjusted_eps_note', '-')})"
-            )
-        else:
-            lines.append("Adjusted EPS: nicht gefunden in IR-Dokumenten")
-
-        # FCF
-        fcf = ir_analysis.get("free_cashflow_bn", "not found")
-        fcf_ccy = ir_analysis.get("free_cashflow_currency", "")
-        lines.append(
-            f"FCF (IR): {fcf} Mrd. {fcf_ccy} ({ir_analysis.get('free_cashflow_note', '-')})"
-        )
-
-        # Revenue + margins
-        lines.append(f"Umsatz (IR): {ir_analysis.get('revenue_bn', 'not found')} Mrd. "
-                     f"{ir_analysis.get('revenue_currency', '')}")
-        lines.append(f"EBITDA-Marge (IR): {ir_analysis.get('ebitda_margin_pct', 'not found')}%")
-        lines.append(f"Recurring EBIT-Marge (IR): {ir_analysis.get('recurring_ebit_margin_pct', 'not found')}%")
-        lines.append(f"Nettoverschuldung (IR): {ir_analysis.get('net_debt_bn', 'not found')} Mrd.")
-
-        # Guidance
-        lines.append(f"Guidance 2026: {ir_analysis.get('guidance_2026', 'not found')}")
-        lines.append(f"Guidance 2027: {ir_analysis.get('guidance_2027', 'not found')}")
-
-        # Consensus from IR (e.g. Holcim publishes own consensus sheet)
-        for key, label in [
-            ("consensus_eps_2026",        "Consensus EPS 2026E"),
-            ("consensus_eps_2027",        "Consensus EPS 2027E"),
-            ("consensus_eps_2028",        "Consensus EPS 2028E"),
-            ("consensus_revenue_2026_bn", "Consensus Revenue 2026E (Mrd.)"),
-            ("consensus_revenue_2027_bn", "Consensus Revenue 2027E (Mrd.)"),
-            ("consensus_revenue_2028_bn", "Consensus Revenue 2028E (Mrd.)"),
-        ]:
-            v = ir_analysis.get(key)
-            if v and v != "not found":
-                lines.append(f"{label}: {v}")
-
-        lines.append(f"Management Tone: {ir_analysis.get('management_tone', '-')}")
-
-        # P/E distortion explanation
-        pe_note = ir_analysis.get("pe_distortion_explanation", "none")
-        if pe_note and pe_note != "none":
-            lines.append(f"KGV-Verzerrungshinweis (IR): {pe_note}")
-
-        # yfinance discrepancies
-        for disc in ir_analysis.get("yfinance_discrepancies", []):
-            lines.append(f"⚠ Diskrepanz IR vs yfinance: {disc}")
-
-        for stmt in ir_analysis.get("key_statements", []):
-            lines.append(f"Key Statement: {stmt}")
-
-    lines.append("")
-    lines.append(
-        f"FORWARD-SCHÄTZUNGEN (Quelle: {forward_estimates.get('source', '-')}, "
-        f"Konfidenz: {forward_estimates.get('confidence', '-')})"
-    )
-    for year, est in forward_estimates.get("estimates", {}).items():
-        fpe = est.get("forward_pe")
-        fpe_str = f" | Forward-KGV {fpe}x" if fpe is not None else ""
-        lines.append(
-            f"  {year}: Umsatz {est.get('revenue_bn', '-')} Mrd. | "
-            f"EBITDA-Marge {est.get('ebitda_margin_pct', '-')}% | "
-            f"EPS {est.get('eps', '-')}{fpe_str} "
-            f"[{est.get('source', '-')}]"
-        )
-    for assumption in forward_estimates.get("key_assumptions", []):
-        lines.append(f"  Annahme: {assumption}")
-    disclaimer = forward_estimates.get("disclaimer")
-    if disclaimer:
-        lines.append(f"  Disclaimer: {disclaimer}")
-
-    return "\n".join(lines)
-
-
 if __name__ == "__main__":
-    result = run_fundamental_agent("YPSN.SW")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    result = run_fundamental_agent("HOLN.SW")
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
