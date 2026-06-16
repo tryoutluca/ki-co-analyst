@@ -1,5 +1,12 @@
 # KI-Co-Analyst — Python Dependencies
 
+# API Backend
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+python-jose[cryptography]>=3.3.0
+passlib>=1.7.4
+
 # Core
 streamlit>=1.32.0
 pandas>=2.0.0

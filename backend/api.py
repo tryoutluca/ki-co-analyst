@@ -121,9 +121,14 @@ def _get_history_item(item_id: str) -> dict | None:
 
 app = FastAPI(title="KI-Co-Analyst API", version="1.0.0")
 
+_CORS_ORIGINS = [o.strip() for o in os.environ.get(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:3001"
+).split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
