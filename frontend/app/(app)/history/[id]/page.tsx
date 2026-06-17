@@ -34,7 +34,7 @@ export default function HistoryDetailPage() {
         className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 transition-colors">
         <ArrowLeft size={15} /> Zurück zur Historie
       </button>
-      <MemoViewer data={data} />
+      <MemoViewer data={data} histId={id} />
     </div>
   );
 }

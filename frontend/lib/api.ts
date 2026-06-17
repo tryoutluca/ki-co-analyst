@@ -92,6 +92,22 @@ export async function deleteHistoryItem(id: string) {
   return api.delete(`/history/${id}`);
 }
 
+export async function downloadMemoPdf(histId: string, filename: string) {
+  const token = localStorage.getItem("token") ?? "";
+  const base  = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  const res   = await fetch(`${base}/history/${histId}/pdf`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`PDF-Fehler: ${res.status}`);
+  const blob = await res.blob();
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export async function getHistoryStats() {
   const { data } = await api.get("/history/stats/summary");
   return data as { total: number; last: HistoryItem | null; by_rec: Record<string, number> };

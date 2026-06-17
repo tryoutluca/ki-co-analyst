@@ -19,6 +19,7 @@ function AnalyseInner() {
   const [status,   setStatus]   = useState<"idle"|"running"|"done"|"error">("idle");
   const [progress, setProgress] = useState<string[]>([]);
   const [result,   setResult]   = useState<Record<string, unknown> | null>(null);
+  const [histId,   setHistId]   = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
 
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -57,6 +58,7 @@ function AnalyseInner() {
         clearInterval(pollRef.current!);
         setStatus("done");
         setResult(data.result);
+        setHistId(data.hist_id);
       } else if (data.status === "error") {
         clearInterval(pollRef.current!);
         setStatus("error");
@@ -89,6 +91,7 @@ function AnalyseInner() {
     setResult(null);
     setProgress([]);
     setJobId(null);
+    setHistId(null);
   }
 
   function selectTicker(t: string) {
@@ -238,7 +241,7 @@ function AnalyseInner() {
 
       {/* ── Result ─────────────────────────────────────────────────────── */}
       {status === "done" && result && (
-        <MemoViewer data={result} />
+        <MemoViewer data={result} histId={histId ?? undefined} />
       )}
 
       {/* ── Empty state ────────────────────────────────────────────────── */}

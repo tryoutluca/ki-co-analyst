@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { recColor, upsideClass, upsideLabel, safeNum, scoreColor, convictionStars } from "@/lib/utils";
 import TabMemo      from "./TabMemo";
 import TabValuation from "./TabValuation";
 import TabMacro     from "./TabMacro";
 import TabRisk      from "./TabRisk";
 import TabQuality   from "./TabQuality";
+import { Download, Printer } from "lucide-react";
+import { downloadMemoPdf } from "@/lib/api";
 
 const TABS = ["📋 Memo", "📊 Bewertung", "📰 Makro", "⚠️ Risiken", "✅ Qualität"];
 
@@ -20,7 +22,7 @@ function RecBadge({ rec }: { rec: string }) {
 
 interface KPI { label: string; val: string; cls: string }
 
-export default function MemoViewer({ data }: { data: Record<string, unknown> }) {
+export default function MemoViewer({ data, histId }: { data: Record<string, unknown>; histId?: string }) {
   const [tab, setTab] = useState(0);
 
   // All fields extracted as strings/primitives to avoid unknown-in-JSX TS errors
@@ -31,7 +33,23 @@ export default function MemoViewer({ data }: { data: Record<string, unknown> }) 
   const sector     = String(data.sector ?? "");
   const ticker     = String(data.ticker ?? "");
   const date       = String(data.date ?? "");
-  const mktcap     = String(data.market_cap ?? "n/v");
+  const mktcapBn   = data.market_cap_bn as number | undefined;
+  const mktcap     = mktcapBn != null ? `${mktcapBn.toFixed(1)} Mrd.` : "n/v";
+
+  const handleDownloadJson = useCallback(() => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `${ticker}_${date}_memo.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [data, ticker, date]);
+
+  const handleDownloadPdf = useCallback(() => {
+    if (!histId) return;
+    downloadMemoPdf(histId, `${ticker}_${date}_memo.pdf`).catch(console.error);
+  }, [histId, ticker, date]);
   const bottomLine = data.summary_bottom_line ? String(data.summary_bottom_line) : "";
   const execSum    = data.executive_summary   ? String(data.executive_summary)   : "";
   const updn       = data.upside_downside_pct as number | undefined;
@@ -67,11 +85,35 @@ export default function MemoViewer({ data }: { data: Record<string, unknown> }) 
               <span className="text-amber-500">{convictionStars(conv)}</span>
             </div>
           </div>
-          <div className="text-right">
-            <div className="text-xs text-slate-400 mb-1 tracking-widest uppercase">Konsistenz</div>
-            <div className={`font-serif text-4xl font-bold leading-none ${scoreColor(score)}`}>
-              {score ?? "-"}
-              <span className="text-base font-normal text-slate-400">/10</span>
+          <div className="flex items-start gap-4">
+            <div className="flex gap-2">
+              <button
+                onClick={handleDownloadJson}
+                title="Als JSON herunterladen"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200
+                           text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300
+                           transition-colors"
+              >
+                <Download size={13} /> JSON
+              </button>
+              {histId && (
+                <button
+                  onClick={handleDownloadPdf}
+                  title="Investment Memo als PDF herunterladen"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border
+                             text-xs font-medium transition-colors"
+                  style={{ borderColor: "#c9a84c", color: "#8a6820", background: "rgba(201,168,76,0.08)" }}
+                >
+                  <Printer size={13} /> PDF
+                </button>
+              )}
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-400 mb-1 tracking-widest uppercase">Konsistenz</div>
+              <div className={`font-serif text-4xl font-bold leading-none ${scoreColor(score)}`}>
+                {score ?? "-"}
+                <span className="text-base font-normal text-slate-400">/10</span>
+              </div>
             </div>
           </div>
         </div>

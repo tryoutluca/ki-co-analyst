@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -36,9 +37,7 @@ CREDENTIALS_FILE = ROOT / "credentials.json"
 HISTORY_DIR      = ROOT / "history"
 HISTORY_DIR.mkdir(exist_ok=True)
 
-_DEFAULT_CREDS = {
-    "admin": hashlib.sha256("analyst2025".encode()).hexdigest(),
-}
+_DEFAULT_CREDS: dict = {}
 
 # In-Memory Job-Store  { job_id: { status, progress, result, error } }
 _jobs: dict[str, dict] = {}
@@ -264,6 +263,21 @@ def _run_job(job_id: str, ticker: str):
         if not result.get("date"):
             result["date"] = datetime.now().strftime("%Y-%m-%d")
 
+        # Deterministic recommendation based on upside/downside
+        upside = result.get("upside_downside_pct")
+        if isinstance(upside, (int, float)):
+            if upside > 10:
+                rec = "KAUFEN"
+            elif upside > 5:
+                rec = "ÜBERGEWICHTEN"
+            elif upside >= -5:
+                rec = "HALTEN"
+            elif upside >= -10:
+                rec = "UNTERGEWICHTEN"
+            else:
+                rec = "VERKAUFEN"
+            result["final_recommendation"] = rec
+
         hist_id = _save_history(result)
 
         with _jobs_lock:
@@ -330,6 +344,25 @@ def history_item(item_id: str, _: str = Depends(get_current_user)):
     if d is None:
         raise HTTPException(status_code=404, detail="Analyse nicht gefunden")
     return d
+
+@app.get("/history/{item_id}/pdf")
+def history_pdf(item_id: str, _: str = Depends(get_current_user)):
+    d = _get_history_item(item_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Analyse nicht gefunden")
+    try:
+        from backend.pdf_generator import generate_memo_pdf
+        pdf_bytes = generate_memo_pdf(d)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF-Generierung fehlgeschlagen: {e}")
+    ticker = d.get("ticker", "memo")
+    date   = d.get("date", "")
+    filename = f"{ticker}_{date}_memo.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @app.delete("/history/{item_id}")
 def delete_history(item_id: str, _: str = Depends(get_current_user)):
