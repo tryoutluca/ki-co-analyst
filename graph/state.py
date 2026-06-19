@@ -79,3 +79,8 @@ class AnalysisState(TypedDict):
     # Real-Options-Bewertung für Pre-Revenue/Deep-Tech (nur bei
     # optionality_play). Cash-Runway + TAM×Adoption + Szenario-Pfade.
     optionality_analysis: Optional[dict]
+
+    # ── Perioden-Qualität / Quarterly Routing ────────────────
+    # QuarterlySignal.to_dict() — darf AUSSCHLIESSLICH in Forward-Estimates
+    # (E-Spalten) einfliessen, nie in Actuals (A-Spalten) oder MultiplesEngine.
+    quarterly_signal: Optional[dict]

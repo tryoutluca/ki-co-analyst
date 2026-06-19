@@ -44,6 +44,15 @@ FORWARD_PROMPT = """Du bist ein Senior Equity Analyst und erstellst die
 FORWARD-ESTIMATES — das Herzstück jeder Aktienanalyse. Diese Schätzungen
 bestimmen direkt das 12-Monats-Kursziel.
 
+PERIODEN-REGEL (ZWINGEND):
+Das Quartalssignal unten ist ein MOMENTUM-HINWEIS, kein Jahreswert.
+- Nutze run_rate_ttm als Niveau-Anker für FY+1, NICHT das raw_q_value.
+- Wenn prior_year_comp_depressed=True ODER der Geschäftsmodelltyp zyklisch ist
+  (memory/commodity/semis/cycl): dämpfe das YoY-Momentum stark Richtung Mid-Cycle.
+  Ein +60%-Quartal aus einem Trough ist kein fortschreibbarer Run-Rate.
+- Das Quartalssignal fliesst NUR in E-Spalten (Forward-Schätzungen) ein,
+  NICHT in Actuals (A-Spalten) und NICHT in MultiplesEngine-Inputs.
+
 GRUNDPRINZIP: Du projizierst NICHT den Durchschnitt der Vergangenheit.
 Du leitest her, WOHIN das Unternehmen geht — basierend auf der konkreten
 aktuellen Situation: Sektor-Nachfrage, thematische Treiber, Makro-Umfeld,
@@ -82,6 +91,9 @@ Projiziere AUSGEHEND von diesem Jahr (letztes Ist, ggf. normalisiert):
 Der Konsens ist Referenz, nicht Ziel. Deine eigene begründete Projektion
 ist das Ziel. Wenn du abweichst, ist das legitim und sogar erwünscht —
 aber begründe die Abweichung in deviation_from_consensus.
+
+=== QUARTALSSIGNAL (NUR Forward-Logik, NICHT für Actuals) ===
+{quarterly_block}
 
 ────────────────────────────────────────────────────────────────────────────
 DEINE AUFGABE:
@@ -175,6 +187,7 @@ def run_forward_estimate_agent(
     business_model_context: dict | None = None,
     thematic_context: dict | None = None,
     consensus_estimates: dict | None = None,
+    quarterly_signal: dict | None = None,
 ) -> dict:
     """
     Erstellt die Forward-Estimates aus einer hergeleiteten Wachstums-These.
@@ -250,6 +263,43 @@ def run_forward_estimate_agent(
         bmt = business_model_context.get("business_model_type", "unknown")
         cycle = business_model_context.get("cycle_position", "unknown")
 
+    # Build quarterly signal block for the prompt
+    quarterly_block = "Kein Quartalssignal verfügbar."
+    if quarterly_signal and isinstance(quarterly_signal, dict):
+        _is_cyclical = any(
+            x in bmt.lower()
+            for x in ["cycl", "memory", "commodity", "semi", "mining", "oil", "gas"]
+        )
+        _qs = quarterly_signal
+        _metric = _qs.get("source_metric", "fcf")
+        _ttm    = _qs.get("run_rate_ttm")
+        _yoy    = _qs.get("yoy_comparable_growth")
+        _qoq    = _qs.get("qoq_growth")
+        _dep    = _qs.get("prior_year_comp_depressed", False)
+        _parts  = [f"Quartalssignal ({_metric}):"]
+        if _ttm is not None:
+            _parts.append(f"  run_rate_ttm: {_ttm:.2f} Mrd (Summe letzte 4 Quartale) → Niveau-Anker für FY+1")
+        if _yoy is not None:
+            _damp = " → STARK GEDÄMPFT (Basiseffekt/Zyklus)" if (_dep or _is_cyclical) else ""
+            _parts.append(f"  YoY-Wachstum letztes Q: {_yoy:+.1f}%{_damp}")
+        if _qoq is not None:
+            _parts.append(f"  QoQ-Wachstum: {_qoq:+.1f}%")
+        if _dep:
+            _parts.append(
+                "  ⚠ prior_year_comp_depressed=True — Vorjahres-Q war anomal niedrig; "
+                "hohes YoY überschätzt Momentum erheblich"
+            )
+        if _is_cyclical:
+            _parts.append(
+                "  ⚠ Zyklisches Geschäftsmodell — Quartalsmomentum NICHT linear "
+                "fortschreiben; Richtung Mid-Cycle dämpfen"
+            )
+        _parts.append(
+            "  STRIKT: Dieser Block fliesst NUR in E-Spalten ein, NICHT in A-Spalten "
+            "und NICHT als Denomininator in der MultiplesEngine."
+        )
+        quarterly_block = "\n".join(_parts)
+
     parser = PydanticOutputParser(pydantic_object=ForwardEstimateOutput)
     prompt = ChatPromptTemplate.from_messages([("human", FORWARD_PROMPT)])
     chain = prompt | llm | parser
@@ -268,6 +318,7 @@ def run_forward_estimate_agent(
             "drivers_block": drivers_block,
             "thematic_block": thematic_block,
             "consensus_block": consensus_block,
+            "quarterly_block": quarterly_block,
             "format_instructions": parser.get_format_instructions(),
         })
         output = result.model_dump()

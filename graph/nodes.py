@@ -139,6 +139,9 @@ def forward_estimate_node(state: AnalysisState) -> dict:
         except Exception:
             consensus = None
 
+        # Extract QuarterlySignal that MultiplesEngine embedded in all_multiples
+        _qs = (f_out.get("all_multiples") or {}).get("_quarterly_signal")
+
         fe = run_forward_estimate_agent(
             ticker=state["ticker"],
             fundamental_output=f_out,
@@ -146,6 +149,7 @@ def forward_estimate_node(state: AnalysisState) -> dict:
             business_model_context=state.get("business_model_classification"),
             thematic_context=state.get("thematic_analysis"),  # Phase 3, optional
             consensus_estimates=consensus,
+            quarterly_signal=_qs,
         )
 
         if not fe:
@@ -163,7 +167,8 @@ def forward_estimate_node(state: AnalysisState) -> dict:
             f"Plausibilitäts-Warnungen: {warns}"
         )
         return {
-            "forward_estimates": fe,
+            "forward_estimates":  fe,
+            "quarterly_signal":   _qs,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:

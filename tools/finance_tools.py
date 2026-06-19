@@ -1047,9 +1047,16 @@ def get_cashflow_data(ticker: str) -> dict:
     """Holt detaillierte Cashflow-Kennzahlen und abgeleitete Kapitaleffizienzkennzahlen via yfinance."""
     NA = "nicht verfügbar — IR-Dokument empfohlen"
     try:
+        from tools.period_classifier import validate_yfinance_annual_columns
+
         stock = yf.Ticker(ticker)
         info  = stock.info
         cf    = stock.cashflow  # Annual cashflow statement
+
+        # Validate that column[0] is a full fiscal year, not a partial period
+        _is_annual, _period_warn = validate_yfinance_annual_columns(cf)
+        if not _is_annual and _period_warn:
+            print(_period_warn)
 
         operating_cf: float | str = NA
         capex:        float | str = NA
@@ -1128,6 +1135,8 @@ def get_cashflow_data(ticker: str) -> dict:
             "net_debt_to_ebitda":  net_debt_to_ebitda,
             "ev_to_fcf":           ev_to_fcf,
             "source":              "yfinance",
+            "period_annual_valid": _is_annual,
+            "period_warning":      _period_warn if not _is_annual else "",
         }
     except Exception as e:
         return {"error": str(e), "ticker": ticker}

@@ -196,6 +196,8 @@ def run_analysis(ticker: str) -> dict:
         "thematic_analysis":             None,
         # Phase 4: Optionality-Sub-Agent
         "optionality_analysis":          None,
+        # Perioden-Qualität / Quarterly Routing
+        "quarterly_signal":              None,
     }
 
     print(f"\n{'='*60}")

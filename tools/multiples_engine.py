@@ -1,6 +1,11 @@
 import yfinance as yf
 from dataclasses import dataclass
 import logging
+from tools.period_classifier import (
+    QuarterlySignal,
+    validate_yfinance_annual_columns,
+    check_ratio_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,11 @@ class MultiplesEngine:
         self._ev = None
         if self.mktcap is not None:
             self._ev = round(self.mktcap + (self.debt or 0) - (self.cash or 0), 3)
+
+        # Period-guard state (set by from_ticker; default = no guard)
+        self._fcf_suspect: bool = False
+        self._guard_warnings: list[str] = []
+        self._quarterly_signal: QuarterlySignal | None = None
 
     @classmethod
     def from_ticker(
@@ -112,9 +122,141 @@ class MultiplesEngine:
             debt = net_debt if net_debt > 0 else 0
             cash = abs(net_debt) if net_debt < 0 else 0
 
-        # FCF
-        fcf = safe_f(ir_analysis.get("free_cashflow_bn"))
-        if fcf is None: fcf = safe_f(yf_info.get("freeCashflow"), 1e-9)
+        # ── FCF with period guards ──────────────────────────────────────────
+        _guard_warnings: list[str] = []
+        _fcf_suspect = False
+
+        fcf_ir  = safe_f(ir_analysis.get("free_cashflow_bn"))
+        fcf_yf  = safe_f(yf_info.get("freeCashflow"), 1e-9)
+        cfo_ttm = safe_f(yf_info.get("operatingCashflow"), 1e-9)
+
+        # --- Prior-year FCF from annual cashflow (for ratio-to-prior guard) ---
+        prior_fcf: float | None = None
+        _cf_valid = True
+        try:
+            cf_annual = stock.cashflow
+            _cf_valid, _col_warn = validate_yfinance_annual_columns(cf_annual)
+            if not _cf_valid and _col_warn:
+                _guard_warnings.append(_col_warn)
+            if cf_annual is not None and not cf_annual.empty and len(cf_annual.columns) >= 2:
+                _CFO_KEYS   = ["Operating Cash Flow", "Total Cash From Operating Activities",
+                               "Cash From Operations"]
+                _CAPEX_KEYS = ["Capital Expenditure", "Capital Expenditures",
+                               "Purchase Of Property Plant And Equipment"]
+                # Use column 1 = prior fiscal year (column 0 = most recent)
+                _col1 = cf_annual.iloc[:, 1]
+                _cfo_p, _capex_p = None, None
+                for k in _CFO_KEYS:
+                    if k in _col1.index:
+                        try: _cfo_p = float(_col1[k]); break
+                        except Exception: pass
+                for k in _CAPEX_KEYS:
+                    if k in _col1.index:
+                        try: _capex_p = float(_col1[k]); break
+                        except Exception: pass
+                if _cfo_p is not None and _capex_p is not None:
+                    prior_fcf = round((_cfo_p - abs(_capex_p)) * 1e-9, 3)
+        except Exception:
+            pass
+
+        # --- Cross-source validation: IR vs yfinance TTM ---
+        fcf = fcf_ir
+        if fcf_ir is not None and fcf_yf is not None and fcf_yf > 0:
+            ratio = fcf_ir / fcf_yf
+            if not (0.40 <= ratio <= 1.75):
+                _guard_warnings.append(
+                    f"⚠ FCF perioden-kontaminiert: IR {fcf_ir:.2f} Mrd vs "
+                    f"yfinance TTM {fcf_yf:.2f} Mrd (Ratio {ratio:.2f}) — "
+                    "IR-FCF likely aus Interim-PDF; yfinance TTM bevorzugt"
+                )
+                _fcf_suspect = True
+                fcf = fcf_yf  # prefer yfinance TTM which is annual/TTM
+        elif fcf_ir is None:
+            fcf = fcf_yf
+
+        # --- Ratio-to-Prior-Year guard on the chosen FCF candidate ---
+        if fcf is not None and prior_fcf is not None and prior_fcf > 0:
+            passed, w = check_ratio_guard(fcf, prior_fcf, label="FCF")
+            if not passed:
+                _guard_warnings.append(w)
+                _fcf_suspect = True
+
+        # --- FCF/CFO conversion band [0.30, 1.15] ---
+        if fcf is not None and cfo_ttm is not None and cfo_ttm > 0:
+            conv = fcf / cfo_ttm
+            if not (0.30 <= conv <= 1.15):
+                _guard_warnings.append(
+                    f"⚠ FCF/CFO-Band: {fcf:.2f}/{cfo_ttm:.2f} = {conv:.2f} "
+                    "ausserhalb [0.30, 1.15] — FCF-Input periodenverdächtig"
+                )
+                _fcf_suspect = True
+
+        # Emit all guard warnings to the Live-Reasoning panel
+        for _w in _guard_warnings:
+            print(_w)
+
+        # --- Quarterly signal (for forward estimates only) ---
+        _quarterly_signal: QuarterlySignal | None = None
+        try:
+            qcf = stock.quarterly_cashflow
+            if qcf is not None and not qcf.empty:
+                _CFO_KEYS   = ["Operating Cash Flow", "Total Cash From Operating Activities"]
+                _CAPEX_KEYS = ["Capital Expenditure", "Capital Expenditures",
+                               "Purchase Of Property Plant And Equipment"]
+                _cols_q = sorted(qcf.columns, reverse=True)
+
+                def _qval(col, keys):
+                    for k in keys:
+                        if k in qcf[col].index:
+                            try: return float(qcf[col][k])
+                            except Exception: pass
+                    return None
+
+                q_cfos   = [(_c, v) for _c in _cols_q if (_v := _qval(_c, _CFO_KEYS))   is not None for v in [_v]]
+                q_capexs = [(_c, v) for _c in _cols_q if (_v := _qval(_c, _CAPEX_KEYS)) is not None for v in [_v]]
+
+                raw_q_fcf, run_rate, yoy_g, qoq_g = None, None, None, None
+                if q_cfos and q_capexs:
+                    cfo0 = q_cfos[0][1]; cap0 = q_capexs[0][1]
+                    raw_q_fcf = round((cfo0 - abs(cap0)) * 1e-9, 3)
+                if len(q_cfos) >= 4 and len(q_capexs) >= 4:
+                    run_rate = round(
+                        (sum(v for _, v in q_cfos[:4]) - abs(sum(v for _, v in q_capexs[:4]))) * 1e-9,
+                        3,
+                    )
+                if len(q_cfos) >= 5:
+                    py_v = q_cfos[4][1]
+                    if py_v != 0:
+                        yoy_g = round((q_cfos[0][1] - py_v) / abs(py_v) * 100, 1)
+                if len(q_cfos) >= 2 and q_cfos[1][1] != 0:
+                    qoq_g = round((q_cfos[0][1] - q_cfos[1][1]) / abs(q_cfos[1][1]) * 100, 1)
+
+                # Depressed prior-year comp: prior-year Q < 60% of 4-quarter average
+                comp_depressed = False
+                if len(q_cfos) >= 5:
+                    avg4 = sum(v for _, v in q_cfos[:4]) / 4
+                    if avg4 != 0 and q_cfos[4][1] < 0.60 * avg4:
+                        comp_depressed = True
+
+                _pe = None
+                try:
+                    _pe = _cols_q[0].date()
+                except Exception:
+                    pass
+
+                _quarterly_signal = QuarterlySignal(
+                    ticker=ticker,
+                    source_metric="fcf",
+                    raw_q_value=raw_q_fcf,
+                    yoy_comparable_growth=yoy_g,
+                    qoq_growth=qoq_g,
+                    run_rate_ttm=run_rate,
+                    prior_year_comp_depressed=comp_depressed,
+                    period_end=_pe,
+                    guard_messages=list(_guard_warnings),
+                )
+        except Exception as _e:
+            logger.debug("QuarterlySignal extraction failed: %s", _e)
 
         # Equity — IR → yfinance totalStockholderEquity → bookValue × shares
         equity = safe_f(ir_analysis.get("total_equity_bn"))
@@ -148,7 +290,7 @@ class MultiplesEngine:
             or safe_f(yf_info.get("dividendRate"))
         )
 
-        return cls(
+        engine = cls(
             current_price=price,
             market_cap=mktcap,
             shares_outstanding=shares,
@@ -169,6 +311,10 @@ class MultiplesEngine:
             eps_prev=eps_prev,
             financial_source=financial_source,
         )
+        engine._fcf_suspect      = _fcf_suspect
+        engine._guard_warnings   = _guard_warnings
+        engine._quarterly_signal = _quarterly_signal
+        return engine
 
     # ── Berechnungs-Helfer ────────────────────────────────────────────────────
 
@@ -295,7 +441,61 @@ class MultiplesEngine:
             results["eps_growth"] = {"valid": False, "value": None,
                                      "formula": "EPS YoY = -", "source": self.fin_src}
 
-        # Meta-Felder
+        # ── Period Guards ──────────────────────────────────────────────────────
+        _FCF_METRICS = ("ev_fcf", "p_fcf", "fcf_yield", "fcf_conversion")
+        _gw = "; ".join(self._guard_warnings) if self._guard_warnings else ""
+
+        if self._fcf_suspect:
+            # FCF input is contaminated — suppress all FCF-derived metrics
+            for k in _FCF_METRICS:
+                if results.get(k, {}).get("valid"):
+                    results[k] = {
+                        "valid":   False,
+                        "value":   None,
+                        "formula": f"{k} = unterdrückt (FCF perioden-kontaminiert)",
+                        "source":  self.fin_src,
+                        "warning": _gw,
+                    }
+        else:
+            # Absolute sanity bounds (catch remaining edge cases)
+            ev_fcf_val = results.get("ev_fcf", {}).get("value")
+            if ev_fcf_val is not None and ev_fcf_val > 80:
+                msg = f"⚠ EV/FCF {ev_fcf_val}x > 80x Schwelle — FCF-Input periodenverdächtig"
+                print(msg)
+                results["ev_fcf"] = {
+                    "valid": False, "value": None,
+                    "formula": f"EV/FCF = {ev_fcf_val}x unterdrückt (> 80x Schwelle)",
+                    "source": self.fin_src, "warning": msg,
+                }
+
+            fcf_yield_val = results.get("fcf_yield", {}).get("value")
+            if (fcf_yield_val is not None
+                    and self.fcf is not None and self.fcf > 0
+                    and fcf_yield_val < 0.5):
+                msg = f"⚠ FCF-Yield {fcf_yield_val}% < 0.5% Schwelle — periodenverdächtig"
+                print(msg)
+                results["fcf_yield"] = {
+                    "valid": False, "value": None,
+                    "formula": f"FCF-Yield = {fcf_yield_val}% unterdrückt (< 0.5%)",
+                    "source": self.fin_src, "warning": msg,
+                }
+
+            fcf_conv_val = results.get("fcf_conversion", {}).get("value")
+            if (fcf_conv_val is not None
+                    and self.ni is not None and self.ni > 0
+                    and not (30.0 <= fcf_conv_val <= 115.0)):
+                msg = (
+                    f"⚠ FCF-Conversion {fcf_conv_val}% ausserhalb [30%, 115%] "
+                    "— periodenverdächtig"
+                )
+                print(msg)
+                results["fcf_conversion"] = {
+                    "valid": False, "value": None,
+                    "formula": f"FCF-Conversion = {fcf_conv_val}% unterdrückt ([30%,115%])",
+                    "source": self.fin_src, "warning": msg,
+                }
+
+        # ── Meta-Felder ────────────────────────────────────────────────────────
         ev_str = (
             f"EV = MarktKap {self._r(mc)} + Schulden {self._r(self.debt or 0)} "
             f"- Cash {self._r(self.cash or 0)} = {self._r(ev)} Mrd."
@@ -307,6 +507,11 @@ class MultiplesEngine:
             "market_cap_bn": mc,
             "currency":      self.currency,
         }
+        results["_guard_warnings"]   = list(self._guard_warnings)
+        results["_quarterly_signal"] = (
+            self._quarterly_signal.to_dict() if self._quarterly_signal else None
+        )
+
         valid_n = sum(1 for k, v in results.items()
                       if not k.startswith("_") and isinstance(v, dict) and v.get("valid"))
         total_n = sum(1 for k in results if not k.startswith("_"))
