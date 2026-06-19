@@ -33,11 +33,20 @@ SECRET_KEY       = os.environ.get("JWT_SECRET", "ki-co-analyst-dev-secret-change
 ALGORITHM        = "HS256"
 TOKEN_EXPIRE_MIN = 480  # 8 Stunden
 
-CREDENTIALS_FILE = ROOT / "credentials.json"
-HISTORY_DIR      = ROOT / "history"
-HISTORY_DIR.mkdir(exist_ok=True)
+# DATA_DIR: auf Railway auf das gemountete Volume zeigen (/app/data),
+# lokal bleibt es beim Projektroot.
+_DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT)))
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-_DEFAULT_CREDS: dict = {}
+CREDENTIALS_FILE = _DATA_DIR / "credentials.json"
+HISTORY_DIR      = _DATA_DIR / "history"
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+
+# Beim Start Admin-Account anlegen falls noch keiner existiert
+_ADMIN_PW = os.environ.get("ADMIN_PASSWORD", "")
+if _ADMIN_PW and not CREDENTIALS_FILE.exists():
+    _init_creds = {"admin": hashlib.sha256(_ADMIN_PW.encode()).hexdigest()}
+    CREDENTIALS_FILE.write_text(json.dumps(_init_creds, indent=2), encoding="utf-8")
 
 # In-Memory Job-Store  { job_id: { status, progress, result, error } }
 _jobs: dict[str, dict] = {}
