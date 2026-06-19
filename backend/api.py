@@ -42,10 +42,16 @@ CREDENTIALS_FILE = _DATA_DIR / "credentials.json"
 HISTORY_DIR      = _DATA_DIR / "history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
-# Beim Start Admin-Account anlegen falls noch keiner existiert
+# Beim Start Admin-Account anlegen / aktualisieren falls ADMIN_PASSWORD gesetzt
 _ADMIN_PW = os.environ.get("ADMIN_PASSWORD", "")
-if _ADMIN_PW and not CREDENTIALS_FILE.exists():
-    _init_creds = {"admin": hashlib.sha256(_ADMIN_PW.encode()).hexdigest()}
+if _ADMIN_PW:
+    _init_creds: dict = {}
+    if CREDENTIALS_FILE.exists():
+        try:
+            _init_creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    _init_creds["admin"] = hashlib.sha256(_ADMIN_PW.encode()).hexdigest()
     CREDENTIALS_FILE.write_text(json.dumps(_init_creds, indent=2), encoding="utf-8")
 
 # In-Memory Job-Store  { job_id: { status, progress, result, error } }
@@ -63,7 +69,7 @@ def _load_creds() -> dict:
             return json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return _DEFAULT_CREDS
+    return {}
 
 def _save_creds(creds: dict):
     CREDENTIALS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
