@@ -44,15 +44,22 @@ HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 # Beim Start Admin-Account anlegen / aktualisieren falls ADMIN_PASSWORD gesetzt
 _ADMIN_PW = os.environ.get("ADMIN_PASSWORD", "")
+print(f"[STARTUP] DATA_DIR={_DATA_DIR}")
+print(f"[STARTUP] CREDENTIALS_FILE={CREDENTIALS_FILE}")
+print(f"[STARTUP] ADMIN_PASSWORD set: {bool(_ADMIN_PW)}")
+print(f"[STARTUP] credentials.json exists: {CREDENTIALS_FILE.exists()}")
 if _ADMIN_PW:
     _init_creds: dict = {}
     if CREDENTIALS_FILE.exists():
         try:
             _init_creds = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[STARTUP] credentials.json read error: {e}")
     _init_creds["admin"] = hashlib.sha256(_ADMIN_PW.encode()).hexdigest()
     CREDENTIALS_FILE.write_text(json.dumps(_init_creds, indent=2), encoding="utf-8")
+    print(f"[STARTUP] Admin account written. Users: {list(_init_creds.keys())}")
+else:
+    print("[STARTUP] WARNING: ADMIN_PASSWORD not set — no admin account created!")
 
 # In-Memory Job-Store  { job_id: { status, progress, result, error } }
 _jobs: dict[str, dict] = {}
