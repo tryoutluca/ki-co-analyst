@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import { login as apiLogin, register as apiRegister } from "@/lib/api";
 
 type ModalType = "none" | "login" | "register";
@@ -220,8 +221,7 @@ function Navbar({ onOpen }: { onOpen: (t: ModalType) => void }) {
     >
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
         <a href="#" className="flex items-center gap-2.5 no-underline">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm"
-            style={{ background: "linear-gradient(135deg,#c9a84c,#e8c96a)", color: "#0a1628" }}>KI</div>
+          <Image src="/logo.png" alt="KI-Co-Analyst" width={32} height={32} className="rounded-lg" />
           <span className="font-semibold text-white text-base tracking-tight">KI-Co-Analyst</span>
         </a>
 
@@ -484,8 +484,7 @@ function Footer({ onOpen }: { onOpen: (t: ModalType) => void }) {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-10">
           <div>
             <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm"
-                style={{ background:"linear-gradient(135deg,#c9a84c,#e8c96a)", color:"#0a1628" }}>KI</div>
+              <Image src="/logo.png" alt="KI-Co-Analyst" width={32} height={32} className="rounded-lg" />
               <span className="font-semibold text-white">KI-Co-Analyst</span>
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">

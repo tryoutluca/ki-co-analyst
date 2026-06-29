@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
+import { Menu } from "lucide-react";
 import { getUsername } from "@/lib/auth";
 
-export default function Topbar() {
+interface TopbarProps {
+  onMenuClick?: () => void;
+}
+
+export default function Topbar({ onMenuClick }: TopbarProps) {
   const [username, setUsername] = useState("");
   const [time, setTime]         = useState("");
 
@@ -17,10 +23,18 @@ export default function Topbar() {
   }, []);
 
   return (
-    <header className="h-14 flex items-center justify-between px-6 border-b"
+    <header className="h-14 flex items-center justify-between px-4 md:px-6 border-b"
             style={{ background: "#0a1628", borderColor: "rgba(201,168,76,0.2)" }}>
 
       <div className="flex items-center gap-3">
+        <button
+          onClick={onMenuClick}
+          className="lg:hidden p-1.5 -ml-1.5 rounded-md text-slate-300 hover:text-white hover:bg-white/5"
+          aria-label="Menü öffnen"
+        >
+          <Menu size={20} />
+        </button>
+        <Image src="/logo.png" alt="KI-Co-Analyst" width={28} height={28} className="rounded-md" />
         <span className="font-serif text-lg font-bold text-white">
           KI-Co<span style={{ color: "#c9a84c" }}>·</span>Analyst
         </span>

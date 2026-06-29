@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { login } from "@/lib/api";
 
 export default function LoginPage() {
@@ -56,6 +57,8 @@ export default function LoginPage() {
 
         {/* Logo */}
         <div className="text-center mb-10">
+          <Image src="/logo.png" alt="KI-Co-Analyst" width={64} height={64}
+                 className="mx-auto mb-4 rounded-xl" />
           <h1 className="font-serif text-4xl font-bold text-white mb-2">
             KI-Co<span style={{ color: "#c9a84c" }}>·</span>Analyst
           </h1>
