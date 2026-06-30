@@ -10,7 +10,6 @@ type ModalType = "none" | "login" | "register";
 /* ─── Shared input style ─────────────────────────────────────────────── */
 const INPUT = "w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all border-slate-200 focus:border-amber-400 focus:ring-2 focus:ring-amber-100 bg-slate-50 text-slate-800 placeholder-slate-400";
 const LABEL = "block text-xs font-semibold tracking-widest uppercase mb-1.5 text-slate-400";
-const GOLD_BAR = "h-1 w-full";
 
 /* ─── Spinner ────────────────────────────────────────────────────────── */
 function Spinner() {
@@ -52,12 +51,11 @@ function LoginForm({
   };
 
   return (
-    <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full max-w-md">
-      <div className={GOLD_BAR} style={{ background: "linear-gradient(90deg,#c9a84c,#e8c96a)" }} />
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden w-full max-w-md">
       <div className="p-8">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="font-serif text-2xl font-bold text-slate-800">Anmelden</h2>
+            <h2 className="text-2xl font-bold text-slate-800">Anmelden</h2>
             <p className="text-xs text-slate-400 mt-0.5">Willkommen zurück</p>
           </div>
           <button type="button" onClick={onClose} className="text-slate-300 hover:text-slate-600 text-2xl leading-none transition-colors">×</button>
@@ -76,7 +74,7 @@ function LoginForm({
           </div>
           {err && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{err}</div>}
           <button type="submit" disabled={busy}
-            className="w-full py-3.5 rounded-lg font-semibold text-sm text-white transition-all disabled:opacity-60 shadow-lg"
+            className="w-full py-3.5 rounded-lg font-semibold text-sm text-white transition-colors disabled:opacity-60"
             style={{ background: busy ? "#8a9bb0" : "#0a1628" }}>
             {busy ? <span className="flex items-center justify-center gap-2"><Spinner /> Anmelden…</span> : "Anmelden →"}
           </button>
@@ -87,7 +85,6 @@ function LoginForm({
             Noch kein Konto?{" "}
             <button type="button" onClick={onSwitch} className="font-semibold underline" style={{ color: "#c9a84c" }}>Registrieren</button>
           </p>
-          <p className="text-xs text-slate-400">Demo: <strong>admin</strong> / <strong>analyst2025</strong></p>
         </div>
       </div>
     </div>
@@ -129,12 +126,11 @@ function RegisterForm({
 
   if (ok) {
     return (
-      <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full max-w-md">
-        <div className={GOLD_BAR} style={{ background: "linear-gradient(90deg,#c9a84c,#e8c96a)" }} />
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden w-full max-w-md">
         <div className="p-8 text-center">
           <button type="button" onClick={onClose} className="absolute top-4 right-4 text-slate-300 hover:text-slate-600 text-2xl leading-none">×</button>
           <div className="text-5xl mb-4">✅</div>
-          <h2 className="font-serif text-2xl font-bold text-slate-800 mb-2">Registrierung erfolgreich!</h2>
+          <h2 className="text-2xl font-bold text-slate-800 mb-2">Registrierung erfolgreich!</h2>
           <p className="text-sm text-slate-500 mb-6">Du kannst dich jetzt anmelden.</p>
           <button type="button" onClick={onSwitch}
             className="px-6 py-3 rounded-lg font-semibold text-sm text-white"
@@ -147,12 +143,11 @@ function RegisterForm({
   }
 
   return (
-    <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full max-w-md">
-      <div className={GOLD_BAR} style={{ background: "linear-gradient(90deg,#c9a84c,#e8c96a)" }} />
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden w-full max-w-md">
       <div className="p-8">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="font-serif text-2xl font-bold text-slate-800">Registrieren</h2>
+            <h2 className="text-2xl font-bold text-slate-800">Registrieren</h2>
             <p className="text-xs text-slate-400 mt-0.5">Kostenloses Konto erstellen</p>
           </div>
           <button type="button" onClick={onClose} className="text-slate-300 hover:text-slate-600 text-2xl leading-none transition-colors">×</button>
@@ -181,8 +176,8 @@ function RegisterForm({
           </div>
           {err && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{err}</div>}
           <button type="submit" disabled={busy}
-            className="w-full py-3.5 rounded-lg font-semibold text-sm transition-all disabled:opacity-60 shadow-lg"
-            style={{ background: busy ? "#8a9bb0" : "linear-gradient(135deg,#c9a84c,#e8c96a)", color: "#0a1628" }}>
+            className="w-full py-3.5 rounded-lg font-semibold text-sm transition-colors disabled:opacity-60"
+            style={{ background: busy ? "#8a9bb0" : "#c9a84c", color: "#0a1628" }}>
             {busy ? <span className="flex items-center justify-center gap-2"><Spinner /> Registrierung…</span> : "Konto erstellen →"}
           </button>
         </form>
@@ -234,7 +229,7 @@ function Navbar({ onOpen }: { onOpen: (t: ModalType) => void }) {
           </button>
           <button type="button" onClick={() => onOpen("register")}
             className="text-sm font-semibold px-4 py-2 rounded-lg transition-all cursor-pointer border-none"
-            style={{ background: "linear-gradient(135deg,#c9a84c,#e8c96a)", color: "#0a1628" }}>
+            style={{ background: "#c9a84c", color: "#0a1628" }}>
             Registrieren
           </button>
         </nav>
@@ -256,7 +251,7 @@ function Navbar({ onOpen }: { onOpen: (t: ModalType) => void }) {
             onClick={() => { setMenuOpen(false); onOpen("login"); }}>Anmelden</button>
           <button type="button"
             className="text-sm font-semibold px-4 py-2 rounded-lg text-center border-none cursor-pointer"
-            style={{ background: "linear-gradient(135deg,#c9a84c,#e8c96a)", color: "#0a1628" }}
+            style={{ background: "#c9a84c", color: "#0a1628" }}
             onClick={() => { setMenuOpen(false); onOpen("register"); }}>
             Registrieren
           </button>
@@ -270,17 +265,10 @@ function Navbar({ onOpen }: { onOpen: (t: ModalType) => void }) {
 function Hero({ onOpen }: { onOpen: (t: ModalType) => void }) {
   return (
     <section
-      className="relative min-h-screen flex flex-col items-center justify-center text-center px-6 pt-16"
-      style={{ background: "linear-gradient(160deg, #0a1628 0%, #0f2040 40%, #0a1628 100%)" }}
+      className="relative min-h-screen flex flex-col items-center justify-center text-center px-6 pt-16 bg-[#0a1628]"
     >
-      <div className="absolute inset-0 opacity-5 pointer-events-none"
-        style={{ backgroundImage: "linear-gradient(rgba(201,168,76,0.4) 1px,transparent 1px),linear-gradient(90deg,rgba(201,168,76,0.4) 1px,transparent 1px)", backgroundSize: "60px 60px" }} />
-      <div className="absolute pointer-events-none"
-        style={{ top:"30%",left:"50%",transform:"translate(-50%,-50%)",width:"700px",height:"700px",
-          background:"radial-gradient(circle, rgba(201,168,76,0.08) 0%, transparent 70%)" }} />
-
       <div className="relative max-w-4xl mx-auto">
-        <h1 className="font-serif text-5xl sm:text-6xl lg:text-7xl font-bold text-white leading-tight mb-6">
+        <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold text-white leading-tight mb-6 tracking-tight">
           Institutionelle Aktienanalyse.{" "}
           <span style={{ color: "#c9a84c" }}>Automatisiert.</span>
         </h1>
@@ -290,8 +278,8 @@ function Hero({ onOpen }: { onOpen: (t: ModalType) => void }) {
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
           <button type="button" onClick={() => onOpen("register")}
-            className="px-8 py-3.5 rounded-xl font-semibold text-sm transition-all shadow-lg border-none cursor-pointer"
-            style={{ background:"linear-gradient(135deg,#c9a84c,#e8c96a)", color:"#0a1628", boxShadow:"0 0 30px rgba(201,168,76,0.3)" }}>
+            className="px-8 py-3.5 rounded-xl font-semibold text-sm transition-opacity hover:opacity-90 border-none cursor-pointer"
+            style={{ background:"#c9a84c", color:"#0a1628" }}>
             Kostenlos starten →
           </button>
           <a href="#comparison"
@@ -330,13 +318,13 @@ function Comparison() {
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-14">
           <div className="text-xs font-bold tracking-widest uppercase mb-3" style={{ color:"#c9a84c" }}>Der Unterschied</div>
-          <h2 className="font-serif text-4xl font-bold text-slate-800 mb-4">Manuell vs. KI-Co-Analyst</h2>
+          <h2 className="text-4xl font-bold text-slate-800 mb-4">Manuell vs. KI-Co-Analyst</h2>
           <p className="text-slate-500 max-w-xl mx-auto">
             Was ein erfahrener Analyst in einer Woche erarbeitet, liefert KI-Co-Analyst in Minuten —
             strukturiert, nachvollziehbar und auf institutionellem Niveau.
           </p>
         </div>
-        <div className="rounded-2xl overflow-hidden shadow-md border border-slate-200">
+        <div className="rounded-2xl overflow-hidden border border-slate-200">
           <div className="grid grid-cols-3 text-sm font-bold">
             <div className="px-6 py-4 bg-slate-100 text-slate-500 uppercase tracking-widest text-xs">Kriterium</div>
             <div className="px-6 py-4 bg-red-50 text-red-700 text-center border-l border-slate-200">Manuelle Analyse</div>
@@ -376,7 +364,7 @@ function Benefits() {
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-14">
           <div className="text-xs font-bold tracking-widest uppercase mb-3" style={{ color:"#c9a84c" }}>Warum KI-Co-Analyst</div>
-          <h2 className="font-serif text-4xl font-bold text-slate-800 mb-4">Analyse ohne Kompromisse</h2>
+          <h2 className="text-4xl font-bold text-slate-800 mb-4">Analyse ohne Kompromisse</h2>
           <p className="text-slate-500 max-w-xl mx-auto">
             KI-Co-Analyst kombiniert modernste Sprachmodelle mit strukturierten Finanzmodellen —
             für Research, das sich nach Goldman Sachs anfühlt, nicht nach ChatGPT.
@@ -384,7 +372,7 @@ function Benefits() {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {BENEFITS.map(({ icon, title, desc }) => (
-            <div key={title} className="p-6 rounded-2xl border border-slate-100 hover:border-slate-200 hover:shadow-md transition-all"
+            <div key={title} className="p-6 rounded-2xl border border-slate-100 hover:border-slate-200 transition-all"
               style={{ background:"#fafafa" }}>
               <div className="text-3xl mb-4">{icon}</div>
               <h3 className="font-semibold text-slate-800 mb-2">{title}</h3>
@@ -416,7 +404,7 @@ function Architecture() {
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-14">
           <div className="text-xs font-bold tracking-widest uppercase mb-3" style={{ color:"#c9a84c" }}>Unter der Haube</div>
-          <h2 className="font-serif text-4xl font-bold text-white mb-4">9-Agenten Pipeline</h2>
+          <h2 className="text-4xl font-bold text-white mb-4">9-Agenten Pipeline</h2>
           <p className="text-slate-400 max-w-xl mx-auto">
             Jede Analyse durchläuft sequenziell neun spezialisierte KI-Agenten.
             Der Supervisor-Agent fasst alle Ergebnisse zu einem kohärenten Investment-Memo zusammen.
@@ -432,7 +420,7 @@ function Architecture() {
                   : { background:"rgba(255,255,255,0.03)", borderColor:"rgba(255,255,255,0.08)" }}>
                 <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold"
                   style={isSup
-                    ? { background:"linear-gradient(135deg,#c9a84c,#e8c96a)", color:"#0a1628" }
+                    ? { background:"#c9a84c", color:"#0a1628" }
                     : { background:"rgba(255,255,255,0.08)", color:"#8a9bb0" }}>{i + 1}</div>
                 <div className="text-2xl w-8 text-center flex-shrink-0">{icon}</div>
                 <div className="flex-1">
@@ -463,11 +451,11 @@ function CTABanner({ onOpen }: { onOpen: (t: ModalType) => void }) {
   return (
     <section className="py-20 px-6" style={{ background:"#f7f8fa" }}>
       <div className="max-w-3xl mx-auto text-center">
-        <h2 className="font-serif text-4xl font-bold text-slate-800 mb-4">Bereit für professionelles Research?</h2>
+        <h2 className="text-4xl font-bold text-slate-800 mb-4">Bereit für professionelles Research?</h2>
         <p className="text-slate-500 mb-8">Starten Sie noch heute und erhalten Sie Ihre erste Aktienanalyse in unter 5 Minuten.</p>
         <button type="button" onClick={() => onOpen("register")}
-          className="px-10 py-4 rounded-xl font-bold text-sm transition-all shadow-lg border-none cursor-pointer"
-          style={{ background:"linear-gradient(135deg,#c9a84c,#e8c96a)", color:"#0a1628", boxShadow:"0 8px 30px rgba(201,168,76,0.3)" }}>
+          className="px-10 py-4 rounded-xl font-bold text-sm transition-all border-none cursor-pointer"
+          style={{ background:"#c9a84c", color:"#0a1628" }}>
           Jetzt kostenlos registrieren →
         </button>
         <p className="text-xs text-slate-400 mt-4">Keine Kreditkarte · Sofortzugang · Eigene Infrastruktur</p>

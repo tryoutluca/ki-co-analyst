@@ -29,12 +29,12 @@ const EXAMPLES = [
 
 function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+    <div className="bg-white border border-slate-200 rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-semibold tracking-widest uppercase text-slate-400">{label}</span>
         <span className="text-slate-300">{icon}</span>
       </div>
-      <div className="font-serif text-2xl font-bold text-slate-800">{value}</div>
+      <div className="text-2xl font-bold text-slate-800">{value}</div>
       {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
     </div>
   );
@@ -61,18 +61,13 @@ export default function DashboardPage() {
     <div className="max-w-7xl mx-auto px-6 py-8 space-y-8">
 
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
-      <div className="relative rounded-2xl overflow-hidden text-white"
-           style={{ background: "linear-gradient(135deg, #0a1628 0%, #1a2f45 55%, #0f2030 100%)" }}>
-        {/* Gold glow */}
-        <div className="absolute top-0 right-0 w-80 h-80 opacity-10 pointer-events-none"
-             style={{ background: "radial-gradient(circle, #c9a84c 0%, transparent 70%)" }} />
-
+      <div className="relative rounded-2xl overflow-hidden text-white bg-[#0a1628]">
         <div className="relative px-8 py-10 md:py-12">
           <p className="text-xs font-semibold tracking-widest uppercase mb-3"
              style={{ color: "#c9a84c" }}>
             KI-gestützte Aktienanalyse · BFH Bachelor Thesis 2025/26
           </p>
-          <h1 className="font-serif text-3xl md:text-4xl font-bold leading-tight mb-4">
+          <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4 tracking-tight">
             Institutional-Grade<br className="hidden md:block" />
             Equity Research — automatisiert.
           </h1>
@@ -84,14 +79,14 @@ export default function DashboardPage() {
           <div className="flex flex-wrap gap-3">
             <Link href="/analyse"
                   className="flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm
-                             text-slate-900 shadow-lg transition-all hover:opacity-90"
+                             text-slate-900 transition-opacity hover:opacity-90"
                   style={{ background: "#c9a84c" }}>
               Analyse starten
               <ArrowUpRight size={16} />
             </Link>
             <Link href="/history"
                   className="flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm
-                             text-white border border-white/20 hover:bg-white/10 transition-all">
+                             text-white border border-white/20 hover:bg-white/10 transition-colors">
               <Clock size={15} />
               Historie
             </Link>
@@ -115,9 +110,9 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
         {/* Letzte Analysen */}
-        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-            <h2 className="font-serif text-base font-semibold text-slate-800">Letzte Analysen</h2>
+            <h2 className="text-base font-semibold text-slate-800">Letzte Analysen</h2>
             <Link href="/history"
                   className="text-xs text-slate-400 hover:text-slate-700 flex items-center gap-1">
               Alle <ChevronRight size={12} />
@@ -140,7 +135,7 @@ export default function DashboardPage() {
                       className="flex items-center gap-4 px-6 py-4 hover:bg-slate-50 transition-colors">
                   {/* Ticker */}
                   <div className="w-20 flex-shrink-0">
-                    <div className="font-serif font-bold text-slate-800">{item.ticker}</div>
+                    <div className="font-bold text-slate-800">{item.ticker}</div>
                     <div className="text-xs text-slate-400 truncate">{item.company}</div>
                   </div>
                   {/* Rec */}
@@ -174,9 +169,9 @@ export default function DashboardPage() {
         <div className="space-y-5">
 
           {/* Quick-Start */}
-          <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100">
-              <h2 className="font-serif text-base font-semibold text-slate-800">Schnell starten</h2>
+              <h2 className="text-base font-semibold text-slate-800">Schnell starten</h2>
             </div>
             <div className="p-4 grid grid-cols-2 gap-2">
               {EXAMPLES.map(({ name, ticker, flag }) => (
@@ -195,9 +190,9 @@ export default function DashboardPage() {
           </div>
 
           {/* Agent-Pipeline */}
-          <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100">
-              <h2 className="font-serif text-base font-semibold text-slate-800">Agenten-Pipeline</h2>
+              <h2 className="text-base font-semibold text-slate-800">Agenten-Pipeline</h2>
             </div>
             <div className="divide-y divide-slate-50">
               {AGENTS.map(({ icon, name, desc }) => (

@@ -40,14 +40,13 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
 
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-40 w-56 flex-shrink-0 flex flex-col transition-transform duration-200 ease-in-out",
+          "fixed inset-y-0 left-0 z-40 w-56 flex-shrink-0 flex flex-col bg-white border-r border-slate-200 transition-transform duration-200 ease-in-out",
           "lg:static lg:translate-x-0",
           isOpen ? "translate-x-0" : "-translate-x-full"
         )}
-        style={{ background: "#0a1628", borderRight: "1px solid rgba(201,168,76,0.15)" }}
       >
         {/* Nav */}
-        <nav className="flex-1 pt-4 px-3 space-y-1">
+        <nav className="flex-1 pt-4 px-3 space-y-0.5">
           {NAV.map(({ href, icon: Icon, label }) => {
             const active = pathname === href || pathname.startsWith(href + "/");
             return (
@@ -56,14 +55,13 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                 href={href}
                 onClick={onClose}
                 className={cn(
-                  "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all",
+                  "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
                   active
-                    ? "text-[#c9a84c] border-l-2 border-[#c9a84c] pl-2.5"
-                    : "text-slate-400 hover:text-white hover:bg-white/5"
+                    ? "bg-slate-100 text-slate-900"
+                    : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
                 )}
-                style={active ? { background: "rgba(201,168,76,0.12)" } : {}}
               >
-                <Icon size={16} className="flex-shrink-0" />
+                <Icon size={16} className="flex-shrink-0" style={active ? { color: "#c9a84c" } : {}} />
                 {label}
               </Link>
             );
@@ -71,11 +69,11 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
         </nav>
 
         {/* Logout */}
-        <div className="p-3 border-t" style={{ borderColor: "rgba(255,255,255,0.08)" }}>
+        <div className="p-3 border-t border-slate-200">
           <button
             onClick={handleLogout}
             className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm w-full
-                       text-slate-400 hover:text-white hover:bg-white/5 transition-all"
+                       text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition-colors"
           >
             <LogOut size={16} />
             Abmelden

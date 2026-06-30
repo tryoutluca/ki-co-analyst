@@ -23,35 +23,30 @@ export default function Topbar({ onMenuClick }: TopbarProps) {
   }, []);
 
   return (
-    <header className="h-14 flex items-center justify-between px-4 md:px-6 border-b"
-            style={{ background: "#0a1628", borderColor: "rgba(201,168,76,0.2)" }}>
+    <header className="h-14 flex items-center justify-between px-4 md:px-6 border-b border-slate-200 bg-white">
 
       <div className="flex items-center gap-3">
         <button
           onClick={onMenuClick}
-          className="lg:hidden p-1.5 -ml-1.5 rounded-md text-slate-300 hover:text-white hover:bg-white/5"
+          className="lg:hidden p-1.5 -ml-1.5 rounded-md text-slate-400 hover:text-slate-900 hover:bg-slate-50"
           aria-label="Menü öffnen"
         >
           <Menu size={20} />
         </button>
-        <Image src="/logo.png" alt="KI-Co-Analyst" width={28} height={28} className="rounded-md" />
-        <span className="font-serif text-lg font-bold text-white">
-          KI-Co<span style={{ color: "#c9a84c" }}>·</span>Analyst
-        </span>
-        <span className="hidden md:block text-xs tracking-widest uppercase px-2 py-0.5 rounded"
-              style={{ color: "#8a9bb0", border: "1px solid rgba(255,255,255,0.1)" }}>
-          Research Platform
+        <Image src="/logo.png" alt="KI-Co-Analyst" width={26} height={26} className="rounded-md" />
+        <span className="text-base font-semibold text-slate-900 tracking-tight">
+          KI-Co-Analyst
         </span>
       </div>
 
-      <div className="flex items-center gap-4 text-xs" style={{ color: "#8a9bb0" }}>
+      <div className="flex items-center gap-4 text-xs text-slate-400">
         <span className="hidden sm:block">{time}</span>
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white"
                style={{ background: "#c9a84c" }}>
             {username.charAt(0).toUpperCase()}
           </div>
-          <span className="font-medium text-white hidden sm:block">{username}</span>
+          <span className="font-medium text-slate-700 hidden sm:block">{username}</span>
         </div>
       </div>
     </header>

@@ -28,16 +28,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4"
-         style={{ background: "linear-gradient(135deg, #0a1628 0%, #1a2f45 60%, #0f2030 100%)" }}>
-
-      {/* Background pattern */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-96 h-96 rounded-full opacity-10"
-             style={{ background: "radial-gradient(circle, #c9a84c 0%, transparent 70%)" }} />
-        <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-5"
-             style={{ background: "radial-gradient(circle, #c9a84c 0%, transparent 70%)" }} />
-      </div>
+    <div className="min-h-screen flex items-center justify-center p-4 bg-[#0a1628]">
 
       <div className="relative w-full max-w-md">
 
@@ -59,20 +50,17 @@ export default function LoginPage() {
         <div className="text-center mb-10">
           <Image src="/logo.png" alt="KI-Co-Analyst" width={64} height={64}
                  className="mx-auto mb-4 rounded-xl" />
-          <h1 className="font-serif text-4xl font-bold text-white mb-2">
-            KI-Co<span style={{ color: "#c9a84c" }}>·</span>Analyst
+          <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">
+            KI-Co-Analyst
           </h1>
           <p className="text-sm tracking-widest uppercase"
              style={{ color: "#8a9bb0" }}>
-            Equity Research Platform · BFH 2025/26
+            Equity Research Platform
           </p>
-          <span className="gold-line mx-auto mt-4" />
         </div>
 
         {/* Card */}
-        <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
-          {/* Card header strip */}
-          <div className="h-1 w-full" style={{ background: "#c9a84c" }} />
+        <div className="bg-white rounded-2xl overflow-hidden">
 
           <form onSubmit={handleSubmit} className="p-8 space-y-5">
             <div>
@@ -122,8 +110,8 @@ export default function LoginPage() {
               type="submit"
               disabled={loading}
               className="w-full py-3.5 rounded-lg font-semibold text-sm tracking-wide
-                         transition-all duration-200 disabled:opacity-60
-                         text-white shadow-lg"
+                         transition-colors duration-200 disabled:opacity-60
+                         text-white"
               style={{ background: loading ? "#8a9bb0" : "#0a1628" }}
             >
               {loading ? (
@@ -139,10 +127,6 @@ export default function LoginPage() {
               ) : "Anmelden →"}
             </button>
           </form>
-
-          <div className="px-8 pb-6 text-center text-xs" style={{ color: "#8a9bb0" }}>
-            Demo-Zugang: <strong>admin</strong> / <strong>analyst2025</strong>
-          </div>
         </div>
 
         {/* Footer note */}
