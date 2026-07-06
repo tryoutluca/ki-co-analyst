@@ -144,6 +144,107 @@ def run_fundamental_agent(
     print(f"      Analysiere IR-Dokumente (RAG)...")
     ir_analysis = get_ir_analysis.invoke(ticker)
 
+    # ── Multi-year IR data (new) ──────────────────────────────────────────────
+    ir_annual_years      = (ir_analysis or {}).get("ir_annual_years", [])
+    ir_quarterly_periods = (ir_analysis or {}).get("ir_quarterly_periods", [])
+    ir_quarterly_latest  = (ir_analysis or {}).get("ir_quarterly_latest")
+
+    # Convert latest IR quarterly period to QuarterlySignal-compatible dict
+    _ir_qs: dict | None = None
+    if ir_quarterly_latest and isinstance(ir_quarterly_latest, dict):
+        try:
+            rev_q = ir_quarterly_latest.get("revenue_bn")
+            yoy   = ir_quarterly_latest.get("yoy_comparable_growth_pct")
+            # QoQ from the next-most-recent extracted period, if available
+            qoq = None
+            if len(ir_quarterly_periods) > 1:
+                rev_prev = ir_quarterly_periods[1].get("revenue_bn")
+                if isinstance(rev_q, (int, float)) and isinstance(rev_prev, (int, float)) and rev_prev:
+                    qoq = round((rev_q / rev_prev - 1) * 100, 2)
+            _ir_qs = {
+                "ticker":                  ticker,
+                "source_metric":           "revenue",
+                "raw_q_value":             rev_q if isinstance(rev_q, (int, float)) else None,
+                "yoy_comparable_growth":   yoy if isinstance(yoy, (int, float)) else None,
+                "qoq_growth":              qoq,
+                "run_rate_ttm":            round(rev_q * 4, 3) if isinstance(rev_q, (int, float)) else None,
+                "prior_year_comp_depressed": False,
+                "period_end":              ir_quarterly_latest.get("period_end"),
+                "quarter":                 ir_quarterly_latest.get("quarter"),
+                "guard_messages":          [],
+                "source":                  "ir_pdf",
+            }
+        except Exception:
+            _ir_qs = None
+
+    if ir_annual_years:
+        print(f"      IR: {len(ir_annual_years)} Jahresberichte extrahiert "
+              f"({', '.join(str(y.get('fiscal_year','?')) for y in ir_annual_years)})")
+        try:
+            from tools.financial_db import init_db, upsert_financials
+            init_db()
+            ir_rows = [
+                {
+                    "ticker":             ticker,
+                    "fiscal_year":        yr.get("fiscal_year"),
+                    "period_type":        "annual",
+                    "quarter":            None,
+                    "period_end":         f"{yr.get('fiscal_year')}-12-31",
+                    "currency":           yr.get("revenue_currency", ""),
+                    "source":             "ir_pdf",
+                    "quality_score":      2,
+                    "revenue_bn":         yr.get("revenue_bn"),
+                    "ebitda_bn":          yr.get("ebitda_bn"),
+                    "ebitda_margin_pct":  yr.get("ebitda_margin_pct"),
+                    "ebit_bn":            yr.get("ebit_bn"),
+                    "ebit_margin_pct":    yr.get("recurring_ebit_margin_pct"),
+                    "net_income_bn":      yr.get("net_income_bn"),
+                    "fcf_bn":             yr.get("free_cashflow_bn"),
+                    "net_debt_bn":        yr.get("net_debt_bn"),
+                    "eps_adj":            yr.get("adjusted_eps"),
+                    "dps":                yr.get("dividend_per_share"),
+                }
+                for yr in ir_annual_years
+                if yr.get("fiscal_year")
+            ]
+            saved = upsert_financials(ir_rows)
+            print(f"      DB: {saved} IR-Jahreszeilen gespeichert")
+        except Exception as db_err:
+            print(f"      ⚠ IR→DB Fehler: {db_err}")
+
+    if ir_quarterly_periods:
+        print(f"      IR: {len(ir_quarterly_periods)} Zwischenberichte extrahiert "
+              f"({', '.join(str(p.get('quarter', '?')) for p in ir_quarterly_periods)})")
+        try:
+            from tools.financial_db import init_db, upsert_financials
+            init_db()
+            ir_q_rows = [
+                {
+                    "ticker":             ticker,
+                    "fiscal_year":        p.get("fiscal_year"),
+                    "period_type":        "quarterly",
+                    "quarter":            p.get("quarter"),
+                    "period_end":         p.get("period_end"),
+                    "currency":           p.get("revenue_currency", ""),
+                    "source":             "ir_pdf",
+                    "quality_score":      2,
+                    "revenue_bn":         p.get("revenue_bn"),
+                    "ebitda_bn":          p.get("ebitda_bn"),
+                    "ebitda_margin_pct":  p.get("ebitda_margin_pct"),
+                    "ebit_bn":            p.get("ebit_bn"),
+                    "net_income_bn":      p.get("net_income_bn"),
+                    "fcf_bn":             p.get("free_cashflow_bn"),
+                    "net_debt_bn":        p.get("net_debt_bn"),
+                    "eps_adj":            p.get("adjusted_eps"),
+                }
+                for p in ir_quarterly_periods
+                if p.get("fiscal_year") and p.get("quarter")
+            ]
+            saved_q = upsert_financials(ir_q_rows)
+            print(f"      DB: {saved_q} IR-Quartalszeilen gespeichert")
+        except Exception as db_err:
+            print(f"      ⚠ IR-Quartal→DB Fehler: {db_err}")
+
     print(f"      Hole historische Finanzdaten...")
     hist_data = get_historical_financials.invoke(ticker)
 
@@ -218,6 +319,7 @@ def run_fundamental_agent(
         "growth": lambda: run_growth_agent(
             ticker, sector, hist_data, forward_estimates,
             estimate_anchors, peer_comparison, ir_analysis or {},
+            ir_annual_history=ir_annual_years,
         ),
         "valuation": lambda: run_valuation_agent(
             ticker, sector, stock_info, all_multiples,
@@ -311,6 +413,9 @@ def run_fundamental_agent(
             "dcf_inputs":      dcf_result,
             "valuation_table": build_valuation_table(dcf_result),
         }
+        # IR multi-year signals — used by nodes.py for quarterly routing
+        result["ir_annual_years"]     = ir_annual_years
+        result["ir_quarterly_signal"] = _ir_qs
 
     return result
 

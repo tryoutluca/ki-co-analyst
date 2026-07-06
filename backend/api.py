@@ -42,6 +42,16 @@ CREDENTIALS_FILE = _DATA_DIR / "credentials.json"
 HISTORY_DIR      = _DATA_DIR / "history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
+# SQLite financial DB — initialize schema on startup
+try:
+    import os as _os
+    _os.environ.setdefault("DATA_DIR", str(_DATA_DIR))
+    from tools.financial_db import init_db as _init_financial_db
+    _init_financial_db()
+    print(f"[STARTUP] Financial DB initialisiert: {_DATA_DIR / 'financials.db'}")
+except Exception as _db_init_err:
+    print(f"[STARTUP] ⚠ Financial DB Init fehlgeschlagen: {_db_init_err}")
+
 # Beim Start Admin-Account anlegen / aktualisieren falls ADMIN_PASSWORD gesetzt
 _ADMIN_PW = os.environ.get("ADMIN_PASSWORD", "")
 print(f"[STARTUP] DATA_DIR={_DATA_DIR}")
@@ -414,6 +424,15 @@ def _group_by(items: list[dict], key: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # HEALTH
 # ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/db/stats")
+def db_stats(_: str = Depends(get_current_user)):
+    try:
+        from tools.financial_db import get_db_stats
+        return get_db_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/health")
 def health():

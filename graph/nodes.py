@@ -139,8 +139,10 @@ def forward_estimate_node(state: AnalysisState) -> dict:
         except Exception:
             consensus = None
 
-        # Extract QuarterlySignal that MultiplesEngine embedded in all_multiples
-        _qs = (f_out.get("all_multiples") or {}).get("_quarterly_signal")
+        # Prefer IR-sourced quarterly signal (from PDF); fallback to yfinance-derived
+        _qs_yf = (f_out.get("all_multiples") or {}).get("_quarterly_signal")
+        _qs_ir = f_out.get("ir_quarterly_signal")
+        _qs    = _qs_ir or _qs_yf
 
         fe = run_forward_estimate_agent(
             ticker=state["ticker"],

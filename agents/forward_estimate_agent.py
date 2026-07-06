@@ -300,6 +300,26 @@ def run_forward_estimate_agent(
         )
         quarterly_block = "\n".join(_parts)
 
+    # IR multi-year annual block (audited, takes precedence over yfinance)
+    ir_annual_years = (
+        fundamental_output.get("ir_annual_years", [])
+        if isinstance(fundamental_output, dict) else []
+    )
+    historical_block = _build_historical_block(hist_rows)
+    if ir_annual_years:
+        ir_lines = ["\nIR-JAHRESBERICHTE (geprüft, Vorrang gegenüber yfinance):"]
+        for yr in ir_annual_years:
+            fy  = yr.get("fiscal_year", "?")
+            rev = yr.get("revenue_bn", "n/a")
+            em  = yr.get("ebitda_margin_pct", "n/a")
+            eps = yr.get("adjusted_eps", "n/a")
+            fcf = yr.get("free_cashflow_bn", "n/a")
+            ir_lines.append(
+                f"  FY{fy}: Revenue={rev}Mrd | EBITDA-Marge={em}% | "
+                f"Adj.EPS={eps} | FCF={fcf}Mrd"
+            )
+        historical_block += "\n" + "\n".join(ir_lines)
+
     parser = PydanticOutputParser(pydantic_object=ForwardEstimateOutput)
     prompt = ChatPromptTemplate.from_messages([("human", FORWARD_PROMPT)])
     chain = prompt | llm | parser
@@ -310,7 +330,7 @@ def run_forward_estimate_agent(
             "company": company,
             "business_model_type": bmt,
             "cycle_position": cycle,
-            "historical_block": _build_historical_block(hist_rows),
+            "historical_block": historical_block,
             "oneoff_block": oneoff_block or "Keine Sondereffekte erkannt.",
             "base_year": base_year,
             "base_revenue": base_revenue if base_revenue is not None else "n/v",

@@ -579,22 +579,159 @@ def get_historical_multiples(ticker: str) -> dict:
 
 
 @tool
+def _db_rows_to_hist_dict(rows: list[dict]) -> dict:
+    """Convert financial_db annual rows to the get_historical_financials() dict shape."""
+    result = {}
+    for r in rows:
+        year = str(r.get("fiscal_year", ""))
+        if not year:
+            continue
+        rev  = r.get("revenue_bn")
+        eb   = r.get("ebitda_bn")
+        ebit = r.get("ebit_bn")
+        ni   = r.get("net_income_bn")
+        fcf  = r.get("fcf_bn")
+        ocf  = r.get("operating_cf_bn")
+        capex = r.get("capex_bn")
+        da    = r.get("da_bn")
+        td    = r.get("total_debt_bn")
+        tc    = r.get("total_cash_bn")
+        nd    = r.get("net_debt_bn")
+        eq    = r.get("total_equity_bn")
+        assets = r.get("total_assets_bn")
+        ic    = r.get("invested_capital_bn")
+        shares = r.get("shares_bn")
+        eps_a = r.get("eps_adj")
+        dps_v = r.get("dps")
+
+        def sd(num, den, pct=False):
+            try:
+                if num is None or den is None or den == 0:
+                    return None
+                res = float(num) / float(den)
+                return round(res * 100 if pct else res, 4)
+            except Exception:
+                return None
+
+        roe = sd(ni, eq, pct=True)
+        roa = sd(ni, assets, pct=True)
+        nopat = None
+        roic  = None
+        nd_ebitda = None
+        if eb and eb > 0 and nd is not None:
+            nd_ebitda = round(nd / eb, 2)
+
+        result[year] = {
+            "year":               year,
+            "source":             r.get("source", "db"),
+            "revenue_bn":         rev,
+            "gross_profit_bn":    r.get("gross_profit_bn"),
+            "ebitda_bn":          eb,
+            "ebit_bn":            ebit,
+            "net_income_bn":      ni,
+            "interest_bn":        r.get("interest_bn"),
+            "ebitda_margin_pct":  r.get("ebitda_margin_pct") or sd(eb,   rev, pct=True),
+            "ebit_margin_pct":    r.get("ebit_margin_pct")   or sd(ebit, rev, pct=True),
+            "gross_margin_pct":   sd(r.get("gross_profit_bn"), rev, pct=True),
+            "net_margin_pct":     r.get("net_margin_pct")    or sd(ni,  rev, pct=True),
+            "fcf_margin_pct":     r.get("fcf_margin_pct")    or sd(fcf, rev, pct=True),
+            "eps":                eps_a,
+            "dps":                dps_v,
+            "shares_bn":          shares,
+            "operating_cf_bn":    ocf,
+            "capex_bn":           capex,
+            "capex_pct":          sd(abs(capex) if capex else None, rev, pct=True),
+            "fcf_bn":             fcf,
+            "fcf_conversion_pct": sd(fcf, ni, pct=True),
+            "da_bn":              da,
+            "da_pct":             sd(da, rev, pct=True),
+            "total_debt_bn":      td,
+            "total_cash_bn":      tc,
+            "net_debt_bn":        nd,
+            "total_equity_bn":    eq,
+            "total_assets_bn":    assets,
+            "invested_capital_bn": ic,
+            "nd_ebitda":          nd_ebitda,
+            "roe_pct":            roe,
+            "roa_pct":            roa,
+            "roic_pct":           roic,
+            "tax_rate_pct":       None,
+            "nopat_bn":           nopat,
+        }
+    return result
+
+
+def _yf_result_to_db_rows(ticker: str, yf_result: dict) -> list[dict]:
+    """Convert get_historical_financials() yfinance dict to financial_db rows."""
+    rows = []
+    for year_str, d in yf_result.items():
+        try:
+            fiscal_year = int(year_str)
+        except (ValueError, TypeError):
+            continue
+        rows.append({
+            "ticker":             ticker,
+            "fiscal_year":        fiscal_year,
+            "period_type":        "annual",
+            "quarter":            None,
+            "period_end":         f"{fiscal_year}-12-31",
+            "currency":           "USD",
+            "source":             "yfinance",
+            "quality_score":      2,
+            "revenue_bn":         d.get("revenue_bn"),
+            "gross_profit_bn":    d.get("gross_profit_bn"),
+            "ebitda_bn":          d.get("ebitda_bn"),
+            "ebit_bn":            d.get("ebit_bn"),
+            "net_income_bn":      d.get("net_income_bn"),
+            "interest_bn":        d.get("interest_bn"),
+            "operating_cf_bn":    d.get("operating_cf_bn"),
+            "capex_bn":           d.get("capex_bn"),
+            "fcf_bn":             d.get("fcf_bn"),
+            "da_bn":              d.get("da_bn"),
+            "total_debt_bn":      d.get("total_debt_bn"),
+            "total_cash_bn":      d.get("total_cash_bn"),
+            "net_debt_bn":        d.get("net_debt_bn"),
+            "total_equity_bn":    d.get("total_equity_bn"),
+            "total_assets_bn":    d.get("total_assets_bn"),
+            "invested_capital_bn": d.get("invested_capital_bn"),
+            "eps_adj":            d.get("eps"),
+            "dps":                d.get("dps"),
+            "shares_bn":          d.get("shares_bn"),
+            "ebitda_margin_pct":  d.get("ebitda_margin_pct"),
+            "ebit_margin_pct":    d.get("ebit_margin_pct"),
+            "fcf_margin_pct":     d.get("fcf_margin_pct"),
+            "net_margin_pct":     d.get("net_margin_pct"),
+        })
+    return rows
+
+
 def get_historical_financials(ticker: str) -> dict:
     """
-    Holt historische Jahresdaten via yfinance DataFrames
-    und berechnet alle Kennzahlen deterministisch per Loop.
+    Holt historische Jahresdaten — Cache-First aus SQLite DB.
 
-    Datenquellen:
-      stock.income_stmt   → Revenue, EBIT, Net Income
-      stock.balance_sheet → Debt, Cash, Equity, Assets
-      stock.cashflow      → Operating CF, Capex, D&A
+    Datenquellen (Priorität):
+      1. SQLite DB (wenn ≥ 4 Jahre vorhanden)
+      2. yfinance DataFrames (~4 Jahre) → in DB speichern
+      3. SEC EDGAR XBRL (~10 Jahre, US-Ticker) → Backfill in DB
+      4. DB nochmals lesen → vollständiges Ergebnis
 
     Returns dict pro Jahr:
       { "2022": { revenue_bn, ebitda_bn, eps, net_debt_bn, ... }, ... }
     """
     import pandas as pd
+    from tools.financial_db import (
+        init_db, has_sufficient_data, get_annual_history, upsert_financials,
+    )
 
     print(f"      Hole historische Finanzdaten für {ticker}...")
+    init_db()
+
+    # ── 1. DB-Cache prüfen ────────────────────────────────────────────────────
+    if has_sufficient_data(ticker, min_annual_years=4):
+        rows = get_annual_history(ticker, n_years=10)
+        print(f"      ✅ DB-Cache: {len(rows)} Jahre für {ticker}")
+        return _db_rows_to_hist_dict(rows)
+
 
     try:
         stock = yf.Ticker(ticker)
@@ -856,7 +993,39 @@ def get_historical_financials(ticker: str) -> dict:
             else:
                 print(f"          ✅ {year}: Rev {revenue:.2f} Mrd.")
 
-        print(f"      ✅ {len(result)} historische Jahre geladen")
+        print(f"      ✅ {len(result)} historische Jahre von yfinance geladen")
+
+        # ── 2. yfinance → DB speichern ────────────────────────────────────────
+        if result:
+            yf_rows = _yf_result_to_db_rows(ticker, result)
+            saved = upsert_financials(yf_rows)
+            print(f"      DB: {saved} yfinance-Zeilen gespeichert")
+
+        # ── 3. XBRL Backfill für US-Ticker ────────────────────────────────────
+        try:
+            from tools.ir_rag_tool import _sec_is_us_ticker, get_sec_cik
+            if _sec_is_us_ticker(ticker):
+                cik = get_sec_cik(ticker)
+                if cik:
+                    from tools.xbrl_fetcher import fetch_xbrl_annual, fetch_xbrl_quarterly
+                    xbrl_rows = fetch_xbrl_annual(ticker, cik, max_years=10)
+                    if xbrl_rows:
+                        saved_xbrl = upsert_financials(xbrl_rows)
+                        print(f"      DB: {saved_xbrl} XBRL-Jahreszeilen gespeichert")
+                    xbrl_q = fetch_xbrl_quarterly(ticker, cik, max_quarters=12)
+                    if xbrl_q:
+                        saved_q = upsert_financials(xbrl_q)
+                        print(f"      DB: {saved_q} XBRL-Quartalszeilen gespeichert")
+        except Exception as xbrl_err:
+            print(f"      ⚠ XBRL Backfill übersprungen: {xbrl_err}")
+
+        # ── 4. DB nochmals lesen → bis zu 10 Jahre ───────────────────────────
+        from tools.financial_db import get_annual_history
+        db_rows = get_annual_history(ticker, n_years=10)
+        if len(db_rows) > len(result):
+            print(f"      ✅ DB erweitert auf {len(db_rows)} Jahre (inkl. XBRL)")
+            return _db_rows_to_hist_dict(db_rows)
+
         return result
 
     except Exception as e:

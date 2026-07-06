@@ -13,6 +13,9 @@ venv/
 # IR Cache (kann gross werden)
 ir_cache/
 
+# Financials DB (regenerierbarer Cache, kein Source-of-Truth)
+financials.db
+
 # Output Files (können sensitive Daten enthalten)
 output_memo*.json
 output_memo*.txt

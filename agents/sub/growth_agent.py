@@ -32,6 +32,8 @@ PEER-VERGLEICH:
 IR-DATEN (Guidance & Statements):
 {ir_growth}
 
+{ir_annual_block}
+
 Erstelle folgendes JSON:
 {{
   "revenue_cagr_3y_pct": <float oder null>,
@@ -67,6 +69,7 @@ def run_growth_agent(
     estimate_anchors: dict,
     peer_comparison: dict | list,
     ir_analysis: dict,
+    ir_annual_history: list | None = None,
 ) -> dict:
     print(f"      [Growth] Analysiere Umsatz / Margen / Trajektorie...")
 
@@ -79,15 +82,32 @@ def run_growth_agent(
         if ir_analysis.get(k)
     }
 
+    # Build compact IR multi-year block (source: audited annual reports)
+    ir_annual_block = ""
+    if ir_annual_history:
+        lines = ["IR-JAHRESBERICHTE (geprüft, Priorität gegenüber yfinance):"]
+        for yr in ir_annual_history:
+            fy = yr.get("fiscal_year", "?")
+            rev = yr.get("revenue_bn", "n/a")
+            ebitda_m = yr.get("ebitda_margin_pct", "n/a")
+            eps = yr.get("adjusted_eps", "n/a")
+            fcf = yr.get("free_cashflow_bn", "n/a")
+            lines.append(
+                f"  FY{fy}: Revenue={rev}Bn | EBITDA-Marge={ebitda_m}% | "
+                f"Adj.EPS={eps} | FCF={fcf}Bn"
+            )
+        ir_annual_block = "\n".join(lines)
+
     chain = _PROMPT | _llm | StrOutputParser()
     raw = chain.invoke({
         "ticker":            ticker,
         "sector":            sector,
-        "hist_data":         json.dumps(hist_data,          ensure_ascii=False)[:3000],
+        "hist_data":         json.dumps(hist_data,          ensure_ascii=False)[:2500],
         "estimate_anchors":  json.dumps(estimate_anchors,   ensure_ascii=False)[:1500],
         "forward_estimates": json.dumps(forward_estimates,  ensure_ascii=False)[:2000],
         "peer_summary":      json.dumps(peer_summary,       ensure_ascii=False)[:2000],
         "ir_growth":         json.dumps(ir_growth,          ensure_ascii=False),
+        "ir_annual_block":   ir_annual_block,
     })
 
     return _parse(raw, ticker, "growth")
