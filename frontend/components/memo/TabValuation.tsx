@@ -23,6 +23,15 @@ function SectionHead({ children }: { children: React.ReactNode }) {
   );
 }
 
+function MissingDataHint() {
+  return (
+    <div className="flex items-center gap-2 px-4 py-3 rounded-lg border border-amber-200
+                    bg-amber-50 text-sm text-amber-700">
+      ⚠️ Fundamentaldaten nicht verfügbar — Analyse unvollständig
+    </div>
+  );
+}
+
 export default function TabValuation({ data }: { data: Record<string, unknown> }) {
   const vt    = (data.valuation_table    as Record<string, unknown>[]) ?? [];
   const ce    = (data.consensus_estimates as Record<string, unknown>[]) ?? [];
@@ -32,6 +41,7 @@ export default function TabValuation({ data }: { data: Record<string, unknown> }
   const subj  = pc.subject_company        as Record<string, unknown> | undefined;
   const avg   = pc.sector_averages        as Record<string, unknown> | undefined;
   const tkr   = String(data.ticker ?? "");
+  const incomplete = Boolean(data.analysis_incomplete);
 
   const th = "px-3 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400 bg-slate-50";
   const td = "px-3 py-2 text-sm text-slate-700 border-b border-slate-50";
@@ -40,9 +50,9 @@ export default function TabValuation({ data }: { data: Record<string, unknown> }
     <div className="space-y-8">
 
       {/* Multiples Table */}
-      {vt.length > 0 && (
-        <div>
-          <SectionHead>Bewertungs-Multiples</SectionHead>
+      <div>
+        <SectionHead>Bewertungs-Multiples</SectionHead>
+        {vt.length > 0 ? (
           <div className="overflow-x-auto rounded-lg border border-slate-200">
             <table className="w-full text-sm">
               <thead>
@@ -65,43 +75,45 @@ export default function TabValuation({ data }: { data: Record<string, unknown> }
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        ) : incomplete ? <MissingDataHint /> : null}
+      </div>
 
       {/* Consensus Estimates */}
-      {ce.length > 0 && (
-        <div>
-          <SectionHead>Konsensschätzungen</SectionHead>
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  {["Jahr","Umsatz (Mrd.)","EBITDA-%","EPS","KGV"].map(h =>
-                    <th key={h} className={th}>{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {ce.map((r, i) => {
-                  const isEst = r.type === "E";
-                  return (
-                    <tr key={i} className={isEst ? "bg-blue-50/50" : "hover:bg-slate-50"}>
-                      <td className={`${td} font-medium`}>
-                        {isEst && <span className="text-blue-500 mr-1">📊</span>}
-                        {String(r.year ?? "")}
-                      </td>
-                      <td className={td}>{safeNum(r.revenue_bn)}</td>
-                      <td className={td}>{safeNum(r.ebitda_margin_pct)}%</td>
-                      <td className={td}>{safeNum(r.eps)}</td>
-                      <td className={td}>{safeNum(r.pe_ratio)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">📊 = Schätzung</p>
-        </div>
-      )}
+      <div>
+        <SectionHead>Konsensschätzungen</SectionHead>
+        {ce.length > 0 ? (
+          <>
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    {["Jahr","Umsatz (Mrd.)","EBITDA-%","EPS","KGV"].map(h =>
+                      <th key={h} className={th}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {ce.map((r, i) => {
+                    const isEst = r.type === "E";
+                    return (
+                      <tr key={i} className={isEst ? "bg-blue-50/50" : "hover:bg-slate-50"}>
+                        <td className={`${td} font-medium`}>
+                          {isEst && <span className="text-blue-500 mr-1">📊</span>}
+                          {String(r.year ?? "")}
+                        </td>
+                        <td className={td}>{safeNum(r.revenue_bn)}</td>
+                        <td className={td}>{safeNum(r.ebitda_margin_pct)}%</td>
+                        <td className={td}>{safeNum(r.eps)}</td>
+                        <td className={td}>{safeNum(r.pe_ratio)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-slate-400 mt-1">📊 = Schätzung</p>
+          </>
+        ) : incomplete ? <MissingDataHint /> : null}
+      </div>
 
       {/* Full Financials */}
       {ff.length > 0 && (

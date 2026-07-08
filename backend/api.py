@@ -190,6 +190,13 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     return username
 
 
+def require_admin(current_user: str = Depends(get_current_user)) -> str:
+    """Restricts a route to the admin account (username 'admin')."""
+    if current_user != "admin":
+        raise HTTPException(status_code=403, detail="Nur für Administratoren")
+    return current_user
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMAS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -426,10 +433,47 @@ def _group_by(items: list[dict], key: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/db/stats")
-def db_stats(_: str = Depends(get_current_user)):
+def db_stats(_: str = Depends(require_admin)):
     try:
         from tools.financial_db import get_db_stats
         return get_db_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/db/tickers")
+def db_tickers(_: str = Depends(require_admin)):
+    try:
+        from tools.financial_db import get_ticker_overview
+        return get_ticker_overview()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/db/ticker/{ticker}")
+def db_ticker(ticker: str, _: str = Depends(require_admin)):
+    try:
+        from tools.financial_db import get_ticker_data
+        data = get_ticker_data(ticker.upper())
+        if not data["annual"] and not data["quarterly"]:
+            raise HTTPException(status_code=404, detail=f"Keine Daten für {ticker}")
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/db/ticker/{ticker}")
+def db_delete_ticker(ticker: str, _: str = Depends(require_admin)):
+    try:
+        from tools.financial_db import delete_ticker
+        deleted = delete_ticker(ticker.upper())
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Keine Daten für {ticker}")
+        return {"ticker": ticker.upper(), "deleted_rows": deleted}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

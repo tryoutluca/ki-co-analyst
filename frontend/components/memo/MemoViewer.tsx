@@ -50,6 +50,8 @@ export default function MemoViewer({ data, histId }: { data: Record<string, unkn
     if (!histId) return;
     downloadMemoPdf(histId, `${ticker}_${date}_memo.pdf`).catch(console.error);
   }, [histId, ticker, date]);
+  const incomplete = Boolean(data.analysis_incomplete);
+  const missing    = (data.missing_components as string[] | undefined) ?? [];
   const bottomLine = data.summary_bottom_line ? String(data.summary_bottom_line) : "";
   const execSum    = data.executive_summary   ? String(data.executive_summary)   : "";
   const updn       = data.upside_downside_pct as number | undefined;
@@ -117,6 +119,15 @@ export default function MemoViewer({ data, histId }: { data: Record<string, unkn
             </div>
           </div>
         </div>
+
+        {/* Unvollständige Analyse */}
+        {incomplete && (
+          <div className="mt-3 flex items-center gap-2 px-4 py-2.5 rounded-lg border border-red-200
+                          bg-red-50 text-sm text-red-700 font-medium">
+            ⚠️ Analyse unvollständig — fehlende Komponenten: {missing.join(", ") || "unbekannt"}.
+            Empfehlung hat reduzierte Aussagekraft (Conviction begrenzt).
+          </div>
+        )}
 
         {/* KPI row */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5">

@@ -682,6 +682,20 @@ class SupervisorOutput(BaseModel):
     upside_downside_pct: float
     currency: str
 
+    # ── Datenvollständigkeit ────────────────────────────────
+    analysis_incomplete: bool = Field(
+        default=False,
+        description=(
+            "True, wenn ein Kern-Agent (z.B. Fundamental) nach allen Retries "
+            "keinen validen Output geliefert hat. Wird deterministisch gesetzt, "
+            "nicht vom LLM."
+        )
+    )
+    missing_components: list[str] = Field(
+        default_factory=list,
+        description="Namen der Agenten/Komponenten, deren Output fehlt oder fehlerhaft ist."
+    )
+
     # ── Executive Summary (laientauglich, kein Fachjargon) ────
     executive_summary: str = Field(
         default="",

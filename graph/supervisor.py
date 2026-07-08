@@ -109,9 +109,31 @@ def _extract(output, key, default=None):
     return getattr(output, key, default)
 
 
+def _fundamental_failed(fundamental_output) -> bool:
+    """True wenn der Fundamental-Agent nach allen Retries keinen validen Output lieferte."""
+    if not fundamental_output:
+        return True
+    if _extract(fundamental_output, "error"):
+        return True
+    fv = _extract(fundamental_output, "fair_value_estimate")
+    return not fv or fv in ("n/v", "-", "N/A", None)
+
+
 def _build_quality_checks(fundamental_output, news_output, risk_output) -> list[dict]:
     """Pre-flight consistency checks passed to the supervisor as context."""
     checks = []
+
+    # 0. Fundamental-Agent hat überhaupt einen validen Output geliefert
+    # (harter Fail, nicht nur eine Warnung — sonst könnte ein komplett
+    # gescheiterter Fundamental-Agent unbemerkt in den Score einfliessen)
+    fund_error = _extract(fundamental_output, "error")
+    checks.append({
+        "check": "Fundamental-Agent hat validen Output geliefert",
+        "result": "fehlgeschlagen" if _fundamental_failed(fundamental_output) else "bestanden",
+        "comment": f"Fehler: {fund_error}" if fund_error else (
+            "Output fehlt oder unvollständig" if _fundamental_failed(fundamental_output) else "OK"
+        ),
+    })
 
     # 1. Fair value present
     fv = _extract(fundamental_output, "fair_value_estimate")
@@ -847,6 +869,27 @@ Gib das Ergebnis als JSON zurück."""),
                     + f" │ [Override] Price Target deterministisch auf {_target:.2f} gesetzt "
                     f"({_label}; LLM-Wert {_old_pt} verworfen, da dcf_applicable=False)."
                 )
+
+    # ── Harte Degradation bei gescheitertem Fundamental-Agent ───────────────
+    # Kein "stilles" Memo mit falscher Sicherheit: Flag setzen + Conviction
+    # deterministisch auf "niedrig" begrenzen, unabhängig davon was der LLM
+    # dazu geschrieben hat.
+    if isinstance(result, dict):
+        if _fundamental_failed(fundamental_output):
+            missing = list(result.get("missing_components") or [])
+            if "fundamental" not in missing:
+                missing.append("fundamental")
+            result["missing_components"]  = missing
+            result["analysis_incomplete"] = True
+            result["conviction_level"]    = "niedrig"
+            result["final_reasoning"] = (
+                result.get("final_reasoning", "")
+                + " │ [ANALYSE UNVOLLSTÄNDIG] Fundamentalanalyse nach allen Retries "
+                "fehlgeschlagen — Conviction auf 'niedrig' begrenzt."
+            )
+        else:
+            result.setdefault("analysis_incomplete", False)
+            result.setdefault("missing_components", [])
 
     return result
 

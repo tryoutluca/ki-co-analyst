@@ -21,6 +21,9 @@ class AnalysisState(TypedDict):
     news_retry_count:         int        # max 2
     retry_reason:             str
 
+    # ── IR-RAG Cache (teure Extraktion nur einmal pro Analyse-Lauf) ──
+    ir_analysis_cache:        Optional[dict]
+
     # ── Qualität ─────────────────────────────────────────────
     quality_checks:      Optional[list]
     data_consistency_score: Optional[int]

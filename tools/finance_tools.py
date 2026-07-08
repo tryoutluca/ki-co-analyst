@@ -674,8 +674,8 @@ def _yf_result_to_db_rows(ticker: str, yf_result: dict) -> list[dict]:
             "fiscal_year":        fiscal_year,
             "period_type":        "annual",
             "quarter":            None,
-            "period_end":         f"{fiscal_year}-12-31",
-            "currency":           "USD",
+            "period_end":         d.get("period_end"),
+            "currency":           d.get("currency") or "",
             "source":             "yfinance",
             "quality_score":      2,
             "revenue_bn":         d.get("revenue_bn"),
@@ -720,18 +720,22 @@ def get_historical_financials(ticker: str) -> dict:
     """
     import pandas as pd
     from tools.financial_db import (
-        init_db, has_sufficient_data, get_annual_history, upsert_financials,
+        init_db, has_sufficient_data, is_cache_fresh, get_annual_history, upsert_financials,
     )
 
     print(f"      Hole historische Finanzdaten für {ticker}...")
     init_db()
 
-    # ── 1. DB-Cache prüfen ────────────────────────────────────────────────────
-    if has_sufficient_data(ticker, min_annual_years=4):
+    # ── 1. DB-Cache prüfen (Menge + Aktualität) ──────────────────────────────
+    if is_cache_fresh(ticker, min_annual_years=4):
         rows = get_annual_history(ticker, n_years=10)
-        print(f"      ✅ DB-Cache: {len(rows)} Jahre für {ticker}")
+        print(f"      ✅ Cache-Hit (frisch): {len(rows)} Jahre für {ticker}")
         return _db_rows_to_hist_dict(rows)
 
+    if has_sufficient_data(ticker, min_annual_years=4):
+        print(f"      ♻️ Cache-Refresh (stale): DB-Daten für {ticker} veraltet — hole aktuelle Daten...")
+    else:
+        print(f"      ⬇️ Voll-Fetch: DB-Cache für {ticker} unzureichend...")
 
     try:
         stock = yf.Ticker(ticker)
@@ -748,14 +752,32 @@ def get_historical_financials(ticker: str) -> dict:
         bs  = safe_df("balance_sheet")
         cf  = safe_df("cashflow")
 
+        try:
+            info = stock.info or {}
+            currency = info.get("financialCurrency") or info.get("currency") or ""
+        except Exception as e:
+            print(f"        ⚠ currency: {e}")
+            currency = ""
+
         all_years: set = set()
+        # Real period-end dates per fiscal year, taken from the statement column
+        # headers (yfinance columns ARE the actual period-end timestamps) —
+        # never fabricated. First matching df wins (inc > bs > cf).
+        year_to_period_end: dict[str, str | None] = {}
         for df in [inc, bs, cf]:
             if not df.empty:
                 for col in df.columns:
                     try:
                         yr = col.year if hasattr(col, "year") else int(str(col)[:4])
                         if 2015 <= yr <= 2030:
-                            all_years.add(str(yr))
+                            year_str = str(yr)
+                            all_years.add(year_str)
+                            if year_str not in year_to_period_end:
+                                if hasattr(col, "strftime"):
+                                    year_to_period_end[year_str] = col.strftime("%Y-%m-%d")
+                                else:
+                                    s = str(col)[:10]
+                                    year_to_period_end[year_str] = s if len(s) == 10 else None
                     except Exception:
                         pass
 
@@ -947,6 +969,8 @@ def get_historical_financials(ticker: str) -> dict:
             result[year] = {
                 "year":               year,
                 "source":             "yfinance",
+                "currency":           currency,
+                "period_end":         year_to_period_end.get(year),
                 "revenue_bn":         revenue,
                 "gross_profit_bn":    gross_profit,
                 "ebitda_bn":          ebitda,
@@ -1022,8 +1046,8 @@ def get_historical_financials(ticker: str) -> dict:
         # ── 4. DB nochmals lesen → bis zu 10 Jahre ───────────────────────────
         from tools.financial_db import get_annual_history
         db_rows = get_annual_history(ticker, n_years=10)
-        if len(db_rows) > len(result):
-            print(f"      ✅ DB erweitert auf {len(db_rows)} Jahre (inkl. XBRL)")
+        if len(db_rows) >= len(result):
+            print(f"      ✅ DB (gemergt, priorisiert): {len(db_rows)} Jahre für {ticker}")
             return _db_rows_to_hist_dict(db_rows)
 
         return result

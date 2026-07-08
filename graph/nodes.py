@@ -282,6 +282,7 @@ def fundamental_node(state: AnalysisState) -> dict:
             ticker,
             structural_context=state.get("structural_context"),
             business_model_context=state.get("business_model_classification"),
+            ir_analysis_cache=state.get("ir_analysis_cache"),
         )
 
         if hasattr(output, "model_dump"):
@@ -302,6 +303,7 @@ def fundamental_node(state: AnalysisState) -> dict:
         return {
             "fundamental_output": output,
             "agent_confidence_scores": agent_conf,
+            "ir_analysis_cache": state.get("ir_analysis_cache") or output.get("_ir_analysis"),
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -309,7 +311,7 @@ def fundamental_node(state: AnalysisState) -> dict:
         log_entry = f"[fundamental] ❌ Fehler: {str(e)}"
         print(f"      {log_entry}")
         return {
-            "fundamental_output": {"error": str(e)},
+            "fundamental_output": {"error": str(e), "error_type": type(e).__name__},
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -472,7 +474,7 @@ def anomaly_check_node(state: AnalysisState) -> dict:
     print(f"\n[anomaly_check] Prüfe auf strukturelle Veränderungen...")
 
     try:
-        hist_data = get_historical_financials.invoke(ticker)
+        hist_data = get_historical_financials(ticker)
         flags = detect_structural_anomalies(hist_data)
 
         for f in flags:
@@ -711,6 +713,7 @@ def fundamental_critique_node(state: AnalysisState) -> dict:
             supervisor_critique=critique,
             structural_context=state.get("structural_context"),
             business_model_context=state.get("business_model_classification"),
+            ir_analysis_cache=state.get("ir_analysis_cache"),
         )
         if hasattr(output, "model_dump"):
             output = output.model_dump()
@@ -729,12 +732,13 @@ def fundamental_critique_node(state: AnalysisState) -> dict:
         return {
             "fundamental_output": output,
             "agent_confidence_scores": agent_conf,
+            "ir_analysis_cache": state.get("ir_analysis_cache") or output.get("_ir_analysis"),
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:
         log_entry = f"[fundamental_critique] ❌ {e}"
         return {
-            "fundamental_output": state.get("fundamental_output") or {"error": str(e)},
+            "fundamental_output": state.get("fundamental_output") or {"error": str(e), "error_type": type(e).__name__},
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 

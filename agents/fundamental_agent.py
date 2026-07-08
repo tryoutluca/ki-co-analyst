@@ -123,10 +123,15 @@ def run_fundamental_agent(
     supervisor_critique: str | None = None,
     structural_context: str | None  = None,
     business_model_context: dict | None = None,
+    ir_analysis_cache: dict | None = None,
 ) -> FundamentalAgentOutput:
     """
     Orchestriert 4 parallele Sub-Agents und synthetisiert deren Outputs.
-    Signatur identisch zur Vorgänger-Version.
+    Signatur identisch zur Vorgänger-Version (ir_analysis_cache ist optional).
+
+    ir_analysis_cache: falls übergeben (z.B. aus dem Analyse-State bei Retry/
+    Critique-Runden), wird die teure IR-RAG-Extraktion übersprungen und dieser
+    Wert direkt verwendet.
     """
 
     # ── 1. Daten einmalig laden ───────────────────────────────────────────────
@@ -141,8 +146,12 @@ def run_fundamental_agent(
     print(f"      Hole historische Multiples...")
     historical_multiples = get_historical_multiples.invoke(ticker)
 
-    print(f"      Analysiere IR-Dokumente (RAG)...")
-    ir_analysis = get_ir_analysis.invoke(ticker)
+    if ir_analysis_cache is not None:
+        print(f"      IR-Dokumente: Cache-Hit (State) — Extraktion übersprungen")
+        ir_analysis = ir_analysis_cache
+    else:
+        print(f"      Analysiere IR-Dokumente (RAG)...")
+        ir_analysis = get_ir_analysis.invoke(ticker)
 
     # ── Multi-year IR data (new) ──────────────────────────────────────────────
     ir_annual_years      = (ir_analysis or {}).get("ir_annual_years", [])
@@ -192,7 +201,7 @@ def run_fundamental_agent(
                     "period_end":         f"{yr.get('fiscal_year')}-12-31",
                     "currency":           yr.get("revenue_currency", ""),
                     "source":             "ir_pdf",
-                    "quality_score":      2,
+                    "quality_score":      2.5,
                     "revenue_bn":         yr.get("revenue_bn"),
                     "ebitda_bn":          yr.get("ebitda_bn"),
                     "ebitda_margin_pct":  yr.get("ebitda_margin_pct"),
@@ -227,7 +236,7 @@ def run_fundamental_agent(
                     "period_end":         p.get("period_end"),
                     "currency":           p.get("revenue_currency", ""),
                     "source":             "ir_pdf",
-                    "quality_score":      2,
+                    "quality_score":      2.5,
                     "revenue_bn":         p.get("revenue_bn"),
                     "ebitda_bn":          p.get("ebitda_bn"),
                     "ebitda_margin_pct":  p.get("ebitda_margin_pct"),
@@ -246,7 +255,7 @@ def run_fundamental_agent(
             print(f"      ⚠ IR-Quartal→DB Fehler: {db_err}")
 
     print(f"      Hole historische Finanzdaten...")
-    hist_data = get_historical_financials.invoke(ticker)
+    hist_data = get_historical_financials(ticker)
 
     sector = stock_info.get("sector", "N/A")
 
@@ -416,6 +425,8 @@ def run_fundamental_agent(
         # IR multi-year signals — used by nodes.py for quarterly routing
         result["ir_annual_years"]     = ir_annual_years
         result["ir_quarterly_signal"] = _ir_qs
+        # Roh-IR-Analyse für State-Cache (Retry/Critique überspringen Extraktion)
+        result["_ir_analysis"] = ir_analysis
 
     return result
 

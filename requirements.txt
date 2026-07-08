@@ -7,6 +7,10 @@ python-multipart>=0.0.9
 python-jose[cryptography]>=3.3.0
 passlib>=1.7.4
 
+# Datenbank (Postgres via DATABASE_URL, SQLite-Fallback für lokale Entwicklung)
+psycopg[binary]>=3.1.0
+psycopg_pool>=3.2.0
+
 # Core
 streamlit>=1.32.0
 pandas>=2.0.0

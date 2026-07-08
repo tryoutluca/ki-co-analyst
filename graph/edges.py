@@ -1,17 +1,27 @@
 from graph.state import AnalysisState
 
+# Deterministische Fehlertypen: verschwinden bei Retry nicht (Bug im Code/Daten),
+# also kein Retry — sofort mit Warnung weiter, statt teure IR-RAG-Extraktion
+# und LLM-Aufrufe für einen garantiert wiederkehrenden Fehler zu wiederholen.
+_DETERMINISTIC_ERROR_TYPES = {"AttributeError", "TypeError", "KeyError"}
+
 
 def route_after_fundamental(state: AnalysisState) -> str:
     """
     Conditional Edge nach Fundamental-Knoten.
     - "proceed_news":              Output valide
     - "retry_fundamental":         Output unvollständig, Retries verfügbar
-    - "proceed_news_with_warning": Max Retries erreicht
+    - "proceed_news_with_warning": Max Retries erreicht (oder deterministischer Fehler)
     """
     f_out = state.get("fundamental_output") or {}
     retry = state.get("fundamental_retry_count", 0)
 
     if f_out.get("error"):
+        error_type = f_out.get("error_type")
+        if error_type in _DETERMINISTIC_ERROR_TYPES:
+            print(f"      [edge] Deterministischer Fehler ({error_type}) — "
+                  f"kein Retry, proceed mit Warnung")
+            return "proceed_news_with_warning"
         if retry < 2:
             print(f"      [edge] Retry fundamental ({retry+1}/2): Fehler")
             return "retry_fundamental"

@@ -344,6 +344,50 @@ ki-portfolio-manager/
 
 ---
 
+## Deployment (Railway) & Datenbank
+
+### Benötigte Env-Vars
+
+| Variable | Zweck | Pflicht |
+|---|---|---|
+| `DATABASE_URL` | Railway-Managed-Postgres-Connection-String. Gesetzt → `tools/financial_db.py` nutzt Postgres (psycopg + Connection-Pool). Fehlt → lokaler SQLite-Fallback (`DATA_DIR/financials.db`). | Empfohlen in Prod |
+| `DATA_DIR` | Pfad zum Railway-Volume (z.B. `/app/data`) für Historie/Credentials und den SQLite-Fallback. Ohne Volume gehen Daten bei jedem Deploy verloren. | Ja |
+| `ADMIN_PASSWORD` | Admin-Account (`admin`) wird bei jedem Start neu daraus gehasht. Nötig für Login und für alle `/db/*`-Endpoints (`require_admin`). | Ja |
+| `JWT_SECRET` | Signaturschlüssel für Login-Tokens. Ohne Setzen wird ein unsicherer Dev-Default verwendet. | Ja (Prod) |
+| `CORS_ORIGINS` | Komma-separierte erlaubte Frontend-URLs. | Ja |
+| `DB_STALENESS_DAYS` | Cache-Freshness-Schwelle für `get_historical_financials` (Default 30). | Nein |
+| API-Keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`, `TAVILY_API_KEY`) | Von den jeweiligen Agenten/Tools benötigt. | Ja |
+
+### Postgres-Migration (einmalig, von SQLite)
+
+```bash
+DATABASE_URL=postgresql://... python scripts/migrate_sqlite_to_postgres.py
+```
+
+Liest die lokale/Volume-SQLite (`financials.db`) und schreibt alle Zeilen per Upsert
+(gleiche Quellen-Priorität wie im Live-Betrieb: sec_xbrl > ir_pdf > yfinance) nach
+Postgres. Idempotent — kann gefahrlos mehrfach laufen.
+
+### Externer Zugriff (DBeaver / TablePlus)
+
+Railway stellt für Managed-Postgres eine öffentliche Connection-URL bereit
+(Projekt → Postgres-Service → Tab **"Connect"** → "Public Network"). Damit in
+DBeaver/TablePlus verbinden:
+
+1. Neue PostgreSQL-Verbindung anlegen.
+2. Host/Port/Database/User/Passwort aus der öffentlichen Railway-URL übernehmen
+   (Format `postgresql://user:pass@host:port/dbname` — Werte 1:1 in die
+   entsprechenden Felder eintragen).
+3. SSL: "Require" aktivieren (Railway verlangt TLS für die öffentliche Verbindung).
+4. Tabelle `financial_data` sowie die View `qa_report` (Datenqualitäts-Übersicht
+   pro Ticker: Jahre, ohne Währung, ohne Umsatz, letztes Update) sind direkt
+   abfragbar.
+
+**Achtung:** Die öffentliche Postgres-URL ist ein Credential — nicht in Tickets,
+Chats oder Screenshots teilen.
+
+---
+
 ## Disclaimer
 
 Dieses System wurde im Rahmen einer Bachelor Thesis an der Berner Fachhochschule entwickelt und dient **ausschliesslich zu Forschungs- und Demonstrationszwecken**. Es stellt **keine Anlageberatung** dar. Die generierten Analysen und Empfehlungen ersetzen nicht die professionelle Beurteilung eines zugelassenen Finanzberaters. Investitionen in Wertpapiere sind mit Risiken verbunden.
