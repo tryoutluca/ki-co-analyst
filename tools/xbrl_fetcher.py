@@ -23,16 +23,19 @@ _HEADERS = {
 }
 
 # US-GAAP concept → DB field name
-# Multiple candidates per field (tried in order, first non-empty wins)
+# Mehrere Tag-Kandidaten pro Kennzahl (Firmen wechseln das Tag über die Jahre —
+# Auflösung erfolgt PRO FISKALPERIODE in _extract_field_by_year(), nicht global:
+# ein Ticker kann 2019 Tag A und 2024 Tag B nutzen, beide werden gemerged).
+# gross_profit_bn und total_assets_bn bleiben bewusst einzeltaggig — dafür gibt
+# es kein gebräuchliches alternatives US-GAAP-Tag.
 _ANNUAL_CONCEPT_MAP: dict[str, list[str]] = {
     "revenue_bn": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
         "SalesRevenueGoodsNet",
-        "RevenueFromContractWithCustomerIncludingAssessedTax",
         "NetSales",
-        "SalesRevenueNet",
         "RevenuesNetOfInterestExpense",
     ],
     "gross_profit_bn": ["GrossProfit"],
@@ -42,8 +45,8 @@ _ANNUAL_CONCEPT_MAP: dict[str, list[str]] = {
     ],
     "net_income_bn": [
         "NetIncomeLoss",
-        "NetIncomeLossAvailableToCommonStockholdersBasic",
         "ProfitLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
     ],
     "interest_bn": [
         "InterestExpense",
@@ -51,13 +54,16 @@ _ANNUAL_CONCEPT_MAP: dict[str, list[str]] = {
     ],
     "operating_cf_bn": [
         "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
     ],
     "capex_bn": [
         "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
         "PaymentsForCapitalImprovements",
     ],
     "da_bn": [
         "DepreciationDepletionAndAmortization",
+        "DepreciationAmortizationAndAccretionNet",
         "DepreciationAndAmortization",
     ],
     "total_debt_bn": [
@@ -144,6 +150,36 @@ def _extract_concept(facts: dict, concept: str,
     return {yr: v for yr, (v, _) in by_year.items()}
 
 
+def _extract_field_by_year(
+    facts: dict, db_field: str, candidates: list[str], form_filter: str | None = "10-K",
+) -> dict[int, float]:
+    """
+    Löst eine Kennzahl über mehrere US-GAAP-Tag-Kandidaten auf.
+
+    Auflösung erfolgt PRO FISKALJAHR, nicht global: für jedes Jahr wird das
+    erste Tag der Liste verwendet, das für DIESES Jahr einen Wert liefert.
+    Ein früherer Kandidat, der nur einen Teil der Jahre abdeckt, blockiert damit
+    nicht mehr den Fallback auf einen späteren Kandidaten für die übrigen Jahre
+    (Bug: NVDA revenue_bn war für 2024-2026 NULL, weil das erste Tag brach
+    ab, sobald es IRGENDEIN Jahr geliefert hatte).
+    """
+    merged: dict[int, float] = {}
+    tag_used: dict[int, str] = {}
+    for concept in candidates:
+        values = _extract_concept(facts, concept, form_filter=form_filter)
+        for yr, raw_val in values.items():
+            if yr not in merged:
+                merged[yr] = _scale_bn(raw_val, concept)
+                tag_used[yr] = concept
+
+    primary = candidates[0]
+    for yr in sorted(tag_used):
+        if tag_used[yr] != primary:
+            print(f"        [xbrl-debug] {db_field} {yr}: Fallback-Tag "
+                  f"'{tag_used[yr]}' (statt '{primary}')")
+    return merged
+
+
 def _scale_bn(val: float, concept: str) -> float:
     """Convert raw SEC value to billions. EPS/DPS/shares handled separately."""
     eps_concepts = {"EarningsPerShareBasic", "EarningsPerShareDiluted",
@@ -173,15 +209,11 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
     year_data: dict[int, dict] = {}
 
     for db_field, candidates in _ANNUAL_CONCEPT_MAP.items():
-        for concept in candidates:
-            values = _extract_concept(facts, concept, form_filter="10-K")
-            if values:
-                for yr, raw_val in values.items():
-                    if yr not in year_data:
-                        year_data[yr] = {}
-                    if db_field not in year_data[yr]:
-                        year_data[yr][db_field] = _scale_bn(raw_val, concept)
-                break  # first candidate with data wins
+        values_by_year = _extract_field_by_year(facts, db_field, candidates, form_filter="10-K")
+        for yr, scaled_val in values_by_year.items():
+            if yr not in year_data:
+                year_data[yr] = {}
+            year_data[yr][db_field] = scaled_val
 
     # Sort years descending, cap at max_years
     current_year = datetime.now().year
@@ -242,10 +274,17 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
     # key: (fiscal_year, quarter_label) e.g. (2024, "Q2")
     qdata: dict[tuple[int, str], dict] = {}
 
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+
     for db_field, candidates in _Q_CONCEPTS.items():
+        # Pro Kennzahl PRO PERIODE auflösen (nicht global): ein Tag, das nur
+        # einen Teil der Perioden abdeckt, darf den Fallback für die übrigen
+        # Perioden nicht mehr blockieren. locked merkt sich, welche Perioden
+        # bereits durch ein höher priorisiertes Tag gefüllt wurden.
+        locked: set[tuple[int, str]] = set()
         for concept in candidates:
-            gaap = facts.get("facts", {}).get("us-gaap", {})
             entries = gaap.get(concept, {}).get("units", {}).get("USD", [])
+            touched_by_this_concept: set[tuple[int, str]] = set()
             for entry in entries:
                 if not entry.get("form", "").startswith("10-Q"):
                     continue
@@ -267,14 +306,20 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
                      7: "Q3", 8: "Q3", 9: "Q3",
                      10: "Q4", 11: "Q4", 12: "Q4"}.get(mo, "Q?")
                 key = (yr, q)
-                if key not in qdata:
-                    qdata[key] = {"_filed": filed}
-                if db_field not in qdata[key] or filed > qdata[key].get("_filed", ""):
+                if key in locked:
+                    continue
+                qdata.setdefault(key, {})
+                filed_marker = f"_{db_field}_filed"
+                prev_filed = qdata[key].get(filed_marker)
+                if prev_filed is None or filed > prev_filed:
                     qdata[key][db_field] = _scale_bn(float(val), concept)
-                    qdata[key]["_filed"] = filed
+                    qdata[key][filed_marker] = filed
                     qdata[key]["_period_end"] = end
-            if any(db_field in v for v in qdata.values()):
-                break
+                    touched_by_this_concept.add(key)
+                    if concept != candidates[0]:
+                        print(f"        [xbrl-debug] {db_field} {yr} {q}: Fallback-Tag "
+                              f"'{concept}' (statt '{candidates[0]}')")
+            locked |= touched_by_this_concept
 
     sorted_keys = sorted(qdata.keys(), key=lambda k: (k[0], k[1]), reverse=True)[:max_quarters]
 
