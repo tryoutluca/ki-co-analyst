@@ -197,15 +197,21 @@ def run_fundamental_agent(
             for yr in ir_annual_years:
                 if not yr.get("fiscal_year"):
                     continue
-                period_end = f"{yr.get('fiscal_year')}-12-31"
-                # Zentrale Fiskal-Label-Zuordnung (7.3) — dieselbe Funktion wie
-                # im XBRL-Pfad, damit beide Quellen für dieselbe Periode
-                # dasselbe Label vergeben. Für annual aktuell ein No-op
-                # (period_end hier noch hartkodiert, siehe 7.4).
-                fiscal_year, _ = assign_fiscal_label(ticker, period_end, "annual")
+                # Echtes Periodenende aus der IR-Extraktion (7.4) — "not found"
+                # bzw. fehlend wird zu None, NIE zu einem konstruierten Datum
+                # (kein f"{fiscal_year}-12-31"-Hardcode mehr).
+                raw_period_end = yr.get("period_end")
+                period_end = raw_period_end if raw_period_end and raw_period_end != "not found" else None
+                fiscal_year = yr.get("fiscal_year")
+                if period_end:
+                    # Zentrale Fiskal-Label-Zuordnung (7.3) — dieselbe Funktion
+                    # wie im XBRL-Pfad, damit beide Quellen für dieselbe
+                    # Periode dasselbe Label vergeben.
+                    assigned_year, _ = assign_fiscal_label(ticker, period_end, "annual")
+                    fiscal_year = assigned_year if assigned_year is not None else fiscal_year
                 ir_rows.append({
                     "ticker":             ticker,
-                    "fiscal_year":        fiscal_year or yr.get("fiscal_year"),
+                    "fiscal_year":        fiscal_year,
                     "period_type":        "annual",
                     "quarter":            None,
                     "period_end":         period_end,

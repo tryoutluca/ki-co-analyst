@@ -188,6 +188,40 @@ def _extract_field_by_year(
     return merged
 
 
+def _annual_end_dates_by_year(facts: dict) -> dict[int, str]:
+    """
+    Fallback-Landkarte fiscal_year -> echtes end-Datum, direkt aus den 10-K-
+    Facts gescannt (unabhängig von fy/fp). Greift, wenn die fy/fp-basierte
+    Fiskalkalender-Landkarte (_build_fiscal_calendar) für ein Jahr keinen
+    Treffer hat (z.B. ältere Filings ohne fy/fp) — das echte end-Datum ist auf
+    dem Fact trotzdem vorhanden und soll genutzt werden statt None.
+    """
+    result: dict[int, tuple[str, str]] = {}  # yr -> (end, filed); jüngste filed gewinnt
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+    for concept_data in gaap.values():
+        for unit_entries in concept_data.get("units", {}).values():
+            for entry in unit_entries:
+                form = entry.get("form", "")
+                if not (form.startswith("10-K") or form.startswith("10K")):
+                    continue
+                end = entry.get("end")
+                if not end:
+                    continue
+                filed = entry.get("filed", "")
+                fy_field = entry.get("fy")
+                if isinstance(fy_field, int):
+                    yr = fy_field
+                else:
+                    try:
+                        yr = int(end[:4])
+                    except ValueError:
+                        continue
+                existing = result.get(yr)
+                if existing is None or filed > existing[1]:
+                    result[yr] = (end, filed)
+    return {yr: end for yr, (end, _) in result.items()}
+
+
 def _scale_bn(val: float, concept: str) -> float:
     """Convert raw SEC value to billions. EPS/DPS/shares handled separately."""
     eps_concepts = {"EarningsPerShareBasic", "EarningsPerShareDiluted",
@@ -223,6 +257,16 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
                 year_data[yr] = {}
             year_data[yr][db_field] = scaled_val
 
+    # Echte Periodenenden pro Fiskaljahr (fp == "FY") aus demselben Fiskal-
+    # kalender wie assign_fiscal_label() — kein f"{yr}-12-31"-Hardcode mehr,
+    # der für Nicht-Kalenderjahr-GJ (z.B. NVDA, Ende Januar) falsch wäre.
+    # Fallback auf _annual_end_dates_by_year() wenn fy/fp auf den Facts fehlen
+    # (ältere Filings) — auch dann ist das echte end-Datum vorhanden, nur ohne
+    # fy/fp-Metadaten, und soll trotzdem verwendet werden statt NULL.
+    calendar = _get_fiscal_calendar(cik, facts)
+    period_end_by_year = {fy: pe for pe, (fy, q) in calendar.items() if q is None}
+    fallback_end_dates = _annual_end_dates_by_year(facts)
+
     # Sort years descending, cap at max_years
     current_year = datetime.now().year
     sorted_years = sorted(
@@ -244,15 +288,14 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
         if ocf is not None and capex is not None and "fcf_bn" not in d:
             d["fcf_bn"] = round(ocf - abs(capex), 4)
 
-        period_end = f"{yr}-12-31"
-        # Konsistenz-Pass über die zentrale Fiskal-Label-Funktion (7.3) — auch
-        # der IR-PDF-Pfad nutzt sie, damit beide Quellen für dieselbe Periode
-        # dasselbe Label vergeben. Für annual ist das aktuell ein No-op
-        # (period_end ist noch hartkodiert, siehe 7.4), aber die Zeile läuft
-        # bewusst schon durch dieselbe Funktion statt eigener Sonderlogik.
-        assigned_year, _ = assign_fiscal_label(ticker, period_end, "annual", cik=cik, facts=facts)
-        if assigned_year is not None:
-            yr = assigned_year
+        # Echtes Periodenende, sonst None (nie konstruiert) — siehe 7.4.
+        period_end = period_end_by_year.get(yr) or fallback_end_dates.get(yr)
+        # Konsistenz-Pass über die zentrale Fiskal-Label-Funktion (7.3), damit
+        # auch der IR-PDF-Pfad für dieselbe Periode dasselbe Label vergibt.
+        if period_end:
+            assigned_year, _ = assign_fiscal_label(ticker, period_end, "annual", cik=cik, facts=facts)
+            if assigned_year is not None:
+                yr = assigned_year
 
         rows.append({
             "ticker":       ticker,
@@ -355,6 +398,18 @@ def _build_fiscal_calendar(cik: str, facts: dict | None = None) -> dict[str, tup
     return calendar
 
 
+def _get_fiscal_calendar(cik: str | None, facts: dict | None) -> dict[str, tuple[int, str | None]]:
+    """Cache-Lookup-oder-Build für die period_end -> (fiscal_year, quarter) Landkarte."""
+    if not cik and not facts:
+        return {}
+    cache_key = cik or f"_facts_{id(facts)}"
+    calendar = _FISCAL_CALENDAR_CACHE.get(cache_key)
+    if calendar is None:
+        calendar = _build_fiscal_calendar(cik, facts=facts)
+        _FISCAL_CALENDAR_CACHE[cache_key] = calendar
+    return calendar
+
+
 def assign_fiscal_label(
     ticker: str,
     period_end: str,
@@ -376,22 +431,21 @@ def assign_fiscal_label(
     Fallback (kein CIK/keine SEC-Daten, z.B. Nicht-US-Ticker, oder period_end
     kommt in der SEC-Landkarte nicht exakt vor): Kalenderjahr/-monat von
     period_end selbst — schwächer, aber die einzige verfügbare Information
-    ausserhalb der SEC-Welt.
+    ausserhalb der SEC-Welt. Ohne period_end (None) ist keine Ableitung
+    möglich — gibt (None, None) zurück.
     """
+    if not period_end:
+        return (None, None)
+
     if cik is None and facts is None:
         from tools.ir_rag_tool import _sec_is_us_ticker, get_sec_cik
         if _sec_is_us_ticker(ticker):
             cik = get_sec_cik(ticker)
 
-    if cik or facts:
-        cache_key = cik or f"_facts_{id(facts)}"
-        calendar = _FISCAL_CALENDAR_CACHE.get(cache_key)
-        if calendar is None:
-            calendar = _build_fiscal_calendar(cik, facts=facts)
-            _FISCAL_CALENDAR_CACHE[cache_key] = calendar
-        hit = calendar.get(period_end)
-        if hit is not None:
-            return hit
+    calendar = _get_fiscal_calendar(cik, facts)
+    hit = calendar.get(period_end)
+    if hit is not None:
+        return hit
 
     # Fallback: aus dem Kalenderdatum selbst ableiten.
     try:
@@ -510,6 +564,10 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
     # SEC meldet Q4 für Flussgrössen praktisch nie diskret (steckt im 10-K statt
     # in einem 10-Q) — daher hier ableiten, ausser ein diskreter Q4-Fact wurde
     # oben doch schon gefunden (dann Vorrang für die echte Meldung).
+    # Q4 endet exakt am Fiskaljahresende — dasselbe echte Datum wie im Annual-
+    # Pfad (7.4), nie ein konstruiertes.
+    calendar = _get_fiscal_calendar(cik, facts)
+    annual_period_end_by_year = {fy: pe for pe, (fy, q) in calendar.items() if q is None}
     for db_field in _FLOW_FIELDS:
         if db_field not in _Q_CONCEPTS:
             continue
@@ -524,6 +582,7 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
             derived = round(annual_val - ytd_entry["val"], 4)
             qdata.setdefault(q4_key, {})
             qdata[q4_key][db_field] = derived
+            qdata[q4_key].setdefault("_period_end", annual_period_end_by_year.get(fy))
             print(f"        [xbrl-debug] {db_field} {fy} Q4: abgeleitet "
                   f"(Jahr {annual_val} minus 9M-YTD {ytd_entry['val']}) = {derived}")
 
@@ -542,7 +601,8 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
             "fiscal_year":  yr,
             "period_type":  "quarterly",
             "quarter":      q,
-            "period_end":   qdata[(yr, q)].get("_period_end", f"{yr}-{q[-1]}"),
+            # Echtes Periodenende, sonst None (nie konstruiert) — siehe 7.4.
+            "period_end":   qdata[(yr, q)].get("_period_end"),
             "currency":     "USD",
             "source":       "sec_xbrl",
             "quality_score": 3,

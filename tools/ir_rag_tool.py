@@ -1634,6 +1634,9 @@ Antworte NUR mit diesem JSON:
   "years": [
     {{
       "fiscal_year": <int z.B. 2024>,
+      "period_end": "<echtes Ende des Geschäftsjahres als YYYY-MM-DD, z.B. bei \
+vom Kalenderjahr abweichendem GJ (z.B. 'Ende Januar'/'Ende September' im Bericht) \
+- or 'not found' wenn nicht im Dokument angegeben>",
       "revenue_bn": <float or "not found">,
       "revenue_currency": "<CHF/USD/EUR>",
       "ebitda_bn": <float or "not found">,
