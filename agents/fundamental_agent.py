@@ -191,14 +191,24 @@ def run_fundamental_agent(
               f"({', '.join(str(y.get('fiscal_year','?')) for y in ir_annual_years)})")
         try:
             from tools.financial_db import init_db, upsert_financials
+            from tools.xbrl_fetcher import assign_fiscal_label
             init_db()
-            ir_rows = [
-                {
+            ir_rows = []
+            for yr in ir_annual_years:
+                if not yr.get("fiscal_year"):
+                    continue
+                period_end = f"{yr.get('fiscal_year')}-12-31"
+                # Zentrale Fiskal-Label-Zuordnung (7.3) — dieselbe Funktion wie
+                # im XBRL-Pfad, damit beide Quellen für dieselbe Periode
+                # dasselbe Label vergeben. Für annual aktuell ein No-op
+                # (period_end hier noch hartkodiert, siehe 7.4).
+                fiscal_year, _ = assign_fiscal_label(ticker, period_end, "annual")
+                ir_rows.append({
                     "ticker":             ticker,
-                    "fiscal_year":        yr.get("fiscal_year"),
+                    "fiscal_year":        fiscal_year or yr.get("fiscal_year"),
                     "period_type":        "annual",
                     "quarter":            None,
-                    "period_end":         f"{yr.get('fiscal_year')}-12-31",
+                    "period_end":         period_end,
                     "currency":           yr.get("revenue_currency", ""),
                     "source":             "ir_pdf",
                     "quality_score":      2.5,
@@ -212,10 +222,7 @@ def run_fundamental_agent(
                     "net_debt_bn":        yr.get("net_debt_bn"),
                     "eps_adj":            yr.get("adjusted_eps"),
                     "dps":                yr.get("dividend_per_share"),
-                }
-                for yr in ir_annual_years
-                if yr.get("fiscal_year")
-            ]
+                })
             saved = upsert_financials(ir_rows)
             print(f"      DB: {saved} IR-Jahreszeilen gespeichert")
         except Exception as db_err:
@@ -226,14 +233,30 @@ def run_fundamental_agent(
               f"({', '.join(str(p.get('quarter', '?')) for p in ir_quarterly_periods)})")
         try:
             from tools.financial_db import init_db, upsert_financials
+            from tools.xbrl_fetcher import assign_fiscal_label
             init_db()
-            ir_q_rows = [
-                {
+            ir_q_rows = []
+            for p in ir_quarterly_periods:
+                if not (p.get("fiscal_year") and p.get("quarter")):
+                    continue
+                fiscal_year, quarter = p.get("fiscal_year"), p.get("quarter")
+                period_end = p.get("period_end")
+                if period_end:
+                    # Zentrale Fiskal-Label-Zuordnung (7.3): dieselbe Funktion
+                    # wie im XBRL-Pfad, damit ir_pdf und sec_xbrl für dieselbe
+                    # Berichtsperiode (identisches period_end) IMMER dasselbe
+                    # (fiscal_year, quarter)-Label vergeben — sonst greift die
+                    # Quellen-Priorität im Upsert nie (zwei Primary Keys für
+                    # dieselbe Periode).
+                    assigned_year, assigned_q = assign_fiscal_label(ticker, period_end, "quarterly")
+                    fiscal_year = assigned_year if assigned_year is not None else fiscal_year
+                    quarter     = assigned_q if assigned_q is not None else quarter
+                ir_q_rows.append({
                     "ticker":             ticker,
-                    "fiscal_year":        p.get("fiscal_year"),
+                    "fiscal_year":        fiscal_year,
                     "period_type":        "quarterly",
-                    "quarter":            p.get("quarter"),
-                    "period_end":         p.get("period_end"),
+                    "quarter":            quarter,
+                    "period_end":         period_end,
                     "currency":           p.get("revenue_currency", ""),
                     "source":             "ir_pdf",
                     "quality_score":      2.5,
@@ -245,10 +268,7 @@ def run_fundamental_agent(
                     "fcf_bn":             p.get("free_cashflow_bn"),
                     "net_debt_bn":        p.get("net_debt_bn"),
                     "eps_adj":            p.get("adjusted_eps"),
-                }
-                for p in ir_quarterly_periods
-                if p.get("fiscal_year") and p.get("quarter")
-            ]
+                })
             saved_q = upsert_financials(ir_q_rows)
             print(f"      DB: {saved_q} IR-Quartalszeilen gespeichert")
         except Exception as db_err:

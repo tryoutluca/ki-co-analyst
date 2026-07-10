@@ -53,6 +53,12 @@ _FINANCIAL_COLS = [
 
 _SOURCE_PRIORITY = {"sec_xbrl": 3, "ir_pdf": 2.5, "yfinance": 2}
 
+
+def source_priority(source: str | None) -> float:
+    """Öffentlicher Zugriff auf die Quellen-Priorität (sec_xbrl > ir_pdf > yfinance)."""
+    return _SOURCE_PRIORITY.get(source or "yfinance", 2)
+
+
 _CREATE_TABLE_SQLITE = """
 CREATE TABLE IF NOT EXISTS financial_data (
     ticker            TEXT    NOT NULL,
@@ -225,24 +231,45 @@ def _upsert_one(conn, row: dict) -> int:
     quarter     = _quarter_key(row.get("quarter"))
     source      = row.get("source", "yfinance")
     new_prio    = _SOURCE_PRIORITY.get(source, 2)
+    period_end  = row.get("period_end")
 
     if not ticker or not fiscal_year:
         return 0
 
     margins = _compute_margins(row)
 
+    # 1) Exakter Primary-Key-Match.
     cur = conn.execute(_sql(
-        "SELECT source, quality_score FROM financial_data "
+        "SELECT fiscal_year, quarter, source, quality_score FROM financial_data "
         f"WHERE ticker=? AND fiscal_year=? AND period_type=? AND quarter {_QUARTER_CMP}"),
         (ticker, fiscal_year, period_type, quarter),
     )
-    existing = cur.fetchone()
-    existing = dict(existing) if existing else None
+    row_match = cur.fetchone()
+    existing = dict(row_match) if row_match else None
+    target_fiscal_year, target_quarter = fiscal_year, quarter
+
+    # 2) Dedupe über period_end: ir_pdf und sec_xbrl leiten das (fiscal_year,
+    # quarter)-Label z.T. unterschiedlich ab. Ohne diesen Fallback würden zwei
+    # verschiedene Primary Keys für dieselbe Berichtsperiode entstehen und die
+    # Quellen-Priorität würde nie greifen. Nur relevant, wenn kein exakter
+    # PK-Match gefunden wurde.
+    if existing is None and period_end:
+        cur = conn.execute(_sql(
+            "SELECT fiscal_year, quarter, source, quality_score FROM financial_data "
+            "WHERE ticker=? AND period_type=? AND period_end=?"),
+            (ticker, period_type, period_end),
+        )
+        dupe_match = cur.fetchone()
+        if dupe_match:
+            existing = dict(dupe_match)
+            target_fiscal_year = existing["fiscal_year"]
+            target_quarter     = existing["quarter"]
 
     if existing:
         existing_prio = _SOURCE_PRIORITY.get(existing["source"] or "yfinance", 2)
         if source == "ir_pdf":
-            # ir_pdf only fills NULLs
+            # ir_pdf only fills NULLs — das Label der bereits gespeicherten
+            # (i.d.R. höher priorisierten) Zeile bleibt unangetastet.
             updates = []
             params  = []
             for col in _FINANCIAL_COLS:
@@ -256,7 +283,7 @@ def _upsert_one(conn, row: dict) -> int:
                 return 0
             updates.append("fetched_at = ?")
             params.append(_now_iso())
-            params += [ticker, fiscal_year, period_type, quarter]
+            params += [ticker, target_fiscal_year, period_type, target_quarter]
             conn.execute(_sql(
                 f"UPDATE financial_data SET {', '.join(updates)} "
                 f"WHERE ticker=? AND fiscal_year=? AND period_type=? AND quarter {_QUARTER_CMP}"),
@@ -279,10 +306,17 @@ def _upsert_one(conn, row: dict) -> int:
                 sets["period_end"] = row["period_end"]
             if row.get("currency"):
                 sets["currency"] = row["currency"]
+            # Höher-/gleichpriorisierte Quelle gewinnt bei einem Dedupe-Match
+            # über period_end auch das Label (fiscal_year/quarter), falls es
+            # vom bereits gespeicherten abweicht.
+            if fiscal_year != target_fiscal_year:
+                sets["fiscal_year"] = fiscal_year
+            if quarter != target_quarter:
+                sets["quarter"] = quarter
             if not sets:
                 return 0
             cols   = ", ".join(f"{k}=?" for k in sets)
-            params = list(sets.values()) + [ticker, fiscal_year, period_type, quarter]
+            params = list(sets.values()) + [ticker, target_fiscal_year, period_type, target_quarter]
             conn.execute(_sql(
                 f"UPDATE financial_data SET {cols} "
                 f"WHERE ticker=? AND fiscal_year=? AND period_type=? AND quarter {_QUARTER_CMP}"),

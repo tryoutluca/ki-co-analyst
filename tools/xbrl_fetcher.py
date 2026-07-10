@@ -244,12 +244,22 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
         if ocf is not None and capex is not None and "fcf_bn" not in d:
             d["fcf_bn"] = round(ocf - abs(capex), 4)
 
+        period_end = f"{yr}-12-31"
+        # Konsistenz-Pass über die zentrale Fiskal-Label-Funktion (7.3) — auch
+        # der IR-PDF-Pfad nutzt sie, damit beide Quellen für dieselbe Periode
+        # dasselbe Label vergeben. Für annual ist das aktuell ein No-op
+        # (period_end ist noch hartkodiert, siehe 7.4), aber die Zeile läuft
+        # bewusst schon durch dieselbe Funktion statt eigener Sonderlogik.
+        assigned_year, _ = assign_fiscal_label(ticker, period_end, "annual", cik=cik, facts=facts)
+        if assigned_year is not None:
+            yr = assigned_year
+
         rows.append({
             "ticker":       ticker,
             "fiscal_year":  yr,
             "period_type":  "annual",
             "quarter":      None,
-            "period_end":   f"{yr}-12-31",
+            "period_end":   period_end,
             "currency":     currency,
             "source":       "sec_xbrl",
             "quality_score": 3,
@@ -310,24 +320,88 @@ def _classify_duration(days: int | None) -> str | None:
     return None
 
 
-def _fiscal_period_key(entry: dict, end: str, mo: int) -> tuple[int, str]:
-    """
-    Fiskaljahr/Quartal-Schlüssel für einen diskreten Quartals-Fact.
+# ── Zentrale Fiskal-Label-Zuordnung (XBRL + IR-PDF nutzen dieselbe Funktion) ──
+#
+# period_end -> (fiscal_year, quarter) pro CIK, gecached für die Laufzeit des
+# Prozesses (SEC-Fiskalkalender ändert sich nicht innerhalb einer Analyse).
+_FISCAL_CALENDAR_CACHE: dict[str, dict[str, tuple[int, str | None]]] = {}
 
-    Bevorzugt SEC's eigene fy/fp-Felder (fiskalisches Jahr/Quartal laut Filer):
-    der Kalendermonat des Periodenendes sagt bei abweichendem Geschäftsjahr
-    (z.B. NVDA, Ende Januar) nichts über die fiskalische Quartalsnummer aus —
-    NVDAs fiskalisches Q1 endet im April und würde per Kalendermonat-Heuristik
-    fälschlich als "Q2" einsortiert, was zu doppelten/kollidierenden Perioden
-    führt (identisches period_end unter zwei Labels). Fallback auf die
-    Kalendermonat-Heuristik nur wenn fy/fp fehlen (ältere Filings).
+
+def _build_fiscal_calendar(cik: str, facts: dict | None = None) -> dict[str, tuple[int, str | None]]:
     """
-    fy = entry.get("fy")
-    fp = entry.get("fp")
-    if isinstance(fy, int) and fp in _VALID_FP_QUARTERS:
-        return (fy, fp)
-    yr = int(end[:4])
-    return (yr, _MONTH_TO_QUARTER.get(mo, "Q?"))
+    Baut eine period_end -> (fiscal_year, quarter) Landkarte aus SEC's eigenen
+    fy/fp-Feldern, indem ALLE us-gaap-Fakten (nicht nur ein Konzept) gescannt
+    werden. quarter ist None für Jahres-Perioden (fp == "FY").
+    """
+    if facts is None:
+        facts = _fetch_facts(cik)
+    calendar: dict[str, tuple[int, str | None]] = {}
+    if not facts:
+        return calendar
+
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+    for concept_data in gaap.values():
+        for unit_entries in concept_data.get("units", {}).values():
+            for entry in unit_entries:
+                end = entry.get("end")
+                fy  = entry.get("fy")
+                fp  = entry.get("fp")
+                if not end or not isinstance(fy, int) or not fp:
+                    continue
+                if fp == "FY":
+                    calendar.setdefault(end, (fy, None))
+                elif fp in _VALID_FP_QUARTERS:
+                    calendar.setdefault(end, (fy, fp))
+    return calendar
+
+
+def assign_fiscal_label(
+    ticker: str,
+    period_end: str,
+    period_type: str = "annual",
+    cik: str | None = None,
+    facts: dict | None = None,
+) -> tuple[int | None, str | None]:
+    """
+    Zentrale Fiskal-Label-Zuordnung: leitet (fiscal_year, quarter) aus dem
+    tatsächlichen Periodenende und dem Fiskalkalender des Unternehmens ab.
+
+    MUSS von beiden Extraktionspfaden (SEC-XBRL und IR-PDF) verwendet werden,
+    sonst leiten sie das Label für dieselbe Berichtsperiode unterschiedlich ab
+    und die Quellen-Priorität im Upsert greift nie (zwei Primary Keys für
+    dieselbe Periode). Bevorzugt SEC's eigene fy/fp-Werte aus companyfacts
+    (siehe _build_fiscal_calendar) — für US-Ticker i.d.R. exakt, unabhängig
+    vom Geschäftsjahres-Ende.
+
+    Fallback (kein CIK/keine SEC-Daten, z.B. Nicht-US-Ticker, oder period_end
+    kommt in der SEC-Landkarte nicht exakt vor): Kalenderjahr/-monat von
+    period_end selbst — schwächer, aber die einzige verfügbare Information
+    ausserhalb der SEC-Welt.
+    """
+    if cik is None and facts is None:
+        from tools.ir_rag_tool import _sec_is_us_ticker, get_sec_cik
+        if _sec_is_us_ticker(ticker):
+            cik = get_sec_cik(ticker)
+
+    if cik or facts:
+        cache_key = cik or f"_facts_{id(facts)}"
+        calendar = _FISCAL_CALENDAR_CACHE.get(cache_key)
+        if calendar is None:
+            calendar = _build_fiscal_calendar(cik, facts=facts)
+            _FISCAL_CALENDAR_CACHE[cache_key] = calendar
+        hit = calendar.get(period_end)
+        if hit is not None:
+            return hit
+
+    # Fallback: aus dem Kalenderdatum selbst ableiten.
+    try:
+        yr = int(period_end[:4])
+        mo = int(period_end[5:7])
+    except (ValueError, TypeError, IndexError):
+        return (None, None)
+    if period_type == "annual":
+        return (yr, None)
+    return (yr, _MONTH_TO_QUARTER.get(mo))
 
 
 def fetch_xbrl_quarterly(ticker: str, cik: str,
@@ -395,7 +469,11 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
                     continue
 
                 if kind == "quarter":
-                    key = _fiscal_period_key(entry, end, mo)
+                    assigned_year, assigned_q = assign_fiscal_label(
+                        ticker, end, "quarterly", cik=cik, facts=facts,
+                    )
+                    key = (assigned_year if assigned_year is not None else yr,
+                           assigned_q or _MONTH_TO_QUARTER.get(mo, "Q?"))
                     if key in locked_quarter:
                         continue
                     qdata.setdefault(key, {})
