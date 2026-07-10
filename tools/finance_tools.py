@@ -578,7 +578,6 @@ def get_historical_multiples(ticker: str) -> dict:
         return {**empty_result, "error": str(e)}
 
 
-@tool
 def _db_rows_to_hist_dict(rows: list[dict]) -> dict:
     """Convert financial_db annual rows to the get_historical_financials() dict shape."""
     result = {}
