@@ -133,10 +133,18 @@ def _extract_concept(facts: dict, concept: str,
                 continue
         end = entry.get("end", "")
         filed = entry.get("filed", "")
-        try:
-            year = int(end[:4]) if end else 0
-        except ValueError:
-            continue
+        # SEC's eigenes fy-Feld (fiskalisches Jahr laut Filer) ist massgeblich —
+        # der Kalenderjahr-Fallback (end[:4]) kann bei abweichendem Geschäftsjahr
+        # (z.B. NVDA, Ende Januar) vom fy abweichen und muss mit der fy-basierten
+        # Perioden-Zuordnung in fetch_xbrl_quarterly() konsistent bleiben.
+        fy_field = entry.get("fy")
+        if isinstance(fy_field, int):
+            year = fy_field
+        else:
+            try:
+                year = int(end[:4]) if end else 0
+            except ValueError:
+                continue
         if year < 2005:
             continue
         val = entry.get("val")
@@ -252,11 +260,86 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
     return rows
 
 
+# Flussgrössen: additiv über das Geschäftsjahr, dürfen für die Q4-Ableitung
+# (Jahr − 9M-YTD) subtrahiert werden. Bestandsgrössen (Bilanzposten, Stichtag)
+# sind NICHT additiv und werden nie so abgeleitet — aktuell enthält _Q_CONCEPTS
+# ohnehin keine Bestandsgrösse, das Set ist trotzdem explizit als Leitplanke
+# für künftige Erweiterungen. eps_adj ist bewusst ausgeschlossen: Q4-EPS lässt
+# sich wegen unterschiedlicher gewichteter Aktienzahl je Quartal nicht sauber
+# durch Jahr − 9M ableiten.
+_FLOW_FIELDS = {"revenue_bn", "net_income_bn", "operating_cf_bn", "capex_bn"}
+
+_VALID_FP_QUARTERS = {"Q1", "Q2", "Q3", "Q4"}
+
+_MONTH_TO_QUARTER = {
+    1: "Q1", 2: "Q1", 3: "Q1",
+    4: "Q2", 5: "Q2", 6: "Q2",
+    7: "Q3", 8: "Q3", 9: "Q3",
+    10: "Q4", 11: "Q4", 12: "Q4",
+}
+
+
+def _period_days(start: str, end: str) -> int | None:
+    """Dauer eines XBRL-Facts in Tagen (start/end als 'YYYY-MM-DD')."""
+    try:
+        s = datetime.strptime(start, "%Y-%m-%d")
+        e = datetime.strptime(end, "%Y-%m-%d")
+        return (e - s).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _classify_duration(days: int | None) -> str | None:
+    """
+    Klassifiziert einen Fact anhand seiner Dauer:
+    'quarter' (diskretes Quartal, ~1 Quartal), 'ytd6'/'ytd9' (kumulierte
+    Halbjahres-/9-Monats-Werte — NIE als Quartal speichern), 'annual'
+    (Jahreswert — gehört in den Annual-Pfad, hier ignorieren). None für alles
+    andere (z.B. unplausible/fehlende Dauer).
+    """
+    if days is None:
+        return None
+    if 80 <= days <= 100:
+        return "quarter"
+    if 170 <= days <= 190:
+        return "ytd6"
+    if 260 <= days <= 280:
+        return "ytd9"
+    if 350 <= days <= 380:
+        return "annual"
+    return None
+
+
+def _fiscal_period_key(entry: dict, end: str, mo: int) -> tuple[int, str]:
+    """
+    Fiskaljahr/Quartal-Schlüssel für einen diskreten Quartals-Fact.
+
+    Bevorzugt SEC's eigene fy/fp-Felder (fiskalisches Jahr/Quartal laut Filer):
+    der Kalendermonat des Periodenendes sagt bei abweichendem Geschäftsjahr
+    (z.B. NVDA, Ende Januar) nichts über die fiskalische Quartalsnummer aus —
+    NVDAs fiskalisches Q1 endet im April und würde per Kalendermonat-Heuristik
+    fälschlich als "Q2" einsortiert, was zu doppelten/kollidierenden Perioden
+    führt (identisches period_end unter zwei Labels). Fallback auf die
+    Kalendermonat-Heuristik nur wenn fy/fp fehlen (ältere Filings).
+    """
+    fy = entry.get("fy")
+    fp = entry.get("fp")
+    if isinstance(fy, int) and fp in _VALID_FP_QUARTERS:
+        return (fy, fp)
+    yr = int(end[:4])
+    return (yr, _MONTH_TO_QUARTER.get(mo, "Q?"))
+
+
 def fetch_xbrl_quarterly(ticker: str, cik: str,
                          max_quarters: int = 12) -> list[dict]:
     """
     Fetch up to max_quarters of quarterly data from SEC EDGAR XBRL (10-Q filings).
     Returns list of dicts compatible with financial_db.upsert_financials().
+
+    Nur diskrete ~3-Monats-Fakten werden als Quartal übernommen (siehe
+    _classify_duration) — 6M/9M-YTD-Kumulationen unter demselben Tag werden
+    verworfen. Q4 wird für Flussgrössen i.d.R. NICHT direkt von der SEC
+    gemeldet (steckt im 10-K) und daher als Jahreswert − 9M-YTD abgeleitet.
     """
     facts = _fetch_facts(cik)
     if not facts:
@@ -273,53 +356,98 @@ def fetch_xbrl_quarterly(ticker: str, cik: str,
 
     # key: (fiscal_year, quarter_label) e.g. (2024, "Q2")
     qdata: dict[tuple[int, str], dict] = {}
+    # (fiscal_year, db_field) -> {"val":.., "filed":..} — 9M-YTD-Werte, nur
+    # gesammelt für Flussgrössen, dienen ausschliesslich der Q4-Ableitung.
+    ytd9: dict[tuple[int, str], dict] = {}
 
     gaap = facts.get("facts", {}).get("us-gaap", {})
 
     for db_field, candidates in _Q_CONCEPTS.items():
         # Pro Kennzahl PRO PERIODE auflösen (nicht global): ein Tag, das nur
         # einen Teil der Perioden abdeckt, darf den Fallback für die übrigen
-        # Perioden nicht mehr blockieren. locked merkt sich, welche Perioden
-        # bereits durch ein höher priorisiertes Tag gefüllt wurden.
-        locked: set[tuple[int, str]] = set()
+        # Perioden nicht mehr blockieren. locked_quarter/locked_ytd9 merken
+        # sich, welche Perioden bereits durch ein höher priorisiertes Tag
+        # gefüllt wurden.
+        locked_quarter: set[tuple[int, str]] = set()
+        locked_ytd9: set[int] = set()
         for concept in candidates:
             entries = gaap.get(concept, {}).get("units", {}).get("USD", [])
-            touched_by_this_concept: set[tuple[int, str]] = set()
+            touched_quarter: set[tuple[int, str]] = set()
+            touched_ytd9: set[int] = set()
             for entry in entries:
                 if not entry.get("form", "").startswith("10-Q"):
                     continue
+                start = entry.get("start", "")
                 end   = entry.get("end", "")
                 filed = entry.get("filed", "")
                 val   = entry.get("val")
-                if not end or val is None:
+                if not start or not end or val is None:
                     continue
+                kind = _classify_duration(_period_days(start, end))
+                if kind not in ("quarter", "ytd9"):
+                    continue  # ytd6/annual/unplausibel: gehören nicht hierher
                 try:
-                    yr  = int(end[:4])
-                    mo  = int(end[5:7])
+                    yr = int(end[:4])
+                    mo = int(end[5:7])
                 except ValueError:
                     continue
                 if yr < 2010:
                     continue
-                # Map month to quarter
-                q = {1: "Q1", 2: "Q1", 3: "Q1",
-                     4: "Q2", 5: "Q2", 6: "Q2",
-                     7: "Q3", 8: "Q3", 9: "Q3",
-                     10: "Q4", 11: "Q4", 12: "Q4"}.get(mo, "Q?")
-                key = (yr, q)
-                if key in locked:
-                    continue
-                qdata.setdefault(key, {})
-                filed_marker = f"_{db_field}_filed"
-                prev_filed = qdata[key].get(filed_marker)
-                if prev_filed is None or filed > prev_filed:
-                    qdata[key][db_field] = _scale_bn(float(val), concept)
-                    qdata[key][filed_marker] = filed
-                    qdata[key]["_period_end"] = end
-                    touched_by_this_concept.add(key)
-                    if concept != candidates[0]:
-                        print(f"        [xbrl-debug] {db_field} {yr} {q}: Fallback-Tag "
-                              f"'{concept}' (statt '{candidates[0]}')")
-            locked |= touched_by_this_concept
+
+                if kind == "quarter":
+                    key = _fiscal_period_key(entry, end, mo)
+                    if key in locked_quarter:
+                        continue
+                    qdata.setdefault(key, {})
+                    filed_marker = f"_{db_field}_filed"
+                    prev_filed = qdata[key].get(filed_marker)
+                    if prev_filed is None or filed > prev_filed:
+                        qdata[key][db_field] = _scale_bn(float(val), concept)
+                        qdata[key][filed_marker] = filed
+                        qdata[key]["_period_end"] = end
+                        touched_quarter.add(key)
+                        if concept != candidates[0]:
+                            print(f"        [xbrl-debug] {db_field} {key[0]} {key[1]}: "
+                                  f"Fallback-Tag '{concept}' (statt '{candidates[0]}')")
+                else:  # kind == "ytd9"
+                    if db_field not in _FLOW_FIELDS:
+                        continue
+                    fy_field = entry.get("fy")
+                    fy = fy_field if isinstance(fy_field, int) else yr
+                    if fy in locked_ytd9:
+                        continue
+                    prev = ytd9.get((fy, db_field))
+                    if prev is None or filed > prev["filed"]:
+                        ytd9[(fy, db_field)] = {
+                            "val": _scale_bn(float(val), concept), "filed": filed,
+                        }
+                        touched_ytd9.add(fy)
+                        if concept != candidates[0]:
+                            print(f"        [xbrl-debug] {db_field} {fy} 9M-YTD: "
+                                  f"Fallback-Tag '{concept}' (statt '{candidates[0]}')")
+            locked_quarter |= touched_quarter
+            locked_ytd9    |= touched_ytd9
+
+    # ── Q4-Ableitung für Flussgrössen: Jahreswert − 9M-YTD ────────────────────
+    # SEC meldet Q4 für Flussgrössen praktisch nie diskret (steckt im 10-K statt
+    # in einem 10-Q) — daher hier ableiten, ausser ein diskreter Q4-Fact wurde
+    # oben doch schon gefunden (dann Vorrang für die echte Meldung).
+    for db_field in _FLOW_FIELDS:
+        if db_field not in _Q_CONCEPTS:
+            continue
+        annual_by_year = _extract_field_by_year(facts, db_field, _Q_CONCEPTS[db_field], form_filter="10-K")
+        for fy, annual_val in annual_by_year.items():
+            ytd_entry = ytd9.get((fy, db_field))
+            if ytd_entry is None:
+                continue
+            q4_key = (fy, "Q4")
+            if db_field in qdata.get(q4_key, {}):
+                continue  # bereits ein diskreter Q4-Fact vorhanden — nicht überschreiben
+            derived = round(annual_val - ytd_entry["val"], 4)
+            qdata.setdefault(q4_key, {})
+            qdata[q4_key][db_field] = derived
+            print(f"        [xbrl-debug] {db_field} {fy} Q4: abgeleitet "
+                  f"(Jahr {annual_val} minus 9M-YTD {ytd_entry['val']}) = {derived}")
 
     sorted_keys = sorted(qdata.keys(), key=lambda k: (k[0], k[1]), reverse=True)[:max_quarters]
 

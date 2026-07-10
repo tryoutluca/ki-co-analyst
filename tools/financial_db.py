@@ -510,3 +510,21 @@ def delete_ticker(ticker: str) -> int:
         cur = conn.execute(_sql("DELETE FROM financial_data WHERE ticker=?"), (ticker,))
         conn.commit()
         return cur.rowcount
+
+
+def delete_period(ticker: str, fiscal_year: int, period_type: str, quarter: str | None) -> int:
+    """Delete a single (ticker, fiscal_year, period_type, quarter) row. Returns rows deleted."""
+    q = _quarter_key(quarter)
+    sql = _sql(
+        "DELETE FROM financial_data "
+        f"WHERE ticker=? AND fiscal_year=? AND period_type=? AND quarter {_QUARTER_CMP}"
+    )
+    with _conn() as conn:
+        if _BACKEND == "sqlite":
+            with _WRITE_LOCK:
+                cur = conn.execute(sql, (ticker, fiscal_year, period_type, q))
+                conn.commit()
+                return cur.rowcount
+        cur = conn.execute(sql, (ticker, fiscal_year, period_type, q))
+        conn.commit()
+        return cur.rowcount
