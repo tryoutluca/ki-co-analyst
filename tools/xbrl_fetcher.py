@@ -288,6 +288,17 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
         if ocf is not None and capex is not None and "fcf_bn" not in d:
             d["fcf_bn"] = round(ocf - abs(capex), 4)
 
+        # EBITDA ist kein eigenes US-GAAP-Konzept und taucht in den XBRL-Facts
+        # nie direkt auf — deterministisch aus EBIT + D&A ableiten (kein LLM,
+        # keine Kennzeichnung nötig, bleibt source='sec_xbrl'). Die Margen-
+        # Nachberechnung im Upsert (financial_db._compute_margins) zieht
+        # danach automatisch nach.
+        if d.get("ebitda_bn") is None:
+            ebit = d.get("ebit_bn")
+            da   = d.get("da_bn")
+            if ebit is not None and da is not None:
+                d["ebitda_bn"] = round(ebit + abs(da), 4)
+
         # Echtes Periodenende, sonst None (nie konstruiert) — siehe 7.4.
         period_end = period_end_by_year.get(yr) or fallback_end_dates.get(yr)
         # Konsistenz-Pass über die zentrale Fiskal-Label-Funktion (7.3), damit
