@@ -33,6 +33,9 @@ FORWARD-SCHÄTZUNGEN:
 IR-FAIR-VALUE-HINWEISE:
 {ir_valuation}
 
+SENIOR-FEEDBACK (falls vorhanden — gezielt adressieren, falls es deinen Bereich betrifft):
+{supervisor_critique}
+
 Erstelle folgendes JSON:
 {{
   "fair_value_estimate": <float — primärer Fair-Value-Anker>,
@@ -78,6 +81,7 @@ def run_valuation_agent(
     ir_analysis: dict,
     business_model_context: dict | None,
     dcf_result: dict | None,
+    supervisor_critique: str | None = None,
 ) -> dict:
     print(f"      [Valuation] Berechne Fair Value / Multiples-Assessment...")
 
@@ -118,6 +122,7 @@ def run_valuation_agent(
         "dcf_result":       json.dumps(dcf_result or {},   ensure_ascii=False)[:2000],
         "forward_estimates": json.dumps(forward_estimates, ensure_ascii=False)[:2000],
         "ir_valuation":     json.dumps(ir_valuation,       ensure_ascii=False),
+        "supervisor_critique": supervisor_critique or "keines",
     })
 
     return _parse(raw, ticker, "valuation")

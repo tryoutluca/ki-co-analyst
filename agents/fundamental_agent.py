@@ -124,27 +124,43 @@ def run_fundamental_agent(
     structural_context: str | None  = None,
     business_model_context: dict | None = None,
     ir_analysis_cache: dict | None = None,
+    data_cache: dict | None = None,
 ) -> FundamentalAgentOutput:
     """
     Orchestriert 4 parallele Sub-Agents und synthetisiert deren Outputs.
-    Signatur identisch zur Vorgänger-Version (ir_analysis_cache ist optional).
+    Signatur identisch zur Vorgänger-Version (ir_analysis_cache/data_cache optional).
 
     ir_analysis_cache: falls übergeben (z.B. aus dem Analyse-State bei Retry/
     Critique-Runden), wird die teure IR-RAG-Extraktion übersprungen und dieser
     Wert direkt verwendet.
+
+    data_cache: falls übergeben, werden yfinance/Finnhub-Rohdaten sowie die
+    daraus abgeleiteten deterministischen Werte (MultiplesEngine, DCF,
+    Forward-Estimates, Peer-Comparison, Estimate-Anchors) NICHT neu geholt.
+    Retry-/Kritik-Runden korrigieren die LLM-Interpretation dieser Fakten,
+    nicht die Fakten selbst — die ändern sich innerhalb eines Analyse-Laufs
+    nicht, ein erneuter Abruf würde nur Zeit/API-Kosten verschwenden.
     """
 
     # ── 1. Daten einmalig laden ───────────────────────────────────────────────
-    print(f"      Hole Unternehmensdaten...")
-    stock_info    = get_stock_info.invoke(ticker)
-    financials    = get_financial_statements.invoke(ticker)
-    price_history = get_price_history.invoke(ticker)
+    if data_cache is not None:
+        print(f"      Basisdaten (yfinance/Finnhub): Cache-Hit (State) — Abruf übersprungen")
+        stock_info            = data_cache["stock_info"]
+        financials            = data_cache["financials"]
+        price_history         = data_cache["price_history"]
+        cashflow_data         = data_cache["cashflow_data"]
+        historical_multiples  = data_cache["historical_multiples"]
+    else:
+        print(f"      Hole Unternehmensdaten...")
+        stock_info    = get_stock_info.invoke(ticker)
+        financials    = get_financial_statements.invoke(ticker)
+        price_history = get_price_history.invoke(ticker)
 
-    print(f"      Hole Cashflow-Daten...")
-    cashflow_data = get_cashflow_data.invoke(ticker)
+        print(f"      Hole Cashflow-Daten...")
+        cashflow_data = get_cashflow_data.invoke(ticker)
 
-    print(f"      Hole historische Multiples...")
-    historical_multiples = get_historical_multiples.invoke(ticker)
+        print(f"      Hole historische Multiples...")
+        historical_multiples = get_historical_multiples.invoke(ticker)
 
     if ir_analysis_cache is not None:
         print(f"      IR-Dokumente: Cache-Hit (State) — Extraktion übersprungen")
@@ -280,90 +296,109 @@ def run_fundamental_agent(
         except Exception as db_err:
             print(f"      ⚠ IR-Quartal→DB Fehler: {db_err}")
 
-    print(f"      Hole historische Finanzdaten...")
-    hist_data = get_historical_financials(ticker)
+    if data_cache is not None:
+        hist_data         = data_cache["hist_data"]
+        sector            = data_cache["sector"]
+        all_multiples     = data_cache["all_multiples"]
+        forward_estimates = data_cache["forward_estimates"]
+        peer_comparison   = data_cache["peer_comparison"]
+        estimate_anchors  = data_cache["estimate_anchors"]
+        dcf_result        = data_cache["dcf_result"]
+    else:
+        print(f"      Hole historische Finanzdaten...")
+        hist_data = get_historical_financials(ticker)
 
-    sector = stock_info.get("sector", "N/A")
+        sector = stock_info.get("sector", "N/A")
 
-    print(f"      Berechne Multiples via MultiplesEngine...")
-    try:
-        engine = MultiplesEngine.from_ticker(
-            ticker           = ticker,
-            ir_analysis      = ir_analysis or {},
-            financial_source = (
-                f"IR-Dokument {ir_analysis.get('document_date', '')}"
-                if ir_analysis else "yfinance"
-            ),
-            hist_data        = hist_data,
+        print(f"      Berechne Multiples via MultiplesEngine...")
+        try:
+            engine = MultiplesEngine.from_ticker(
+                ticker           = ticker,
+                ir_analysis      = ir_analysis or {},
+                financial_source = (
+                    f"IR-Dokument {ir_analysis.get('document_date', '')}"
+                    if ir_analysis else "yfinance"
+                ),
+                hist_data        = hist_data,
+            )
+            all_multiples = engine.compute_all()
+            _sum  = all_multiples.get("_summary", {})
+            _pm   = all_multiples.get("_price_data", {})
+            print(
+                f"      ✅ MultiplesEngine: "
+                f"{_sum.get('valid',0)}/{_sum.get('total_calculated',0)} Kennzahlen | "
+                f"Kurs: {_pm.get('current_price')} {_pm.get('currency')}"
+            )
+        except Exception as e:
+            print(f"      ⚠ MultiplesEngine Fehler: {e}")
+            all_multiples = {}
+
+        print(f"      Berechne Konsensschätzungen...")
+        forward_estimates = consensus_estimates_from_ir(
+            ticker, ir_analysis, historical_multiples, sector,
         )
-        all_multiples = engine.compute_all()
-        _sum  = all_multiples.get("_summary", {})
-        _pm   = all_multiples.get("_price_data", {})
-        print(
-            f"      ✅ MultiplesEngine: "
-            f"{_sum.get('valid',0)}/{_sum.get('total_calculated',0)} Kennzahlen | "
-            f"Kurs: {_pm.get('current_price')} {_pm.get('currency')}"
+
+        _fwd_price = all_multiples.get("_price_data", {}).get("current_price") if all_multiples else None
+        if _fwd_price and forward_estimates.get("estimates"):
+            for _yr in forward_estimates["estimates"].values():
+                try:
+                    _eps = float(_yr.get("eps") or 0)
+                    if _eps > 0:
+                        _yr["forward_pe"] = round(_fwd_price / _eps, 1)
+                except (TypeError, ValueError):
+                    pass
+
+        print(f"      Erstelle Peer-Vergleich...")
+        _suggested_peers = None
+        if business_model_context and isinstance(business_model_context, dict):
+            _sp = business_model_context.get("suggested_peers")
+            if isinstance(_sp, list) and _sp:
+                _suggested_peers = _sp
+        peer_comparison = get_peer_financials(ticker, peers_override=_suggested_peers)
+
+        print(f"      Berechne Estimate-Anker...")
+        estimate_anchors = build_estimate_anchors(
+            ticker          = ticker,
+            hist_data       = hist_data,
+            ir_analysis     = ir_analysis or {},
+            peer_comparison = peer_comparison,
         )
-    except Exception as e:
-        print(f"      ⚠ MultiplesEngine Fehler: {e}")
-        all_multiples = {}
 
-    print(f"      Berechne Konsensschätzungen...")
-    forward_estimates = consensus_estimates_from_ir(
-        ticker, ir_analysis, historical_multiples, sector,
-    )
-
-    _fwd_price = all_multiples.get("_price_data", {}).get("current_price") if all_multiples else None
-    if _fwd_price and forward_estimates.get("estimates"):
-        for _yr in forward_estimates["estimates"].values():
-            try:
-                _eps = float(_yr.get("eps") or 0)
-                if _eps > 0:
-                    _yr["forward_pe"] = round(_fwd_price / _eps, 1)
-            except (TypeError, ValueError):
-                pass
-
-    print(f"      Erstelle Peer-Vergleich...")
-    _suggested_peers = None
-    if business_model_context and isinstance(business_model_context, dict):
-        _sp = business_model_context.get("suggested_peers")
-        if isinstance(_sp, list) and _sp:
-            _suggested_peers = _sp
-    peer_comparison = get_peer_financials(ticker, peers_override=_suggested_peers)
-
-    print(f"      Berechne Estimate-Anker...")
-    estimate_anchors = build_estimate_anchors(
-        ticker          = ticker,
-        hist_data       = hist_data,
-        ir_analysis     = ir_analysis or {},
-        peer_comparison = peer_comparison,
-    )
-
-    dcf_result = run_dcf(ir_analysis, financials, cashflow_data, stock_info)
+        dcf_result = run_dcf(ir_analysis, financials, cashflow_data, stock_info)
 
     # ── 2. Sub-Agents parallel ────────────────────────────────────────────────
     print(f"      🚀 Starte 4 Sub-Agents parallel...")
 
     sub_results: dict[str, dict] = {}
 
+    # Kritik geht an ALLE Sub-Agenten (der Supervisor kritisiert die
+    # Fundamentalanalyse als Ganzes, nicht gezielt einen Sub-Agenten) — jeder
+    # entscheidet selbst, ob sie seinen Bereich betrifft. Ohne das würde eine
+    # Kritik-Runde nur die Lead-Synthese informieren, während die Sub-Agenten
+    # mit identischen Prompts nochmal laufen und sich nur durch LLM-Sampling-
+    # Varianz vom Erstlauf unterscheiden.
     tasks = {
         "quality": lambda: run_quality_agent(
             ticker, sector, cashflow_data, financials,
             hist_data, all_multiples, ir_analysis or {},
+            supervisor_critique=supervisor_critique,
         ),
         "growth": lambda: run_growth_agent(
             ticker, sector, hist_data, forward_estimates,
             estimate_anchors, peer_comparison, ir_analysis or {},
             ir_annual_history=ir_annual_years,
+            supervisor_critique=supervisor_critique,
         ),
         "valuation": lambda: run_valuation_agent(
             ticker, sector, stock_info, all_multiples,
             forward_estimates, cashflow_data, financials,
             ir_analysis or {}, business_model_context, dcf_result,
+            supervisor_critique=supervisor_critique,
         ),
         "capital_allocation": lambda: run_capital_allocation_agent(
             ticker, sector, cashflow_data, financials,
             hist_data, stock_info, ir_analysis or {},
+            supervisor_critique=supervisor_critique,
         ),
     }
 
@@ -377,6 +412,18 @@ def run_fundamental_agent(
             except Exception as exc:
                 print(f"      ❌ {name.upper()} Sub-Agent Fehler: {exc}")
                 sub_results[name] = {"error": str(exc)}
+
+    # Sub-Agenten, deren Output nicht verwertbar ist (Exception ODER
+    # Parse-Fehler — _parse() in den Sub-Agenten gibt bei einem JSON-
+    # Parse-Fehler selbst ein {"error": ...}-Dict zurück, ohne Exception zu
+    # werfen). Ohne diese Prüfung würde ein kaputter Sub-Agent-Output einfach
+    # wie ein normaler in die Lead-Synthese einfliessen.
+    sub_agent_errors = [
+        name for name, out in sub_results.items()
+        if isinstance(out, dict) and out.get("error")
+    ]
+    if sub_agent_errors:
+        print(f"      ⚠ Sub-Agent-Fehler: {', '.join(sub_agent_errors)} — Lead wird explizit gewarnt")
 
     # ── 3. Lead-Synthese ──────────────────────────────────────────────────────
     print(f"      Lead synthetisiert Sub-Agent-Outputs...")
@@ -392,6 +439,12 @@ def run_fundamental_agent(
         senior_feedback = f"⚠️ SENIOR-ANALYST FEEDBACK:\n{supervisor_critique}"
     if structural_context:
         senior_feedback += f"\n\nCORPORATE ACTIONS:\n{structural_context}"
+    if sub_agent_errors:
+        senior_feedback += (
+            f"\n\n⚠️ FEHLGESCHLAGENE SUB-AGENTEN (Output NICHT verwendbar, "
+            f"ignoriere ihn vollständig, stütze dich nur auf die übrigen): "
+            f"{', '.join(sub_agent_errors)}"
+        )
 
     core_data = {
         "company":       stock_info.get("name", ticker),
@@ -421,6 +474,12 @@ def run_fundamental_agent(
 
     # ── 4. Post-Processing (deterministisch, wie bisher) ─────────────────────
     if isinstance(result, dict):
+        # Sub-Agent-Fehler sichtbar machen und self_confidence deterministisch
+        # deckeln — unabhängig davon, was die LLM-Selbsteinschätzung sagt.
+        result["sub_agent_errors"] = sub_agent_errors
+        if sub_agent_errors:
+            result["self_confidence"] = min(float(result.get("self_confidence", 0.70)), 0.4)
+
         # Valuation-Engine-Werte überschreiben LLM-Output
         if all_multiples:
             result["valuation_table"] = _build_valuation_table(all_multiples, sector)
@@ -453,6 +512,24 @@ def run_fundamental_agent(
         result["ir_quarterly_signal"] = _ir_qs
         # Roh-IR-Analyse für State-Cache (Retry/Critique überspringen Extraktion)
         result["_ir_analysis"] = ir_analysis
+
+        # Basisdaten-Bundle für State-Cache (Retry/Critique überspringen den
+        # kompletten yfinance/Finnhub/MultiplesEngine/DCF-Abruf, siehe data_cache
+        # oben) — nur bei Erfolg gesetzt, ein gescheiterter Erstlauf cached nichts.
+        result["_data_cache"] = {
+            "stock_info":           stock_info,
+            "financials":           financials,
+            "price_history":        price_history,
+            "cashflow_data":        cashflow_data,
+            "historical_multiples": historical_multiples,
+            "hist_data":            hist_data,
+            "sector":               sector,
+            "all_multiples":        all_multiples,
+            "forward_estimates":    forward_estimates,
+            "peer_comparison":      peer_comparison,
+            "estimate_anchors":     estimate_anchors,
+            "dcf_result":           dcf_result,
+        }
 
     return result
 

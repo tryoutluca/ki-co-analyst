@@ -34,6 +34,9 @@ IR-DATEN (Guidance & Statements):
 
 {ir_annual_block}
 
+SENIOR-FEEDBACK (falls vorhanden — gezielt adressieren, falls es deinen Bereich betrifft):
+{supervisor_critique}
+
 Erstelle folgendes JSON:
 {{
   "revenue_cagr_3y_pct": <float oder null>,
@@ -70,6 +73,7 @@ def run_growth_agent(
     peer_comparison: dict | list,
     ir_analysis: dict,
     ir_annual_history: list | None = None,
+    supervisor_critique: str | None = None,
 ) -> dict:
     print(f"      [Growth] Analysiere Umsatz / Margen / Trajektorie...")
 
@@ -108,6 +112,7 @@ def run_growth_agent(
         "peer_summary":      json.dumps(peer_summary,       ensure_ascii=False)[:2000],
         "ir_growth":         json.dumps(ir_growth,          ensure_ascii=False),
         "ir_annual_block":   ir_annual_block,
+        "supervisor_critique": supervisor_critique or "keines",
     })
 
     return _parse(raw, ticker, "growth")

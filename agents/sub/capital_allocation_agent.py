@@ -32,6 +32,9 @@ IR-DATEN (Dividenden, Buybacks, M&A-Hinweise):
 STOCK-INFO (Shares, Dividende):
 {stock_summary}
 
+SENIOR-FEEDBACK (falls vorhanden — gezielt adressieren, falls es deinen Bereich betrifft):
+{supervisor_critique}
+
 Erstelle folgendes JSON:
 {{
   "buyback_yield_pct": <float oder null>,
@@ -72,6 +75,7 @@ def run_capital_allocation_agent(
     hist_data: dict,
     stock_info: dict,
     ir_analysis: dict,
+    supervisor_critique: str | None = None,
 ) -> dict:
     print(f"      [CapAlloc] Analysiere Buybacks / Dividenden / M&A / Capex...")
 
@@ -98,6 +102,7 @@ def run_capital_allocation_agent(
         "hist_data":     json.dumps(hist_data,      ensure_ascii=False)[:2000],
         "ir_capital":    json.dumps(ir_capital,     ensure_ascii=False),
         "stock_summary": json.dumps(stock_summary,  ensure_ascii=False),
+        "supervisor_critique": supervisor_critique or "keines",
     })
 
     return _parse(raw, ticker, "capital_allocation")

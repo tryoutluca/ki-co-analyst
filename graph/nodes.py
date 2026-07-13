@@ -283,6 +283,7 @@ def fundamental_node(state: AnalysisState) -> dict:
             structural_context=state.get("structural_context"),
             business_model_context=state.get("business_model_classification"),
             ir_analysis_cache=state.get("ir_analysis_cache"),
+            data_cache=state.get("fundamental_data_cache"),
         )
 
         if hasattr(output, "model_dump"):
@@ -304,6 +305,7 @@ def fundamental_node(state: AnalysisState) -> dict:
             "fundamental_output": output,
             "agent_confidence_scores": agent_conf,
             "ir_analysis_cache": state.get("ir_analysis_cache") or output.get("_ir_analysis"),
+            "fundamental_data_cache": state.get("fundamental_data_cache") or output.get("_data_cache"),
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -714,6 +716,7 @@ def fundamental_critique_node(state: AnalysisState) -> dict:
             structural_context=state.get("structural_context"),
             business_model_context=state.get("business_model_classification"),
             ir_analysis_cache=state.get("ir_analysis_cache"),
+            data_cache=state.get("fundamental_data_cache"),
         )
         if hasattr(output, "model_dump"):
             output = output.model_dump()
@@ -733,6 +736,7 @@ def fundamental_critique_node(state: AnalysisState) -> dict:
             "fundamental_output": output,
             "agent_confidence_scores": agent_conf,
             "ir_analysis_cache": state.get("ir_analysis_cache") or output.get("_ir_analysis"),
+            "fundamental_data_cache": state.get("fundamental_data_cache") or output.get("_data_cache"),
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:

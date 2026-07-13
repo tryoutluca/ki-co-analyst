@@ -472,6 +472,14 @@ class FundamentalAgentOutput(BaseModel):
             "Welche Daten sind solide, wo bestehen Unsicherheiten?"
         )
     )
+    sub_agent_errors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Namen der Sub-Agenten (quality/growth/valuation/capital_allocation), "
+            "deren Output nicht geparst werden konnte. Wird deterministisch vom "
+            "Orchestrator gesetzt, nicht vom LLM."
+        )
+    )
 
 
 # ── Risk Agent ───────────────────────────────────────────────────────────────

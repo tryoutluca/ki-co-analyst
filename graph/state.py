@@ -24,6 +24,11 @@ class AnalysisState(TypedDict):
     # ── IR-RAG Cache (teure Extraktion nur einmal pro Analyse-Lauf) ──
     ir_analysis_cache:        Optional[dict]
 
+    # ── Fundamental-Rohdaten-Cache (yfinance/Finnhub/MultiplesEngine/DCF/
+    # Peer-Comparison nur einmal pro Analyse-Lauf holen — Retry/Kritik-Runden
+    # korrigieren die LLM-Interpretation, nicht die zugrundeliegenden Fakten) ──
+    fundamental_data_cache:   Optional[dict]
+
     # ── Qualität ─────────────────────────────────────────────
     quality_checks:      Optional[list]
     data_consistency_score: Optional[int]

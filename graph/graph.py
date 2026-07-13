@@ -172,6 +172,7 @@ def run_analysis(ticker: str) -> dict:
         "news_retry_count":         0,
         "retry_reason":             "",
         "ir_analysis_cache":        None,
+        "fundamental_data_cache":   None,
         "quality_checks":           None,
         "data_consistency_score":   None,
         "final_memo":               None,

@@ -33,6 +33,9 @@ DETERMINISTISCH BERECHNETE MULTIPLES:
 IR-DATEN:
 {ir_summary}
 
+SENIOR-FEEDBACK (falls vorhanden — gezielt adressieren, falls es deinen Bereich betrifft):
+{supervisor_critique}
+
 Erstelle folgendes JSON:
 {{
   "roic_pct": <float oder null>,
@@ -67,6 +70,7 @@ def run_quality_agent(
     hist_data: dict,
     all_multiples: dict,
     ir_analysis: dict,
+    supervisor_critique: str | None = None,
 ) -> dict:
     print(f"      [Quality] Analysiere ROIC / FCF / Bilanz...")
 
@@ -92,6 +96,7 @@ def run_quality_agent(
         "hist_data":        json.dumps(hist_data,         ensure_ascii=False)[:2000],
         "multiples_summary": json.dumps(multiples_summary, ensure_ascii=False),
         "ir_summary":       json.dumps(ir_summary,        ensure_ascii=False),
+        "supervisor_critique": supervisor_critique or "keines",
     })
 
     return _parse(raw, ticker, "quality")
