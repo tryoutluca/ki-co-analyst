@@ -619,6 +619,7 @@ class FullFinancialYear(BaseModel):
     nd_ebitda: float | str                 # Net Debt / EBITDA
     roic_pct: float | str
     capex_bn: float | str
+    pe_ratio: float | str = "-"            # KGV (aktueller Kurs / EPS des Jahres)
     source: str                            # Datenquelle pro Jahr
 
 
@@ -649,16 +650,6 @@ class PeerComparisonTable(BaseModel):
 
 
 # ── Supervisor / Final Memo ──────────────────────────────────────────────────
-
-class ConsensusEstimateYear(BaseModel):
-    year: str
-    type: Literal["A", "E"] = Field(description="A=Actual, E=Estimate")
-    revenue_bn: float | str
-    ebitda_margin_pct: float | str
-    eps: float | str
-    ev_ebitda: float | str
-    pe_ratio: float | str
-    number_of_analysts: int | str
 
 class ValuationTableRow(BaseModel):
     metric: str
@@ -759,10 +750,6 @@ class SupervisorOutput(BaseModel):
     valuation_table: list[ValuationTableRow] = Field(
         description="Key multiples vs peers vs history"
     )
-    consensus_estimates: list[ConsensusEstimateYear] = Field(
-        description="2 historical years (A) + 3 forward years (E). Format: 2023A, 2024A, 2025E, 2026E, 2027E"
-    )
-
     # ── Seite 2 ───────────────────────────────────────────────
     scenarios: list[ScenarioTable] = Field(
         description="Exactly 3 scenarios. Probabilities must sum to 100."
@@ -793,9 +780,10 @@ class SupervisorOutput(BaseModel):
     full_financials: list[FullFinancialYear] = Field(
         default_factory=list,
         description=(
-            "Vollständige P&L-Übersicht: 3 historische Jahre (A) "
-            "und 3 Forward-Jahre (E). Historisch aus IR-Dokument, "
-            "Forward aus Consensus/Guidance/LLM-Ableitung."
+            "Vollständige P&L-Übersicht — EINZIGE Finanztabelle im Memo (keine "
+            "separate Konsens-Tabelle mehr): historische Jahre (A) aus IR-Dokument/"
+            "SEC-XBRL/yfinance, Forward-Jahre (E) aus dem Forward-Estimate-Agent "
+            "(Wachstumsthese), inkl. pe_ratio je Jahr."
         )
     )
     peer_comparison: Optional[PeerComparisonTable] = Field(

@@ -78,13 +78,9 @@ INVESTMENT CASE Regeln:
 - Kein Punkt ohne Zahl — "günstige Bewertung" ist NICHT ausreichend
 - Letzter Punkt immer: Katalysator der die These auslöst
 
-CONSENSUS ESTIMATES Tabelle:
-- 2 historische Jahre (A=Actual) aus Finanzkennzahlen
-- 3 Vorwärtsjahre (E=Estimate) aus Konsensschätzungen
-- Falls Schätzungen fehlen: mit "-" markieren
-
-VOLLSTÄNDIGE FINANZÜBERSICHT (full_financials):
-- Übernehme die 6-Jahres-Tabelle (3A + 3E) exakt aus dem Fundamental-Agent Output
+VOLLSTÄNDIGE FINANZÜBERSICHT (full_financials) — EINZIGE Finanztabelle im Memo:
+- Übernehme die Jahres-Tabelle (historische A-Jahre + 3 E-Jahre) exakt aus dem
+  Fundamental-Agent Output — keine zweite, separat konstruierte Schätz-Tabelle.
 - Kennzeichne Schätzjahre explizit als (E) im year-Feld
 - Die Felder source müssen den Disclaimer enthalten:
   "A = Istzahlen | E = Schätzung (Quelle: [source]) | "
@@ -444,7 +440,7 @@ def _build_aggregation_block(
         ifv = revised_estimates.get("indicative_fair_value_adjusted")
         re_block += (
             "\nANWEISUNGEN:\n"
-            "  1. Nutze in der consensus_estimates-Tabelle die REVIDIERTEN Werte für "
+            "  1. Nutze in full_financials die REVIDIERTEN Werte für "
             "die Forward-Jahre (E) und markiere sie in der source-Spalte als "
             "'Makro-revidiert'.\n"
             "  2. Erwähne die wichtigsten Treiber + Transmission-Chains explizit "
@@ -495,9 +491,10 @@ def _build_aggregation_block(
                 fe_block += f"    {flag}\n"
         fe_block += (
             "\nANWEISUNGEN:\n"
-            "  1. Diese Forward-Estimates sind die PRIMÄRE Quelle für die "
-            "consensus_estimates-Tabelle der Forward-Jahre (E). Sie spiegeln eine "
-            "echte Wachstums-These wider, nicht eine Median-Fortschreibung.\n"
+            "  1. Diese Projektion ist bereits deterministisch in die Forward-Jahre "
+            "(E) von full_financials eingeflossen (siehe oben) — spiegelt eine echte "
+            "Wachstums-These wider, keine Median-Fortschreibung. Nutze sie hier als "
+            "Begründungs-Kontext für final_reasoning, ändere die Zahlen NICHT.\n"
             "  2. Das 12-Monats-Kursziel/der Fair Value MUSS auf diesen Projektionen "
             "beruhen (Forward-EPS × angemessenes Multiple, bzw. DCF mit diesen Cashflows).\n"
             "  3. Erkläre die Wachstums-These im final_reasoning unter 'Fundamental:'.\n"
@@ -687,7 +684,7 @@ def synthesize_memo(
 
     fin_context = ""
     if full_financials:
-        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (6 Jahre, direkt übernehmen):\n"
+        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (einzige Finanztabelle, direkt übernehmen):\n"
         fin_context += json.dumps(full_financials, ensure_ascii=False) + "\n"
 
     peer_context = ""
@@ -758,20 +755,21 @@ def synthesize_memo(
 AUFGABEN:
 1. Übernimm die quality_checks aus dem Qualitätsprüfungs-Kontext oben (ergänze ggf.)
 2. Baue die valuation_table aus den key_metrics der Fundamentalanalyse
-3. Baue consensus_estimates: 2 Jahre Actual aus key_metrics + 3 Jahre Estimate aus consensus_estimates/Finanzkennzahlen — bei vorhandener Makro-Revision die REVIDIERTEN Forward-Werte verwenden
-4. Übernimm scenarios aus dem Risk-Agent (Bear/Base/Bull, Summe=100%)
-5. Baue macro_ampel mit genau 4 Einträgen: Makro, Branche, Unternehmen, Konkurrenz
-6. Übernimm conviction_killers aus dem Risk-Agent
-7. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
-8. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
-9. Übernimm full_financials EXAKT aus dem Kontext oben (keine Änderungen)
-10. Übernimm peer_comparison EXAKT aus dem Kontext oben (keine Änderungen)
-11. Erwähne in final_reasoning ob Peer-Bewertung Empfehlung stützt oder widerspricht
-12. ⚠️ NUTZE die AGGREGATIONS-DIREKTIVE oben — die finalen Gewichte und (falls
+3. Übernimm scenarios aus dem Risk-Agent (Bear/Base/Bull, Summe=100%)
+4. Baue macro_ampel mit genau 4 Einträgen: Makro, Branche, Unternehmen, Konkurrenz
+5. Übernimm conviction_killers aus dem Risk-Agent
+6. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
+7. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
+8. Übernimm full_financials EXAKT aus dem Kontext oben (keine Änderungen) — dies
+   ist die EINZIGE Finanz-/Schätz-Tabelle im Memo, baue KEINE zweite eigene
+   Konsens-Tabelle daneben.
+9. Übernimm peer_comparison EXAKT aus dem Kontext oben (keine Änderungen)
+10. Erwähne in final_reasoning ob Peer-Bewertung Empfehlung stützt oder widerspricht
+11. ⚠️ NUTZE die AGGREGATIONS-DIREKTIVE oben — die finalen Gewichte und (falls
     vorgegeben) das Price Target sind dort deterministisch vorgegeben. Berechne
     den Score gemäss Formel und mappe auf die Empfehlung. Erwähne in
     final_reasoning explizit die effektiven Gewichte.
-13. executive_summary: Schreibe 3-5 Sätze in EINFACHER, ALLTÄGLICHER Sprache
+12. executive_summary: Schreibe 3-5 Sätze in EINFACHER, ALLTÄGLICHER Sprache
     für einen interessierten Laien OHNE Finanzausbildung. VERBOTEN sind
     Fachbegriffe wie EV/EBITDA, DCF, Multiple, Forward-P/E, Conviction.
     Stattdessen: "Die Aktie ist im Vergleich zu ähnlichen Firmen eher teuer/
@@ -781,7 +779,7 @@ AUFGABEN:
     der EINE wichtigste Grund? (d) Was ist das grösste Risiko?
     Stell dir vor, du erklärst es einem klugen Freund, der nichts mit Finanzen
     am Hut hat. Schreibe flüssige Sätze, keine Stichworte.
-14. summary_bottom_line: EIN Satz (max. 25 Wörter), die Kernaussage in
+13. summary_bottom_line: EIN Satz (max. 25 Wörter), die Kernaussage in
     einfacher Sprache. Das ist das Erste, was der Leser sieht.
 
 WICHTIG zur Lesbarkeit:

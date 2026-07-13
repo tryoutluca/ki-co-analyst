@@ -21,8 +21,10 @@ from tools.estimate_revision import apply_estimate_adjustments
 
 try:
     from agents.forward_estimate_agent import run_forward_estimate_agent
+    from agents.fundamental_agent import build_forward_rows_from_thesis
 except ImportError:
     from graph.forward_estimate_agent import run_forward_estimate_agent
+    from graph.fundamental_agent import build_forward_rows_from_thesis
 
 try:
     from agents.thematic_agent import run_thematic_agent
@@ -168,9 +170,30 @@ def forward_estimate_node(state: AnalysisState) -> dict:
             f"Conf: {fe.get('self_confidence', 0):.2f} | "
             f"Plausibilitäts-Warnungen: {warns}"
         )
+
+        # full_financials wurde im fundamental-Knoten mit E-Zeilen aus der
+        # simplen consensus_estimates_from_ir-Heuristik gebaut (die läuft vor
+        # diesem Knoten). Jetzt, wo die echte Wachstumsthese vorliegt, werden
+        # die E-Zeilen dadurch ersetzt — sonst zeigt das Memo zwei
+        # widersprüchliche Forward-Projektionen für dieselben Jahre.
+        updated_f_out = f_out
+        full_fin = f_out.get("_full_financials")
+        if isinstance(full_fin, list) and fe.get("projections"):
+            data_cache = f_out.get("_data_cache") or {}
+            new_e_rows = build_forward_rows_from_thesis(
+                projections   = fe["projections"],
+                all_multiples = f_out.get("all_multiples") or data_cache.get("all_multiples"),
+                ir_analysis   = f_out.get("_ir_analysis"),
+                stock_info    = data_cache.get("stock_info"),
+                current_price = f_out.get("current_price"),
+            )
+            actual_rows = [r for r in full_fin if r.get("type") != "E"]
+            updated_f_out = {**f_out, "_full_financials": actual_rows + new_e_rows}
+
         return {
             "forward_estimates":  fe,
             "quarterly_signal":   _qs,
+            "fundamental_output": updated_f_out,
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
     except Exception as e:

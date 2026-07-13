@@ -34,7 +34,6 @@ function MissingDataHint() {
 
 export default function TabValuation({ data }: { data: Record<string, unknown> }) {
   const vt    = (data.valuation_table    as Record<string, unknown>[]) ?? [];
-  const ce    = (data.consensus_estimates as Record<string, unknown>[]) ?? [];
   const ff    = (data.full_financials     as Record<string, unknown>[]) ?? [];
   const pc    = (data.peer_comparison     as Record<string, unknown>)   ?? {};
   const peers = (pc.peers                 as Record<string, unknown>[]) ?? [];
@@ -78,32 +77,33 @@ export default function TabValuation({ data }: { data: Record<string, unknown> }
         ) : incomplete ? <MissingDataHint /> : null}
       </div>
 
-      {/* Consensus Estimates */}
+      {/* Full Financials */}
       <div>
-        <SectionHead>Konsensschätzungen</SectionHead>
-        {ce.length > 0 ? (
+        <SectionHead>Finanzübersicht &amp; Konsensschätzungen</SectionHead>
+        {ff.length > 0 ? (
           <>
             <div className="overflow-x-auto rounded-lg border border-slate-200">
               <table className="w-full text-sm">
                 <thead>
                   <tr>
-                    {["Jahr","Umsatz (Mrd.)","EBITDA-%","EPS","KGV"].map(h =>
+                    {["Jahr","Umsatz","EBITDA","EBITDA-%","EBIT-%","EPS","KGV","DPS","FCF","ND/EBITDA","ROIC","Quelle"].map(h =>
                       <th key={h} className={th}>{h}</th>)}
                   </tr>
                 </thead>
                 <tbody>
-                  {ce.map((r, i) => {
-                    const isEst = r.type === "E";
+                  {ff.map((y, i) => {
+                    const isEst = y.type === "E";
                     return (
                       <tr key={i} className={isEst ? "bg-blue-50/50" : "hover:bg-slate-50"}>
                         <td className={`${td} font-medium`}>
                           {isEst && <span className="text-blue-500 mr-1">📊</span>}
-                          {String(r.year ?? "")}
+                          {String(y.year ?? "")}
                         </td>
-                        <td className={td}>{safeNum(r.revenue_bn)}</td>
-                        <td className={td}>{safeNum(r.ebitda_margin_pct)}%</td>
-                        <td className={td}>{safeNum(r.eps)}</td>
-                        <td className={td}>{safeNum(r.pe_ratio)}</td>
+                        {["revenue_bn","ebitda_bn","ebitda_margin_pct","ebit_margin_pct",
+                          "eps_adj","pe_ratio","dps","fcf_bn","nd_ebitda","roic_pct"].map(k =>
+                          <td key={k} className={td}>{String(y[k] ?? "n/v")}</td>
+                        )}
+                        <td className={`${td} text-xs text-slate-400`}>{String(y.source ?? "")}</td>
                       </tr>
                     );
                   })}
@@ -114,41 +114,6 @@ export default function TabValuation({ data }: { data: Record<string, unknown> }
           </>
         ) : incomplete ? <MissingDataHint /> : null}
       </div>
-
-      {/* Full Financials */}
-      {ff.length > 0 && (
-        <div>
-          <SectionHead>Vollständige Finanzübersicht</SectionHead>
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  {["Jahr","Umsatz","EBITDA","EBITDA-%","EBIT-%","EPS","DPS","FCF","ND/EBITDA","ROIC","Quelle"].map(h =>
-                    <th key={h} className={th}>{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {ff.map((y, i) => {
-                  const isEst = y.type === "E";
-                  return (
-                    <tr key={i} className={isEst ? "bg-blue-50/50" : "hover:bg-slate-50"}>
-                      <td className={`${td} font-medium`}>
-                        {isEst && <span className="text-blue-500 mr-1">📊</span>}
-                        {String(y.year ?? "")}
-                      </td>
-                      {["revenue_bn","ebitda_bn","ebitda_margin_pct","ebit_margin_pct",
-                        "eps_adj","dps","fcf_bn","nd_ebitda","roic_pct"].map(k =>
-                        <td key={k} className={td}>{String(y[k] ?? "n/v")}</td>
-                      )}
-                      <td className={`${td} text-xs text-slate-400`}>{String(y.source ?? "")}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       {/* Peer Comparison */}
       {(peers.length > 0 || subj || avg) && (

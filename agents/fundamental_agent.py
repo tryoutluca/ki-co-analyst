@@ -545,11 +545,13 @@ def run_fundamental_agent(
         # Vollständige Finanzübersicht
         print(f"      Erstelle vollständige Finanzübersicht...")
         forward_list = _build_forward_list(forward_estimates, all_multiples, ir_analysis, stock_info)
+        _current_price = (all_multiples or {}).get("_price_data", {}).get("current_price")
         result["_full_financials"] = build_full_financials(
             hist_data         = hist_data,
             ir_analysis       = ir_analysis or {},
             forward_estimates = forward_list,
             n_years           = 5,
+            current_price     = _current_price,
         )
         result["_peer_comparison"]  = peer_comparison
         result["_valuation_engine"] = {
@@ -643,8 +645,73 @@ def _build_forward_list(
             "net_debt_bn":       _net_debt_bn,
             "nd_ebitda":         nd_ebitda_fwd,
             "ev_ebitda_fwd":     ev_ebitda_fwd,
-            "forward_pe":        est.get("forward_pe"),
+            "pe_ratio":          est.get("forward_pe", "-"),
             "source":            est.get("source", forward_estimates.get("source", "-")),
+        })
+    return rows
+
+
+def build_forward_rows_from_thesis(
+    projections: list,
+    all_multiples: dict | None,
+    ir_analysis: dict | None,
+    stock_info: dict | None,
+    current_price: float | None = None,
+) -> list:
+    """
+    Baut FullFinancialYear-E-Zeilen aus den Forward-Estimate-Agent-Projektionen
+    (Wachstumsthese), damit full_financials und die Forward-Projektion nie
+    auseinanderlaufen — statt der schwächeren consensus_estimates_from_ir-
+    Heuristik aus _build_forward_list, die keine Wachstumsthese kennt.
+    """
+    def _sf(v):
+        try:
+            return float(v) if v not in (None, "-", "n/v", "not found", "") else None
+        except (TypeError, ValueError):
+            return None
+
+    stock_info = stock_info or {}
+    _net_debt_bn = _sf((ir_analysis or {}).get("net_debt_bn"))
+    if _net_debt_bn is None:
+        _d = _sf(stock_info.get("totalDebt"))
+        _c = _sf(stock_info.get("totalCash"))
+        if _d is not None:
+            _net_debt_bn = round((_d or 0) / 1e9 - (_c or 0) / 1e9, 2)
+
+    _mc_bn = (all_multiples or {}).get("_price_data", {}).get("market_cap_bn")
+    _ev_bn = round(_mc_bn + _net_debt_bn, 2) if (_mc_bn and _net_debt_bn is not None) else None
+    _last_dps = _sf((ir_analysis or {}).get("dividend_per_share"))
+    if current_price is None:
+        current_price = (all_multiples or {}).get("_price_data", {}).get("current_price")
+
+    rows = []
+    for p in projections or []:
+        rev      = _sf(p.get("revenue_bn"))
+        ebitda_m = _sf(p.get("ebitda_margin_pct"))
+        ebitda_bn = _sf(p.get("ebitda_bn")) or (round(rev * ebitda_m / 100, 2) if (rev and ebitda_m) else None)
+        eps      = _sf(p.get("eps"))
+        nd_ebitda_fwd = round(_net_debt_bn / ebitda_bn, 2) if (_net_debt_bn is not None and ebitda_bn and ebitda_bn > 0) else None
+
+        pe_ratio = "-"
+        if current_price and eps and eps > 0:
+            pe_ratio = round(current_price / eps, 1)
+
+        rows.append({
+            "year":              p.get("year"),
+            "type":              "E",
+            "revenue_bn":        rev,
+            "ebitda_bn":         ebitda_bn,
+            "ebitda_margin_pct": ebitda_m,
+            "ebit_margin_pct":   "-",
+            "eps_adj":           eps,
+            "dps":               _last_dps if _last_dps is not None else "-",
+            "fcf_bn":            "-",
+            "net_debt_bn":       _net_debt_bn if _net_debt_bn is not None else "-",
+            "nd_ebitda":         nd_ebitda_fwd if nd_ebitda_fwd is not None else "-",
+            "roic_pct":          "-",
+            "capex_bn":          "-",
+            "pe_ratio":          pe_ratio,
+            "source":            "forward_estimate_agent (Wachstumsthese)",
         })
     return rows
 
@@ -654,6 +721,7 @@ def build_full_financials(
     ir_analysis: dict,
     forward_estimates: list,
     n_years: int = 5,
+    current_price: float | None = None,
 ) -> list:
     if not hist_data:
         return forward_estimates or []
@@ -701,6 +769,14 @@ def build_full_financials(
     result = []
     for yr in sorted(years):
         d = hist_data[yr]
+        eps = d.get("eps")
+        pe_ratio = "-"
+        if current_price and eps:
+            try:
+                if float(eps) > 0:
+                    pe_ratio = round(current_price / float(eps), 1)
+            except (TypeError, ValueError):
+                pass
         result.append({
             "year":              f"{yr}A",
             "type":              "A",
@@ -710,7 +786,7 @@ def build_full_financials(
             "ebit_bn":           d.get("ebit_bn"),
             "ebit_margin_pct":   d.get("ebit_margin_pct"),
             "net_income_bn":     d.get("net_income_bn"),
-            "eps_adj":           d.get("eps"),
+            "eps_adj":           eps,
             "dps":               d.get("dps"),
             "fcf_bn":            d.get("fcf_bn"),
             "net_debt_bn":       d.get("net_debt_bn"),
@@ -719,6 +795,7 @@ def build_full_financials(
             "roic_pct":          d.get("roic_pct"),
             "capex_bn":          d.get("capex_bn"),
             "gross_margin_pct":  d.get("gross_margin_pct"),
+            "pe_ratio":          pe_ratio,
             "source":            d.get("source", "yfinance"),
         })
     result.extend(forward_estimates or [])

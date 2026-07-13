@@ -652,6 +652,7 @@ def run_full_analysis(ticker: str) -> dict:
         fwd_est = None
         try:
             from agents.forward_estimate_agent import run_forward_estimate_agent
+            from agents.fundamental_agent import build_forward_rows_from_thesis
             from tools.finance_tools import get_consensus_estimates
             st.write("📈  **Forward-Estimate-Agent** — Wachstums-Projektion…")
             try: _cons = get_consensus_estimates(ticker)
@@ -662,6 +663,22 @@ def run_full_analysis(ticker: str) -> dict:
                 consensus_estimates=_cons)
             if fwd_est:
                 st.write(f"   ✅ {fwd_est.get('overall_thesis','')[:80]}")
+                # full_financials wurde vom Fundamental-Agent mit E-Zeilen aus der
+                # simplen consensus_estimates_from_ir-Heuristik gebaut — jetzt mit
+                # der echten Wachstumsthese ersetzen, sonst widersprechen sich die
+                # beiden Forward-Projektionen im Memo.
+                full_fin = f_out.get("_full_financials")
+                if isinstance(full_fin, list) and fwd_est.get("projections"):
+                    data_cache = f_out.get("_data_cache") or {}
+                    new_e_rows = build_forward_rows_from_thesis(
+                        projections   = fwd_est["projections"],
+                        all_multiples = f_out.get("all_multiples") or data_cache.get("all_multiples"),
+                        ir_analysis   = f_out.get("_ir_analysis"),
+                        stock_info    = data_cache.get("stock_info"),
+                        current_price = f_out.get("current_price"),
+                    )
+                    actual_rows = [r for r in full_fin if r.get("type") != "E"]
+                    f_out["_full_financials"] = actual_rows + new_e_rows
         except Exception as e:
             st.write(f"   ⚠ Forward-Estimates: {e}")
 
@@ -1171,29 +1188,19 @@ def page_analyse():
                 st.plotly_chart(fig_v,use_container_width=True)
                 st.caption("📖 Blauer Balken (Aktuell) höher als Peer Ø → Aktie teuer. Tiefer → günstiger.")
 
-        ce = data.get("consensus_estimates",[])
-        if ce:
-            st.markdown('<div class="section-head">Konsensschätzungen</div>',unsafe_allow_html=True)
-            rows_ce = [{"Jahr":("📊 " if r.get("type")=="E" else "")+str(r.get("year","")),
-                        "Umsatz":r.get("revenue_bn","-"),
-                        "EBITDA-%":r.get("ebitda_margin_pct","-"),
-                        "EPS":r.get("eps","-"),
-                        "KGV":r.get("pe_ratio","-")} for r in ce]
-            st.dataframe(pd.DataFrame(rows_ce),use_container_width=True,hide_index=True)
-            fig_m = chart_margin_trend(ce)
-            if fig_m:
-                st.plotly_chart(fig_m,use_container_width=True)
-
         ff = data.get("full_financials",[])
         if ff:
-            st.markdown('<div class="section-head">Vollständige Finanzübersicht (6 Jahre)</div>',unsafe_allow_html=True)
+            st.markdown('<div class="section-head">Vollständige Finanzübersicht</div>',unsafe_allow_html=True)
             rows_ff = [{"Jahr":("📊 " if y.get("type")=="E" else "")+str(y.get("year","")),
                         "Umsatz":y.get("revenue_bn","n/v"),"EBITDA":y.get("ebitda_bn","n/v"),
                         "EBITDA-%":y.get("ebitda_margin_pct","-"),"EBIT-%":y.get("ebit_margin_pct","n/v"),
-                        "EPS":y.get("eps_adj","n/v"),"DPS":y.get("dps","n/v"),
+                        "EPS":y.get("eps_adj","n/v"),"KGV":y.get("pe_ratio","-"),"DPS":y.get("dps","n/v"),
                         "FCF":y.get("fcf_bn","n/v"),"ND/EBITDA":y.get("nd_ebitda","n/v"),
                         "ROIC":y.get("roic_pct","n/v"),"Quelle":y.get("source","")} for y in ff]
             st.dataframe(pd.DataFrame(rows_ff),use_container_width=True,hide_index=True)
+            fig_m = chart_margin_trend(ff)
+            if fig_m:
+                st.plotly_chart(fig_m,use_container_width=True)
 
         pc = data.get("peer_comparison") or {}
         peers = pc.get("peers",[])
