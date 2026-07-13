@@ -9,7 +9,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-_llm = ChatOpenAI(model="gpt-5.4-mini")
+# Hinweis: gpt-5-Modelle (ausser gpt-5-chat) erzwingen temperature=1 —
+# langchain-openai verwirft temperature=0 hier still, keine echte
+# Determinismus-Garantie (siehe fundamental_agent.py für Details).
+_llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
 
 _PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Du bist ein spezialisierter Capital-Allocation-Analyst.
@@ -99,7 +102,10 @@ def run_capital_allocation_agent(
         "sector":        sector,
         "cashflow_data": json.dumps(cashflow_data,  ensure_ascii=False)[:2500],
         "financials":    json.dumps(financials,     ensure_ascii=False)[:1500],
-        "hist_data":     json.dumps(hist_data,      ensure_ascii=False)[:2000],
+        # hist_data kommt bereits auf 5 Jahre begrenzt vom Orchestrator (siehe
+        # _recent_years in fundamental_agent.py) — das Slice hier ist nur noch
+        # ein grosszügiges Backstop, nicht mehr die primäre Kürzung.
+        "hist_data":     json.dumps(hist_data,      ensure_ascii=False)[:6000],
         "ir_capital":    json.dumps(ir_capital,     ensure_ascii=False),
         "stock_summary": json.dumps(stock_summary,  ensure_ascii=False),
         "supervisor_critique": supervisor_critique or "keines",

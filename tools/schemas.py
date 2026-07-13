@@ -480,6 +480,14 @@ class FundamentalAgentOutput(BaseModel):
             "Orchestrator gesetzt, nicht vom LLM."
         )
     )
+    data_source_errors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Namen deterministischer Datenquellen (z.B. 'multiples_engine'), die "
+            "komplett ausgefallen sind. Wird deterministisch vom Orchestrator "
+            "gesetzt, nicht vom LLM."
+        )
+    )
 
 
 # ── Risk Agent ───────────────────────────────────────────────────────────────

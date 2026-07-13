@@ -9,7 +9,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-_llm = ChatOpenAI(model="gpt-5.4-mini")
+# Hinweis: gpt-5-Modelle (ausser gpt-5-chat) erzwingen temperature=1 —
+# langchain-openai verwirft temperature=0 hier still, keine echte
+# Determinismus-Garantie (siehe fundamental_agent.py für Details).
+_llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
 
 _PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Du bist ein spezialisierter Growth-Analyst.
@@ -106,7 +109,10 @@ def run_growth_agent(
     raw = chain.invoke({
         "ticker":            ticker,
         "sector":            sector,
-        "hist_data":         json.dumps(hist_data,          ensure_ascii=False)[:2500],
+        # hist_data kommt bereits auf 5 Jahre begrenzt vom Orchestrator (siehe
+        # _recent_years in fundamental_agent.py) — das Slice hier ist nur noch
+        # ein grosszügiges Backstop, nicht mehr die primäre Kürzung.
+        "hist_data":         json.dumps(hist_data,          ensure_ascii=False)[:6000],
         "estimate_anchors":  json.dumps(estimate_anchors,   ensure_ascii=False)[:1500],
         "forward_estimates": json.dumps(forward_estimates,  ensure_ascii=False)[:2000],
         "peer_summary":      json.dumps(peer_summary,       ensure_ascii=False)[:2000],

@@ -10,7 +10,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-_llm = ChatOpenAI(model="gpt-5.4-mini")
+# Hinweis: gpt-5-Modelle (ausser gpt-5-chat) erzwingen temperature=1 —
+# langchain-openai verwirft temperature=0 hier still, keine echte
+# Determinismus-Garantie (siehe fundamental_agent.py für Details).
+_llm = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
 
 _PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Du bist ein spezialisierter Valuation-Analyst.

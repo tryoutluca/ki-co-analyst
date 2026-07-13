@@ -47,7 +47,11 @@ from agents.sub.valuation_agent import run_valuation_agent
 
 load_dotenv()
 
-_llm    = ChatOpenAI(model="gpt-5.4-mini")
+# Hinweis: gpt-5-Modelle (ausser gpt-5-chat) unterstützen nur temperature=1
+# oder unset — langchain-openai verwirft temperature=0 hier still (siehe
+# ChatOpenAI.validate_temperature). Gesetzt für Konsistenz mit dem Rest des
+# Codes, bewirkt bei diesem Modell aber KEINE Determinismus-Garantie.
+_llm    = ChatOpenAI(model="gpt-5.4-mini", temperature=0)
 _parser = JsonOutputParser(pydantic_object=FundamentalAgentOutput)
 
 # ── Lead-Syntheseprompt ───────────────────────────────────────────────────────
@@ -296,14 +300,21 @@ def run_fundamental_agent(
         except Exception as db_err:
             print(f"      ⚠ IR-Quartal→DB Fehler: {db_err}")
 
+    # Fehler bei deterministischen Datenquellen (aktuell: MultiplesEngine-
+    # Totalausfall) — sollen nicht mehr still verpuffen, sondern denselben
+    # sub_agent_errors-Mechanismus für die self_confidence-Deckelung speisen
+    # und explizit an den Lead gemeldet werden (siehe unten).
+    data_source_errors: list[str] = []
+
     if data_cache is not None:
-        hist_data         = data_cache["hist_data"]
-        sector            = data_cache["sector"]
-        all_multiples     = data_cache["all_multiples"]
-        forward_estimates = data_cache["forward_estimates"]
-        peer_comparison   = data_cache["peer_comparison"]
-        estimate_anchors  = data_cache["estimate_anchors"]
-        dcf_result        = data_cache["dcf_result"]
+        hist_data           = data_cache["hist_data"]
+        sector              = data_cache["sector"]
+        all_multiples       = data_cache["all_multiples"]
+        forward_estimates   = data_cache["forward_estimates"]
+        peer_comparison     = data_cache["peer_comparison"]
+        estimate_anchors    = data_cache["estimate_anchors"]
+        dcf_result          = data_cache["dcf_result"]
+        data_source_errors  = data_cache.get("data_source_errors", [])
     else:
         print(f"      Hole historische Finanzdaten...")
         hist_data = get_historical_financials(ticker)
@@ -332,6 +343,7 @@ def run_fundamental_agent(
         except Exception as e:
             print(f"      ⚠ MultiplesEngine Fehler: {e}")
             all_multiples = {}
+            data_source_errors.append("multiples_engine")
 
         print(f"      Berechne Konsensschätzungen...")
         forward_estimates = consensus_estimates_from_ir(
@@ -371,6 +383,14 @@ def run_fundamental_agent(
 
     sub_results: dict[str, dict] = {}
 
+    # Auf die 5 jüngsten Jahre begrenzen, BEVOR es in die Sub-Agent-Prompts
+    # geht (die Prompts selbst sagen "(5J)") — verhindert blindes Zeichen-
+    # Slicing beim Serialisieren, das JSON mitten in der Struktur abschneiden
+    # und dabei genau die neuesten (wichtigsten) Jahre verstümmeln konnte.
+    # Für _full_financials/MultiplesEngine wird weiterhin die volle Historie
+    # (hist_data) verwendet, nur die Sub-Agent-Prompts bekommen die Kurzform.
+    hist_data_recent = _recent_years(hist_data, n=5)
+
     # Kritik geht an ALLE Sub-Agenten (der Supervisor kritisiert die
     # Fundamentalanalyse als Ganzes, nicht gezielt einen Sub-Agenten) — jeder
     # entscheidet selbst, ob sie seinen Bereich betrifft. Ohne das würde eine
@@ -380,11 +400,11 @@ def run_fundamental_agent(
     tasks = {
         "quality": lambda: run_quality_agent(
             ticker, sector, cashflow_data, financials,
-            hist_data, all_multiples, ir_analysis or {},
+            hist_data_recent, all_multiples, ir_analysis or {},
             supervisor_critique=supervisor_critique,
         ),
         "growth": lambda: run_growth_agent(
-            ticker, sector, hist_data, forward_estimates,
+            ticker, sector, hist_data_recent, forward_estimates,
             estimate_anchors, peer_comparison, ir_analysis or {},
             ir_annual_history=ir_annual_years,
             supervisor_critique=supervisor_critique,
@@ -397,7 +417,7 @@ def run_fundamental_agent(
         ),
         "capital_allocation": lambda: run_capital_allocation_agent(
             ticker, sector, cashflow_data, financials,
-            hist_data, stock_info, ir_analysis or {},
+            hist_data_recent, stock_info, ir_analysis or {},
             supervisor_critique=supervisor_critique,
         ),
     }
@@ -445,6 +465,12 @@ def run_fundamental_agent(
             f"ignoriere ihn vollständig, stütze dich nur auf die übrigen): "
             f"{', '.join(sub_agent_errors)}"
         )
+    if data_source_errors:
+        senior_feedback += (
+            f"\n\n⚠️ FEHLGESCHLAGENE DATENQUELLEN (deterministische Berechnung "
+            f"nicht verfügbar, Einschätzung entsprechend vorsichtiger formulieren): "
+            f"{', '.join(data_source_errors)}"
+        )
 
     core_data = {
         "company":       stock_info.get("name", ticker),
@@ -474,10 +500,12 @@ def run_fundamental_agent(
 
     # ── 4. Post-Processing (deterministisch, wie bisher) ─────────────────────
     if isinstance(result, dict):
-        # Sub-Agent-Fehler sichtbar machen und self_confidence deterministisch
-        # deckeln — unabhängig davon, was die LLM-Selbsteinschätzung sagt.
+        # Sub-Agent-/Datenquellen-Fehler sichtbar machen und self_confidence
+        # deterministisch deckeln — unabhängig davon, was die LLM-eigene
+        # Selbsteinschätzung sagt.
         result["sub_agent_errors"] = sub_agent_errors
-        if sub_agent_errors:
+        result["data_source_errors"] = data_source_errors
+        if sub_agent_errors or data_source_errors:
             result["self_confidence"] = min(float(result.get("self_confidence", 0.70)), 0.4)
 
         # Valuation-Engine-Werte überschreiben LLM-Output
@@ -529,12 +557,21 @@ def run_fundamental_agent(
             "peer_comparison":      peer_comparison,
             "estimate_anchors":     estimate_anchors,
             "dcf_result":           dcf_result,
+            "data_source_errors":   data_source_errors,
         }
 
     return result
 
 
-# ── Hilfsfunktionen (unverändert) ────────────────────────────────────────────
+# ── Hilfsfunktionen ───────────────────────────────────────────────────────────
+
+def _recent_years(hist_data: dict, n: int = 5) -> dict:
+    """Beschränkt hist_data auf die n jüngsten Jahre (für Sub-Agent-Prompts)."""
+    if not hist_data:
+        return hist_data
+    years_sorted = sorted(hist_data.keys(), reverse=True)[:n]
+    return {yr: hist_data[yr] for yr in years_sorted}
+
 
 def _build_forward_list(
     forward_estimates: dict,
@@ -598,6 +635,11 @@ def build_full_financials(
 ) -> list:
     if not hist_data:
         return forward_estimates or []
+
+    # Nie das übergebene hist_data mutieren — das kann inzwischen ein
+    # gecachtes, über mehrere Retry-/Kritik-Runden wiederverwendetes Dict
+    # sein (siehe data_cache in run_fundamental_agent).
+    hist_data = {yr: dict(d) for yr, d in hist_data.items()}
 
     last_year = max(hist_data.keys())
 
