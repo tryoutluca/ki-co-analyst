@@ -827,6 +827,37 @@ Gib das Ergebnis als JSON zurück."""),
         if not result.get("peer_comparison") and peer_comparison:
             result["peer_comparison"] = peer_comparison
 
+    # Historische Multiples-Durchschnitte deterministisch einmischen: der
+    # Supervisor baut valuation_table selbst aus key_metrics (eigene Metrik-
+    # Labels, z.B. "Forward P/E" statt "P/E") und lässt historical_average
+    # dabei meist auf "-" — die echten Werte kommen aus dem Fundamental-Agent
+    # (financial_db + yfinance-Jahresend-Kurse, siehe _build_valuation_table)
+    # und werden hier per Fuzzy-Metrik-Namen nachträglich eingesetzt, statt
+    # dem LLM zu überlassen, ob es sie übernimmt.
+    hist_avgs = _extract(fundamental_output, "_historical_multiples_avg", {}) or {}
+    if isinstance(result, dict) and hist_avgs and isinstance(result.get("valuation_table"), list):
+        _METRIC_NAME_TO_KEY = [
+            ("ebitda", "ev_ebitda"),
+            ("sales", "ev_sales"),
+            ("umsatz", "ev_sales"),
+            ("book", "pb_ratio"),
+            ("p/b", "pb_ratio"),
+            ("fcf", "fcf_yield"),
+            ("div", "dividend_yield"),
+            ("p/e", "pe_ratio"),
+            ("kgv", "pe_ratio"),
+        ]
+        for row in result["valuation_table"]:
+            if not isinstance(row, dict) or row.get("historical_average") not in (None, "-", ""):
+                continue
+            metric_lower = str(row.get("metric", "")).lower()
+            for needle, hist_key in _METRIC_NAME_TO_KEY:
+                if needle in metric_lower and hist_avgs.get(hist_key) is not None:
+                    row["historical_average"] = f"{hist_avgs[hist_key]:.2f}"
+                    break
+
+    # ── Hartes Price-Target-Override bei dcf_applicable=False ──────────────
+
     # ── Hartes Price-Target-Override bei dcf_applicable=False ──────────────
     # Doppelter Boden: falls der LLM die Aggregations-Direktive ignoriert hat,
     # wird das Price Target deterministisch gesetzt. Vorrang:

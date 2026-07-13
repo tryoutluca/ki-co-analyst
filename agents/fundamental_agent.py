@@ -36,7 +36,7 @@ from tools.finance_tools import (
     get_stock_info,
 )
 from tools.ir_rag_tool import consensus_estimates_from_ir, get_ir_analysis
-from tools.multiples_engine import MultiplesEngine
+from tools.multiples_engine import MultiplesEngine, compute_historical_averages
 from tools.schemas import FundamentalAgentOutput
 from tools.valuation_engine import build_valuation_table, run_dcf
 
@@ -315,6 +315,7 @@ def run_fundamental_agent(
         estimate_anchors    = data_cache["estimate_anchors"]
         dcf_result          = data_cache["dcf_result"]
         data_source_errors  = data_cache.get("data_source_errors", [])
+        hist_multiples_avg  = data_cache.get("hist_multiples_avg", {})
     else:
         print(f"      Hole historische Finanzdaten...")
         hist_data = get_historical_financials(ticker)
@@ -377,6 +378,21 @@ def run_fundamental_agent(
         )
 
         dcf_result = run_dcf(ir_analysis, financials, cashflow_data, stock_info)
+
+        # Historische Multiples-Durchschnitte (Hist. Ø in der Bewertungs-
+        # tabelle) — deterministisch aus financial_db (10J Fundamentaldaten,
+        # dank Phase 7 mit echten Periodenenden) + yfinance-Jahresend-Kursen.
+        # Unabhängig von Finnhub/get_historical_multiples, das keine EV/Sales-
+        # /FCF-Yield-/Div-Yield-Serien liefert.
+        print(f"      Berechne historische Multiples-Durchschnitte...")
+        try:
+            from tools.financial_db import init_db as _init_db_hist, get_annual_history
+            _init_db_hist()
+            _annual_rows = get_annual_history(ticker, n_years=10)
+            hist_multiples_avg = compute_historical_averages(ticker, _annual_rows, n_years=5)
+        except Exception as e:
+            print(f"      ⚠ Historische Multiples-Durchschnitte fehlgeschlagen: {e}")
+            hist_multiples_avg = {}
 
     # ── 2. Sub-Agents parallel ────────────────────────────────────────────────
     print(f"      🚀 Starte 4 Sub-Agents parallel...")
@@ -510,8 +526,13 @@ def run_fundamental_agent(
 
         # Valuation-Engine-Werte überschreiben LLM-Output
         if all_multiples:
-            result["valuation_table"] = _build_valuation_table(all_multiples, sector)
+            result["valuation_table"] = _build_valuation_table(all_multiples, sector, ticker, hist_multiples_avg)
             result["all_multiples"]   = all_multiples
+        # Für den Supervisor: roh, damit er sein eigenes valuation_table per
+        # Metrik-Namens-Zuordnung mit den echten Werten überschreiben kann
+        # (der Supervisor baut die Tabelle selbst aus key_metrics und würde
+        # historical_average sonst auf "-" belassen).
+        result["_historical_multiples_avg"] = hist_multiples_avg
         p = all_multiples.get("_price_data", {}) if all_multiples else {}
         if p.get("current_price"):
             result["current_price"] = p["current_price"]
@@ -558,6 +579,7 @@ def run_fundamental_agent(
             "estimate_anchors":     estimate_anchors,
             "dcf_result":           dcf_result,
             "data_source_errors":   data_source_errors,
+            "hist_multiples_avg":   hist_multiples_avg,
         }
 
     return result
@@ -703,7 +725,7 @@ def build_full_financials(
     return result
 
 
-def _build_valuation_table(all_multiples: dict, sector: str) -> list:
+def _build_valuation_table(all_multiples: dict, sector: str, ticker: str, hist_avgs: dict | None = None) -> list:
     sector_lower = sector.lower()
 
     if any(w in sector_lower for w in ["bank", "versicher", "financ"]):
@@ -719,15 +741,24 @@ def _build_valuation_table(all_multiples: dict, sector: str) -> list:
             ("Div-Yield", "dividend_yield"),
         ]
 
+    if hist_avgs is None:
+        hist_avgs = {}
+
     table = []
     for label, key in primary:
         m = all_multiples.get(key, {})
         if m.get("valid"):
+            # p_fcf (P/FCF) hat kein direktes historisches Gegenstück — wird
+            # aus fcf_yield (Kehrwert, in %) abgeleitet, falls vorhanden.
+            hist_key = "fcf_yield" if key == "p_fcf" else key
+            hist_val = hist_avgs.get(hist_key)
+            if key == "p_fcf" and hist_val:
+                hist_val = round(100 / hist_val, 2) if hist_val else None
             table.append({
                 "metric":             label,
                 "current_value":      str(m["value"]),
                 "peer_average":       "-",
-                "historical_average": "-",
+                "historical_average": f"{hist_val:.2f}" if hist_val is not None else "-",
                 "assessment":         "FAIR",
                 "calculation":        m["formula"],
                 "source":             m["source"],

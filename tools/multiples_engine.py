@@ -518,3 +518,108 @@ class MultiplesEngine:
         results["_summary"] = {"valid": valid_n, "total_calculated": total_n}
 
         return results
+
+
+def compute_historical_averages(ticker: str, annual_rows: list[dict], n_years: int = 5) -> dict:
+    """
+    Historische Durchschnitte der Bewertungsmultiples (EV/EBITDA, P/E, EV/Sales,
+    P/B, FCF-Yield, Dividend-Yield), deterministisch aus financial_db-
+    Fundamentaldaten + yfinance-Jahresend-Kursen berechnet — unabhängig von
+    Finnhub. Setzt voraus, dass annual_rows echte period_end-Daten tragen
+    (siehe Phase 7: Perioden-Enden sind jetzt bei allen Quellen echte Daten,
+    kein f"{jahr}-12-31"-Hardcode mehr).
+
+    annual_rows: Zeilen aus financial_db.get_annual_history(ticker), neuestes
+    Jahr zuerst oder zuletzt (Reihenfolge egal, wird hier selbst sortiert).
+
+    Returns: {"ev_ebitda": float, "pe_ratio": float, "ev_sales": float,
+              "pb_ratio": float, "fcf_yield": float, "dividend_yield": float,
+              "years_used": [int, ...]} — Schlüssel fehlen, wenn für keine
+    Periode genug Daten (Kurs + Fundamentalwert) vorlagen. Nie erfundene Werte.
+    """
+    from datetime import datetime as _dt
+    import pandas as pd
+
+    rows = [r for r in (annual_rows or []) if r.get("period_end")]
+    rows = sorted(rows, key=lambda r: r["period_end"], reverse=True)[:n_years]
+    if not rows:
+        return {}
+
+    oldest_end = min(r["period_end"] for r in rows)
+    try:
+        stock = yf.Ticker(ticker)
+        price_hist = stock.history(
+            start=oldest_end, end=_dt.now().strftime("%Y-%m-%d"), interval="1d",
+        )
+    except Exception as e:
+        logger.warning(f"compute_historical_averages: Kursabruf fehlgeschlagen ({ticker}): {e}")
+        return {}
+    if price_hist is None or price_hist.empty:
+        return {}
+
+    def _price_near(date_str: str) -> float | None:
+        try:
+            target = pd.Timestamp(date_str)
+        except Exception:
+            return None
+        idx = price_hist.index
+        if idx.tz is not None:
+            target = target.tz_localize(idx.tz) if target.tzinfo is None else target.tz_convert(idx.tz)
+        pos = idx.get_indexer([target], method="nearest")
+        if len(pos) == 0 or pos[0] == -1:
+            return None
+        return float(price_hist["Close"].iloc[pos[0]])
+
+    metrics: dict[str, list[float]] = {
+        "ev_ebitda": [], "pe_ratio": [], "ev_sales": [],
+        "pb_ratio": [], "fcf_yield": [], "dividend_yield": [],
+    }
+    years_used: list[int] = []
+
+    for r in rows:
+        price = _price_near(r["period_end"])
+        shares = r.get("shares_bn")
+        if price is None or not shares:
+            continue
+        market_cap = price * shares  # Mrd. (shares_bn ist in Mrd. Aktien)
+        net_debt = r.get("net_debt_bn") or 0
+        ev = market_cap + net_debt
+        used_this_year = False
+
+        ebitda = r.get("ebitda_bn")
+        if ebitda and ebitda > 0:
+            metrics["ev_ebitda"].append(ev / ebitda)
+            used_this_year = True
+
+        eps = r.get("eps_adj")
+        if eps and eps > 0:
+            metrics["pe_ratio"].append(price / eps)
+            used_this_year = True
+
+        revenue = r.get("revenue_bn")
+        if revenue and revenue > 0:
+            metrics["ev_sales"].append(ev / revenue)
+            used_this_year = True
+
+        equity = r.get("total_equity_bn")
+        if equity and equity > 0:
+            metrics["pb_ratio"].append(market_cap / equity)
+            used_this_year = True
+
+        fcf = r.get("fcf_bn")
+        if fcf is not None and market_cap > 0:
+            metrics["fcf_yield"].append(fcf / market_cap * 100)
+            used_this_year = True
+
+        dps = r.get("dps")
+        if dps and price > 0:
+            metrics["dividend_yield"].append(dps / price * 100)
+            used_this_year = True
+
+        if used_this_year:
+            years_used.append(r["fiscal_year"])
+
+    averages = {k: round(sum(v) / len(v), 2) for k, v in metrics.items() if v}
+    if averages:
+        averages["years_used"] = sorted(set(years_used), reverse=True)
+    return averages
