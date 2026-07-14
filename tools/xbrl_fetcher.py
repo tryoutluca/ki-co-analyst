@@ -104,6 +104,14 @@ _ANNUAL_CONCEPT_MAP: dict[str, list[str]] = {
         "CommonStockDividendsPerShareDeclared",
         "CommonStockDividendsPerShareCashPaid",
     ],
+    # Nur für die ROIC-Ableitung genutzt (nie als eigene DB-Spalte gespeichert
+    # — _FINANCIAL_COLS in financial_db.py kennt diese Felder nicht, sie
+    # werden beim Upsert stillschweigend ignoriert).
+    "ebt_bn": [
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+    ],
+    "tax_expense_bn": ["IncomeTaxExpenseBenefit"],
 }
 
 # Flussgrössen: additiv über das Geschäftsjahr, dürfen für die Q4-Ableitung
@@ -302,8 +310,14 @@ def _extract_concept(
         return {}
 
     units = data.get("units", {})
-    # Prefer USD, fall back to shares for EPS/shares concepts
-    values_raw = units.get("USD") or units.get("shares") or units.get("pure") or []
+    # Prefer USD, fall back to USD/shares (EPS/DPS) or shares/pure.
+    # Bug (bis 2026-07): "shares" wurde gesucht, SEC taggt Pro-Aktie-Werte
+    # aber unter "USD/shares" — EPS/DPS wurden dadurch für JEDEN Filer nie
+    # gefunden, obwohl die Facts vorhanden waren (verifiziert an MSFT).
+    values_raw = (
+        units.get("USD") or units.get("USD/shares")
+        or units.get("shares") or units.get("pure") or []
+    )
 
     by_year: dict[int, tuple[float, str]] = {}  # year → (value, filed_date)
     for entry in values_raw:
@@ -366,6 +380,26 @@ def _extract_field_by_year(
             print(f"        [xbrl-debug] {db_field} {yr}: Fallback-Tag "
                   f"'{tag_used[yr]}' (statt '{primary}')")
     return merged
+
+
+# Viele Filer taggen D&A nicht als einen kombinierten Wert (z.B. MSFT: kein
+# einziger der _ANNUAL_CONCEPT_MAP["da_bn"]-Kandidaten existiert), sondern
+# splitten in separate Depreciation- und Amortization-Facts. Nur als Fallback
+# genutzt, wenn kein kombinierter Tag für ein Jahr einen Wert liefert.
+_DA_SPLIT_CONCEPTS = ["Depreciation", "AmortizationOfIntangibleAssets"]
+
+
+def _extract_concept_sum(
+    facts: dict, concepts: list[str], form_filter: str | None = "10-K",
+    fy_end_month: int | None = None,
+) -> dict[int, float]:
+    """Summiert mehrere additive Flussgrößen-Konzepte pro Jahr (roh, unskaliert)."""
+    totals: dict[int, float] = {}
+    for concept in concepts:
+        values = _extract_concept(facts, concept, form_filter=form_filter, fy_end_month=fy_end_month)
+        for yr, val in values.items():
+            totals[yr] = totals.get(yr, 0.0) + val
+    return totals
 
 
 def _annual_end_dates_by_year(facts: dict, fy_end_month: int | None) -> dict[int, str]:
@@ -436,6 +470,18 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
                 year_data[yr] = {}
             year_data[yr][db_field] = scaled_val
 
+    # Fallback für D&A, wenn kein kombinierter Tag existiert (z.B. MSFT taggt
+    # nur "Depreciation" + "AmortizationOfIntangibleAssets" getrennt statt
+    # eines kombinierten "DepreciationAndAmortization").
+    da_split_raw = _extract_concept_sum(
+        facts, _DA_SPLIT_CONCEPTS, form_filter="10-K", fy_end_month=fy_end_month,
+    )
+    for yr, raw_val in da_split_raw.items():
+        if yr not in year_data:
+            year_data[yr] = {}
+        if year_data[yr].get("da_bn") is None:
+            year_data[yr]["da_bn"] = _scale_bn(raw_val, "Depreciation")
+
     # Echte Periodenenden pro Fiskaljahr, direkt aus den 10-K-Facts — kein
     # f"{yr}-12-31"-Hardcode mehr, der für Nicht-Kalenderjahr-GJ (z.B. NVDA,
     # Ende Januar) falsch wäre.
@@ -472,6 +518,24 @@ def fetch_xbrl_annual(ticker: str, cik: str, max_years: int = 10) -> list[dict]:
             da   = d.get("da_bn")
             if ebit is not None and da is not None:
                 d["ebitda_bn"] = round(ebit + abs(da), 4)
+
+        # ROIC = NOPAT / Invested Capital. Invested Capital wird hier als
+        # Total Debt + Equity − Cash angenähert (Standard-Proxy, gleiche
+        # Definition wie im yfinance-Pfad in get_historical_financials).
+        equity = d.get("total_equity_bn")
+        if debt is not None and equity is not None and cash is not None:
+            d["invested_capital_bn"] = round(debt + equity - cash, 4)
+
+        ebit    = d.get("ebit_bn")
+        ebt     = d.get("ebt_bn")
+        tax_exp = d.get("tax_expense_bn")
+        ic      = d.get("invested_capital_bn")
+        if ebit is not None and ebt and tax_exp is not None and ic and ic > 0:
+            tax_rate = abs(tax_exp) / abs(ebt) * 100
+            if 0 < tax_rate < 60:
+                nopat = ebit * (1 - tax_rate / 100)
+                if nopat > 0:
+                    d["roic_pct"] = round(nopat / ic * 100, 1)
 
         # Echtes Periodenende, sonst None (nie konstruiert) — siehe 7.4.
         period_end = period_end_by_year.get(yr)

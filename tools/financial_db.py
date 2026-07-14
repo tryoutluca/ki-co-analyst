@@ -49,6 +49,7 @@ _FINANCIAL_COLS = [
     "total_equity_bn", "total_assets_bn", "invested_capital_bn",
     "eps_adj", "dps", "shares_bn",
     "ebitda_margin_pct", "ebit_margin_pct", "fcf_margin_pct", "net_margin_pct",
+    "roic_pct",
 ]
 
 _SOURCE_PRIORITY = {"sec_xbrl": 3, "ir_pdf": 2.5, "yfinance": 2}
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS financial_data (
     net_debt_bn       REAL, total_equity_bn  REAL, total_assets_bn REAL,
     invested_capital_bn REAL, eps_adj        REAL, dps             REAL,
     shares_bn         REAL, ebitda_margin_pct REAL, ebit_margin_pct REAL,
-    fcf_margin_pct    REAL, net_margin_pct   REAL,
+    fcf_margin_pct    REAL, net_margin_pct   REAL, roic_pct        REAL,
     source            TEXT,
     quality_score     INTEGER DEFAULT 2,
     fetched_at        TEXT,
@@ -189,7 +190,15 @@ def init_db(db_path: Path | None = None) -> None:
         _CONN = None
     conn = _get_conn()
     conn.executescript(_CREATE_TABLE_SQLITE)
-    conn.commit()
+    # CREATE TABLE IF NOT EXISTS legt neue Spalten nicht in einer bereits
+    # existierenden lokalen financials.db an — daher zusätzlich idempotent
+    # per ALTER TABLE nachziehen (SQLite kennt kein "ADD COLUMN IF NOT
+    # EXISTS", daher der try/except-Weg über den "duplicate column"-Fehler).
+    try:
+        conn.execute("ALTER TABLE financial_data ADD COLUMN roic_pct REAL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def _now_iso() -> str:

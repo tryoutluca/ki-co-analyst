@@ -43,11 +43,18 @@ CREATE TABLE IF NOT EXISTS financial_data (
     ebit_margin_pct     DOUBLE PRECISION,
     fcf_margin_pct      DOUBLE PRECISION,
     net_margin_pct      DOUBLE PRECISION,
+    roic_pct            DOUBLE PRECISION,
     source              TEXT,
     quality_score       DOUBLE PRECISION DEFAULT 2,
     fetched_at          TIMESTAMPTZ,
     PRIMARY KEY (ticker, fiscal_year, period_type, quarter)
 );
+
+-- Für bereits existierende Deployments (Railway): CREATE TABLE IF NOT EXISTS
+-- oben ist bei einer schon vorhandenen Tabelle ein No-Op und legt roic_pct
+-- nicht nachträglich an. init_db() führt dieses Skript bei jedem Backend-
+-- Start erneut aus — dieser ALTER heilt bestehende Tabellen idempotent nach.
+ALTER TABLE financial_data ADD COLUMN IF NOT EXISTS roic_pct DOUBLE PRECISION;
 
 CREATE INDEX IF NOT EXISTS idx_fin_ticker_year
     ON financial_data (ticker, fiscal_year);

@@ -615,7 +615,11 @@ def _db_rows_to_hist_dict(rows: list[dict]) -> dict:
         roe = sd(ni, eq, pct=True)
         roa = sd(ni, assets, pct=True)
         nopat = None
-        roic  = None
+        # roic_pct wird beim Ingest berechnet (fetch_xbrl_annual: NOPAT /
+        # Invested Capital, aus Pretax-Income + Tax-Expense) und in der DB
+        # persistiert — hier nur ausgelesen, nicht neu berechnet (die dafür
+        # nötigen Tax-Rate-Inputs werden nicht separat gespeichert).
+        roic  = r.get("roic_pct")
         nd_ebitda = None
         if eb and eb > 0 and nd is not None:
             nd_ebitda = round(nd / eb, 2)
@@ -700,6 +704,7 @@ def _yf_result_to_db_rows(ticker: str, yf_result: dict) -> list[dict]:
             "ebit_margin_pct":    d.get("ebit_margin_pct"),
             "fcf_margin_pct":     d.get("fcf_margin_pct"),
             "net_margin_pct":     d.get("net_margin_pct"),
+            "roic_pct":           d.get("roic_pct"),
         })
     return rows
 
