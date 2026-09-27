@@ -50,6 +50,7 @@ class AnalysisState(TypedDict):
     supervisor_critique:        Optional[str]  # konkretes Feedback-Text
     supervisor_critique_target: Optional[str]  # "fundamental" | "news" | "risk"
     supervisor_review_action:   Optional[str]  # "approve" | "request_critique"
+    supervisor_review_notes:    Optional[str]  # Begründung des Reviews (auch bei approve)
     supervisor_rounds:          int            # Anzahl Critique-Runden (max 2)
 
     # ── Phase 1: Business-Model-Classifier ───────────────────

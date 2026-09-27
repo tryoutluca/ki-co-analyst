@@ -223,6 +223,94 @@ def _scenario_expected_price(risk_output) -> float | None:
     return round(weighted_sum, 2)
 
 
+_DIRECTION_POINTS = {"tailwind": 5, "neutral": 0, "headwind": -5}
+_THEMATIC_POINTS = {
+    "starker rückenwind": 20, "rückenwind": 10, "neutral": 0,
+    "gegenwind": -10, "starker gegenwind": -20,
+}
+
+
+def _score_to_recommendation(score: float) -> str:
+    """Schwellen identisch zur Prompt-Direktive (_format_aggregation_block)."""
+    if score > 12:
+        return "KAUFEN"
+    if score >= 4:
+        return "ÜBERGEWICHTEN"
+    if score > -4:
+        return "HALTEN"
+    if score >= -12:
+        return "UNTERGEWICHTEN"
+    return "VERKAUFEN"
+
+
+def _apply_deterministic_score(
+    result: dict,
+    news_output,
+    risk_output,
+    business_model_classification: dict | None,
+    agent_confidence_scores: dict | None,
+    thematic_analysis: dict | None,
+) -> dict:
+    """Berechnet den Aggregations-Score in Python statt ihn dem LLM zu überlassen.
+
+    Die Formel stand bisher nur als Anweisung im Prompt ("NUTZE DIESE FORMEL");
+    ob das LLM richtig rechnete, prüfte niemand. Gleiche Gewichte
+    (_aggregation_weights) und gleiche Schwellen wie in der Direktive.
+    Die LLM-Empfehlung bleibt als aggregation.llm_recommendation erhalten.
+    """
+    upside = result.get("upside_downside_pct")
+    if not isinstance(upside, (int, float)):
+        pt, cp = result.get("price_target"), result.get("current_price")
+        if isinstance(pt, (int, float)) and isinstance(cp, (int, float)) and cp > 0:
+            upside = (pt - cp) / cp * 100
+    if not isinstance(upside, (int, float)):
+        result["aggregation"] = {"score": None, "reason": "Upside nicht berechenbar"}
+        return result
+
+    w = _aggregation_weights(news_output, business_model_classification,
+                             agent_confidence_scores, thematic_analysis)
+    weights = w["weights"]
+
+    sentiment = w["sentiment_score"]
+    sentiment_comp = (sentiment / 10 * 100 - 50) if isinstance(sentiment, (int, float)) else 0.0
+
+    killers = _extract(risk_output, "conviction_killers", []) or []
+    risk_comp = 10 if len(killers) == 0 else (0 if len(killers) == 1 else -15)
+    risk_comp += _DIRECTION_POINTS.get(_extract(news_output, "overall_macro_direction", "neutral"), 0)
+    risk_comp += _DIRECTION_POINTS.get(_extract(news_output, "overall_industry_direction", "neutral"), 0)
+
+    components = {
+        "fundamental": round(float(upside), 2),
+        "news": round(sentiment_comp, 2),
+        "risk": risk_comp,
+    }
+    if "thematic" in weights:
+        components["thematic"] = _THEMATIC_POINTS.get(
+            str((thematic_analysis or {}).get("net_thematic_assessment", "neutral")).lower(), 0)
+
+    score = sum(components[k] * weights[k] for k in weights)
+    rec = _score_to_recommendation(score)
+    llm_rec = result.get("final_recommendation")
+
+    result["aggregation"] = {
+        "score": round(score, 2),
+        "recommendation": rec,
+        "llm_recommendation": llm_rec,
+        "weights": {k: round(v, 4) for k, v in weights.items()},
+        "components": components,
+        "agent_confidence": {k: round(v, 3) for k, v in w["confidence"].items()},
+        "sentiment_override_applied": w["sentiment_override_applied"],
+        "dcf_cap_applied": w["dcf_cap_applied"],
+    }
+    if llm_rec != rec:
+        result["final_reasoning"] = (
+            (result.get("final_reasoning") or "")
+            + f" │ [Aggregation] Score {score:+.1f} → {rec} (deterministisch; LLM-Vorschlag: {llm_rec})."
+        )
+    result["final_recommendation"] = rec
+    return result
+
+
 def _build_aggregation_block(
     fundamental_output,
     news_output,
@@ -248,6 +336,32 @@ def _build_aggregation_block(
          auf 0.45 gedeckelt.
       5) Phase 2: Makro-revidierte Estimates werden als Direktive eingebettet.
     """
+    w = _aggregation_weights(news_output, business_model_classification,
+                             agent_confidence_scores, thematic_analysis)
+    bmt, dcf_applicable = w["bmt"], w["dcf_applicable"]
+    adj_weights, conf = w["weights"], w["confidence"]
+    sentiment_score = w["sentiment_score"]
+    sentiment_override_applied = w["sentiment_override_applied"]
+    dcf_cap_applied = w["dcf_cap_applied"]
+
+    # ── Format Block ──────────────────────────────────────────────────────
+    return _format_aggregation_block(
+        bmt, dcf_applicable, adj_weights, conf, sentiment_score,
+        sentiment_override_applied, dcf_cap_applied,
+        revised_estimates, forward_estimates, thematic_analysis, optionality_analysis,
+        risk_output,
+    )
+
+
+def _aggregation_weights(
+    news_output,
+    business_model_classification: dict | None,
+    agent_confidence_scores: dict | None,
+    thematic_analysis: dict | None,
+) -> dict:
+    """Deterministische Aggregations-Gewichte (Classifier-Basis × Agent-Confidence,
+    Sentiment-Override, DCF-Cap). Einzige Quelle für Prompt-Direktive UND den
+    nachträglich berechneten Score (_apply_deterministic_score)."""
     # ── 1) Basis-Gewichte aus Classifier ──────────────────────────────────
     bmt = "growth_with_revenue"
     dcf_applicable = True
@@ -319,7 +433,21 @@ def _build_aggregation_block(
         adj_weights = {k: v / s3 for k, v in adj_weights.items()}
         dcf_cap_applied = True
 
-    # ── Format Block ──────────────────────────────────────────────────────
+    return {
+        "bmt": bmt, "dcf_applicable": dcf_applicable,
+        "weights": adj_weights, "confidence": conf,
+        "sentiment_score": sentiment_score,
+        "sentiment_override_applied": sentiment_override_applied,
+        "dcf_cap_applied": dcf_cap_applied,
+    }
+
+
+def _format_aggregation_block(
+    bmt, dcf_applicable, adj_weights, conf, sentiment_score,
+    sentiment_override_applied, dcf_cap_applied,
+    revised_estimates, forward_estimates, thematic_analysis, optionality_analysis,
+    risk_output,
+) -> str:
     def _pct(x: float) -> str:
         return f"{x*100:.1f}%"
 
@@ -919,6 +1047,14 @@ Gib das Ergebnis als JSON zurück."""),
         else:
             result.setdefault("analysis_incomplete", False)
             result.setdefault("missing_components", [])
+
+    # ── Deterministischer Aggregations-Score → finale Empfehlung ────────────
+    # Nach allen Price-Target-Overrides, damit der Score auf dem finalen Upside beruht
+    if isinstance(result, dict):
+        result = _apply_deterministic_score(
+            result, news_output, risk_output, business_model_classification,
+            agent_confidence_scores, thematic_analysis,
+        )
 
     return result
 

@@ -14,6 +14,11 @@ from tools.finance_tools import (
     get_strategic_milestones,
 )
 from tools.schemas import NewsAgentOutput
+from tools.sentiment_engine import (
+    prepare_company_news, prepare_milestones, prepare_research_items,
+    apply_sentiment_engine, THIN_EVIDENCE_THRESHOLD,
+)
+from agents.news_research import run_news_research
 
 load_dotenv()
 
@@ -54,8 +59,25 @@ INDUSTRIE-ANALYSE (industry_factors):
 - Belege jedes Thema mit der relevantesten Headline aus den Daten
 - Bewerte ob sektorale Dynamiken das spezifische Geschäftsmodell stärken oder schwächen
 
+EINZELBEWERTUNG DER NEWS (news_items):
+- Jede Firmen-News (ID N1, N2, …), jeder Meilenstein (ID M1, M2, …) und jeder
+  Nachrecherche-Treffer (ID R1, R2, …) erhält GENAU EINEN Eintrag in news_items mit
+  dem Feld "id" (z.B. "N3", "M1", "R2")
+- sentiment_impact bewertet NUR die fundamentale Bedeutung dieser einen Meldung für
+  den Investment Case — isoliert, ohne Rücksicht auf andere Meldungen
+- Reine Bewertungs-/Kursbetrachtungen ohne neue Information ("Stock looks fairly
+  valued", "Is X outperforming?") sind "neutral"
+- relevant=false setzen, wenn die Meldung gar nicht dieses Unternehmen betrifft:
+  Namensvetter (z.B. "Comet Ridge" oder ein "Comet"-Browser bei Comet Holding),
+  separat börsennotierte Tochter (z.B. "ABB India" bei ABB Ltd) oder nur beiläufige
+  Erwähnung. Solche Items fliessen NICHT in den Score ein.
+- Der Gesamtscore wird aus diesen Einzelurteilen deterministisch vom System berechnet
+  (Quellen-, Recency- und Relevanzgewichtung). Präzise Einzelurteile sind daher
+  wichtiger als das Gesamturteil.
+
 SENTIMENT-BERECHNUNG:
-- overall_sentiment_score (1-10) gemäss obiger 4-Ebenen-Gewichtung
+- overall_sentiment_score (1-10): dein eigenes Gesamturteil gemäss obiger
+  4-Ebenen-Gewichtung (dient als Plausibilitätscheck gegen den berechneten Score)
 - overall_macro_direction: aggregiertes Urteil über alle Makro-Indikatoren
 - overall_industry_direction: aggregiertes Urteil über alle Industrie-Faktoren
 
@@ -119,20 +141,37 @@ def _format_industry_text(industry_data: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_milestones_text(milestones: list) -> str:
-    lines = ["=== STRATEGISCHE MEILENSTEINE (Letzte 12 Monate) ==="]
-    if not milestones or ("info" in milestones[0] or "error" in milestones[0]):
-        lines.append(milestones[0].get("info") or milestones[0].get("error", "Keine Daten verfügbar."))
-        return "\n".join(lines)
-    for i, item in enumerate(milestones, 1):
-        title   = item.get("title", "N/A")
-        url     = item.get("url", "nicht verfügbar")
-        content = item.get("content", "")
-        lines.append(f"{i}. {title}")
-        lines.append(f"   URL: {url}")
-        if content:
-            lines.append(f"   {content[:300]}")
+_RELEVANCE_LABEL = {
+    "direkt":        "Firma in Headline",
+    "erwähnt":       "Firma nur im Text erwähnt",
+    "sammelartikel": "Sammel-/Vergleichsartikel",
+}
+
+
+def _format_items_text(title: str, items: list, stats: dict, empty_msg: str) -> str:
+    """Gemeinsames Format für Meilensteine (M*), Firmen-News (N*) und Nachrecherche (R*)."""
+    lines = [
+        f"=== {title} ===",
+        f"Filter: {stats.get('raw', 0)} roh → {stats.get('junk', 0)} Kurs-/Übersichtsseiten, "
+        f"{stats.get('irrelevant', 0)} irrelevant, {stats.get('too_old', 0)} zu alt, "
+        f"{stats.get('duplicates', 0)} Duplikate entfernt → {stats.get('used', 0)} verwendet",
+    ]
+    if not items:
+        lines.append(empty_msg)
+    for item in items:
+        text = item.get("summary") or item.get("content") or "N/A"
+        lines.append(
+            f"\n[{item['id']}] {item.get('headline', 'N/A')}\n"
+            f"   Quelle: {item.get('source', 'N/A')} | Published: {item.get('published', 'N/A')} | "
+            f"Relevanz: {_RELEVANCE_LABEL.get(item.get('relevance'), '-')}\n"
+            f"   {text[:300]}\n"
+            f"   URL: {item.get('url', 'nicht verfügbar')}"
+        )
     return "\n".join(lines)
+
+
+def _evidence_weight(*item_lists: list) -> float:
+    return sum(it.get("weight", 0) for items in item_lists for it in items)
 
 
 def run_news_agent(
@@ -189,15 +228,55 @@ def run_news_agent(
             print(f"      [Timeout/Fehler] get_strategic_milestones: {e}")
             milestones = []
 
-    # Unternehmensnews als Text aufbereiten
-    news_text = "=== YAHOO FINANCE / FINNHUB NEWS ===\n"
-    for i, item in enumerate(news_yfinance, 1):
-        news_text += f"{i}. Headline: {item.get('headline') or item.get('title', 'N/A')}\n"
-        news_text += f"   Summary: {item.get('summary', 'N/A')}\n"
-        news_text += f"   Published: {item.get('published', 'N/A')}\n"
-        news_text += f"   URL: {item.get('url', 'nicht verfügbar')}\n\n"
+    # Deterministische Vorverarbeitung: Relevanzfilter, Dedup, Gewichte, IDs.
+    # Meilensteine zuerst — News, die denselben Vorgang melden, zählen nicht doppelt.
+    prepared_milestones, ms_stats = prepare_milestones(milestones, ticker, company_name)
+    prepared_news, news_stats = prepare_company_news(
+        news_yfinance, ticker, company_name, exclude=prepared_milestones,
+    )
+    print(
+        f"      [sentiment_engine] Meilensteine: {ms_stats['raw']} roh → {ms_stats['used']} | "
+        f"News: {news_stats['raw']} roh → {news_stats['used']} "
+        f"({news_stats['irrelevant']} irrelevant, {news_stats['duplicates']} Duplikate)"
+    )
 
-    milestones_text = _format_milestones_text(milestones)
+    # Autonome Nachrecherche: LLM entscheidet selbst, ob/wonach gezielt gesucht wird
+    bmt = (business_model_context or {}).get("business_model_type", "unbekannt") \
+        if isinstance(business_model_context, dict) else "unbekannt"
+    research_log: list[dict] = []
+    prepared_research: list[dict] = []
+    research_stats: dict = {}
+    try:
+        raw_research, research_log = run_news_research(
+            ticker, company_name, sector, industry, bmt,
+            prepared_news, prepared_milestones,
+            evidence_weight=_evidence_weight(prepared_news, prepared_milestones),
+            thin_threshold=THIN_EVIDENCE_THRESHOLD,
+        )
+        prepared_research, research_stats = prepare_research_items(
+            raw_research, ticker, company_name,
+            exclude=prepared_milestones + prepared_news,
+        )
+    except Exception as e:
+        print(f"      [research] Fehler, fahre ohne Nachrecherche fort: {e}")
+        research_log = [{"decision": f"Nachrecherche fehlgeschlagen: {e}"}]
+
+    first_ms = milestones[0] if milestones and isinstance(milestones[0], dict) else {}
+    milestones_text = _format_items_text(
+        "STRATEGISCHE MEILENSTEINE (Tavily News, letzte 12 Monate)",
+        prepared_milestones, ms_stats,
+        first_ms.get("info") or "Keine strategischen Meilensteine gefunden.",
+    )
+    news_text = _format_items_text(
+        "FIRMEN-NEWS (Yahoo Finance, vorgefiltert)",
+        prepared_news, news_stats, "Keine firmenspezifischen News gefunden.",
+    )
+    research_text = ""
+    if prepared_research:
+        research_text = _format_items_text(
+            "GEZIELTE NACHRECHERCHE (autonom; zählt wie Meilensteine)",
+            prepared_research, research_stats, "",
+        )
     macro_text      = _format_macro_text(macro_data)
     industry_text   = _format_industry_text(industry_data)
 
@@ -299,6 +378,8 @@ def run_news_agent(
 
 {news_text}
 
+{research_text}
+
 {macro_text}
 
 {industry_text}
@@ -313,6 +394,8 @@ Erstelle die vollständige Analyse als JSON.
 - macro_indicators: mindestens 3 Einträge basierend auf den Makrodaten
 - industry_factors: mindestens 3 Einträge basierend auf den Industrie-News
 - estimate_adjustments: 0-4 quantifizierte Treiber nach den Regeln oben
+- news_items: genau ein Eintrag pro Firmen-News [N*], Meilenstein [M*] und
+  Nachrecherche-Treffer [R*], jeweils mit "id"
 - Bei fehlenden URLs: schreibe "nicht verfügbar"
 - sentiment_vs_fundamentals_reasoning: kontrastiere aktiv Fundamentaldaten mit News-Signalen"""),
     ])
@@ -327,6 +410,7 @@ Erstelle die vollständige Analyse als JSON.
         "currency":             currency,
         "milestones_text":      milestones_text,
         "news_text":            news_text,
+        "research_text":        research_text,
         "macro_text":           macro_text,
         "industry_text":        industry_text,
         "fundamental_context":  fundamental_context,
@@ -336,6 +420,20 @@ Erstelle die vollständige Analyse als JSON.
         "senior_feedback_block": senior_feedback_block,
         "format_instructions":  parser.get_format_instructions(),
     })
+
+    result = apply_sentiment_engine(
+        result, prepared_news, prepared_milestones,
+        filter_stats={"news": news_stats, "milestones": ms_stats, "research": research_stats},
+        prepared_research=prepared_research,
+    )
+    result["research_log"] = research_log
+    bd = result["sentiment_breakdown"]
+    print(
+        f"      [sentiment_engine] Score {bd['score']}/10 (LLM: {bd['llm_score']}) | "
+        f"Komponenten: {bd['components']} | Evidenz: {bd['evidence_weight']}"
+    )
+    for w in bd["warnings"]:
+        print(f"      [sentiment_engine] ⚠ {w}")
 
     return result
 

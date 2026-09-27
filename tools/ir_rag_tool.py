@@ -11,8 +11,9 @@ import json
 import re
 import time
 import hashlib
+from datetime import date
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 import yfinance as yf
@@ -149,6 +150,12 @@ EXCLUDE_KEYWORDS = [
     "compensation",
     "esg",
     "proxy",
+    # Keine Finanzberichte, wurden aber via "full-year"/"half-year" im Namen als
+    # Jahres-/Zwischenbericht eingestuft (z.B. Givaudan-Gesprächsprotokolle)
+    "transcript",
+    "aide-memoire",
+    "aide memoire",
+    "magazine",
 ]
 
 CACHE_DIR = "./ir_cache"
@@ -197,7 +204,8 @@ _KNOWN_IR_URLS: dict[str, str] = {
 _SEC_FOREIGN_FILERS: dict[str, str] = {
     "UBSG.SW": "UBS",
     "NOVN.SW": "NVS",
-    "ABBN.SW": "ABBNY",  # ABB Ltd ADR — files 20-F/6-K with SEC
+    # ABBN.SW entfernt: ABB hat sich 2024 bei der SEC deregistriert (letzter 20-F
+    # FY2023) — Berichte kommen jetzt über die Websuche (library.e.abb.com)
 }
 
 # HTML anchor-text keywords used to detect IR documents when no PDFs are found
@@ -254,15 +262,45 @@ _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 # Doc type → (priority, keyword pairs that must ALL appear in label)
 _PDF_TYPE_RULES: list[tuple[str, int, list[str], list[str]]] = [
     # (type, priority, required_any, required_all)
+    # Reihenfolge zählt: erste passende Regel gewinnt.
     ("consensus_estimates",  1, ["consensus"],                      []),
     ("analyst_presentation", 2, ["analyst"],                        ["presentation"]),
-    ("annual_report",        3, ["annual report", "financial report"], []),
-    ("annual_report",        3, ["annual"],                         ["report"]),
-    ("annual_report",        3, ["geschaeftsbericht", "jahresbericht", "rapport annuel"], []),
+    # Zwischenberichte VOR Jahresberichten prüfen: "Halbjahresbericht" enthält
+    # "jahresbericht", "half-year financial statements" enthält "financial statements"
+    # (kein "q4": "Q4 and full-year results" ist ein Jahresabschluss)
     ("interim_report",       4, ["half-year", "half year", "h1 results", "h2 results",
-                                 "interim", "halbjahr", "six month"],  []),
+                                 "interim", "halbjahr", "six month", "semestriel",
+                                 "quarterly report", "nine month", "nine-month",
+                                 "hy-report", "-hyr-", "first quarter", "second quarter",
+                                 "third quarter", "q1 ", "q2 ", "q3 ", "-q1-", "-q2-", "-q3-"], []),
+    ("annual_report",        3, ["annual report", "financial report", "finance report",
+                                 "integrated report", "annual review", "financial statements",
+                                 "annual-report", "financial-report", "integrated-report",
+                                 "annual-review", "financial-statements", "-gcfr"], []),
+    ("annual_report",        3, ["annual"],                         ["report"]),
+    ("annual_report",        3, ["geschaeftsbericht", "geschäftsbericht", "jahresbericht",
+                                 "finanzbericht", "rapport annuel"], []),
     ("investor_day",         5, ["investor day", "investor presentation", "cmd"], []),
 ]
+
+# Rang innerhalb eines Geschäftsjahres (kleiner = besser): Dokumente mit den
+# vollständigen Finanztabellen zuerst, Präsentationen zuletzt
+_ANNUAL_DOC_RANK: list[tuple[int, re.Pattern]] = [
+    (0, re.compile(r"financial[\s_-]*(statements|report)|finance[\s_-]*report|finanzbericht|"
+                   r"konzernrechnung|gcfr", re.I)),
+    (1, re.compile(r"annual[\s_-]*(report|review)|integrated[\s_-]*report|"
+                   r"gesch(ae|ä)ftsbericht|jahresbericht|rapport[\s_-]*annuel", re.I)),
+    (2, re.compile(r"full[\s_-]*year|results|fyr|press[\s_-]*release", re.I)),
+    (3, re.compile(r"presentation|slides", re.I)),
+]
+
+
+def _annual_doc_rank(doc: dict) -> int:
+    label = f"{doc.get('text', '')} {doc.get('filename', '')}"
+    for rank, pattern in _ANNUAL_DOC_RANK:
+        if pattern.search(label):
+            return rank
+    return 4
 
 STANDARD_QUERIES = [
     # 1. Die "Goldgrube": Übersichts-Tabellen & Key Figures
@@ -346,10 +384,17 @@ def _deduplicate_and_spread(docs: list[dict],
 
     def _lang_rank(doc: dict) -> int:
         combined = (_unquote(doc.get("url", "")) + " " + doc.get("filename", "")).lower()
-        for suffix, rank in (("_en.", 0), ("/en/", 0), ("_de.", 1), ("/de/", 1),
-                              ("_fr.", 2), ("_it.", 3)):
+        for suffix, rank in (("_en.", 0), ("/en/", 0), ("-en.", 0), ("_de.", 1), ("/de/", 1),
+                              ("-de.", 1), ("_fr.", 2), ("_it.", 3)):
             if suffix in combined:
                 return rank
+        # Linktext: Roche verlinkt "Annual Report 2025" (ar25e.pdf) und
+        # "Geschäftsbericht 2025" (ar25d.pdf) ohne Sprachkennung in der URL
+        text = doc.get("text", "").lower()
+        if re.search(r"gesch(ae|ä)ftsbericht|finanzbericht|jahresbericht|halbjahr|konzern", text):
+            return 1
+        if re.search(r"report|statements|review|results", text):
+            return 0
         return 2
 
     def _norm_url(url: str) -> str:
@@ -384,10 +429,12 @@ def _deduplicate_and_spread(docs: list[dict],
     current_year = _dt.now().year
     min_year     = current_year - (max(current_year - min(wanted_years), 6) if wanted_years else 6)
 
+    # Pro Jahr: bestes Dokument zuerst (Finanzbericht > Geschäftsbericht >
+    # Ergebnis-Mitteilung > Präsentation), bei Gleichstand Englisch vor Deutsch
     annual_candidates = sorted(
         [d for d in groups.values() if d["period_class"] == "annual"
          and (d["year"] == 0 or d["year"] >= min_year)],
-        key=lambda d: -d["year"],
+        key=lambda d: (-d["year"], _annual_doc_rank(d), _lang_rank(d)),
     )
     other_candidates = sorted(
         [d for d in groups.values() if d["period_class"] != "annual"
@@ -396,31 +443,35 @@ def _deduplicate_and_spread(docs: list[dict],
         reverse=True,
     )
 
+    # Ein Dokument pro Geschäftsjahr (das bestrangierte). Vorher wurden im
+    # wanted_years-Modus ALLE Dokumente eines Jahres geladen (Roche: Annual Report,
+    # Finance Report, Geschäftsbericht, Finanzbericht, 2 Präsentationen …)
+    best_per_year: list[dict] = []
+    seen_annual_years: set = set()
+    for doc in annual_candidates:
+        yr = doc["year"] if doc["year"] > 0 else f"_u{len(best_per_year)}"
+        if yr not in seen_annual_years:
+            seen_annual_years.add(yr)
+            best_per_year.append(doc)
+
     if wanted_years:
         # Gap-driven: keep only annual docs whose year is actually missing
         # from the DB (plus year==0 docs, since their real year is unknown
         # until parsed — better to include than silently drop them).
-        annual_result = [d for d in annual_candidates
+        annual_result = [d for d in best_per_year
                           if d["year"] == 0 or d["year"] in wanted_years]
     else:
-        # Pick up to max_annual distinct years for annuals
-        annual_result = []
-        seen_annual_years: set = set()
-        for doc in annual_candidates:
-            yr = doc["year"] if doc["year"] > 0 else f"_u{len(annual_result)}"
-            if yr not in seen_annual_years:
-                seen_annual_years.add(yr)
-                annual_result.append(doc)
-            if len(annual_result) >= max_annual:
-                break
+        annual_result = best_per_year[:max_annual]
 
     # Pick up to max_latest interim docs from the current/prior fiscal year
     # (prefer quarterly), so all interim reports published so far this year
     # are captured — not just the single newest one.
     recent_other = [d for d in other_candidates if d["year"] == 0 or d["year"] >= current_year - 1]
+    # Bericht vor Präsentation (Roche: "Half-Year Report" statt "Half-Year Presentation")
     quarterly_first = sorted(
         recent_other,
-        key=lambda d: (0 if d["period_class"] == "quarterly" else 1, -d.get("year", 0)),
+        key=lambda d: (0 if d["period_class"] == "quarterly" else 1, -d.get("year", 0),
+                       1 if re.search(r"presentation|slides", f"{d.get('text', '')} {d.get('filename', '')}", re.I) else 0),
     )
     latest_result = quarterly_first[:max_latest]
 
@@ -744,6 +795,45 @@ def _sec_fetch_filing_doc_url(filing_index_url: str) -> str | None:
     return None
 
 
+_6K_REPORT_DESC = re.compile(
+    r"financial report|interim|quarter|half[\s-]?year|results|\bq[1-4]\b", re.I,
+)
+_XBRL_REPORT_NAME = re.compile(r"^[a-z0-9]+-\d{8}\.htm$", re.I)   # z.B. ubs-20260630.htm
+_6K_MAX_CANDIDATES = 20
+
+
+def _sec_6k_report_url(archive_base: str, acc: str, prim_doc: str) -> str | None:
+    """Findet in einem 6-K den eigentlichen Finanzbericht — oder None, wenn der
+    6-K keiner ist (Ad-hoc-Meldung, Pillar-3, Anleihe-Prospekt …).
+
+    Foreign Private Issuers reichen Quartalsberichte sehr unterschiedlich ein:
+      - Novartis: Hauptdokument = Deckblatt, Bericht = Anhang
+        "EX-99 | 99.1 FINANCIAL REPORT Q2 2026"
+      - UBS: Hauptdokument = Bericht im XBRL-Namensschema "ubs-20260630.htm"
+    """
+    try:
+        r = requests.get(f"{archive_base}/{acc}-index.htm", headers=_SEC_HEADERS, timeout=15)
+        r.raise_for_status()
+        time.sleep(0.15)
+    except Exception:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    table = soup.find("table", class_="tableFile")
+    for tr in (table.find_all("tr")[1:] if table else []):
+        tds = tr.find_all("td")
+        if len(tds) < 4:
+            continue
+        desc, doc_type = tds[1].get_text(" ", strip=True), tds[3].get_text(" ", strip=True).upper()
+        link = tds[2].find("a", href=True)
+        if (link and doc_type.startswith("EX-99") and _6K_REPORT_DESC.search(desc)
+                and link["href"].lower().endswith((".htm", ".html"))):
+            href = link["href"].replace("/ix?doc=", "")
+            return href if href.startswith("http") else _SEC_EDGAR_BASE + href
+    if prim_doc and _XBRL_REPORT_NAME.match(prim_doc):
+        return f"{archive_base}/{prim_doc}"
+    return None
+
+
 def get_sec_filings(ticker: str, cik: str,
                     max_annuals: int = 3,
                     max_quarterly: int = 1) -> list[dict]:
@@ -771,12 +861,17 @@ def get_sec_filings(ticker: str, cik: str,
 
     annuals:          list[dict] = []
     quarterly_latest: list[dict] = []
+    # 6-Ks sind oft keine Finanzberichte → erst sammeln, dann gezielt auswählen
+    sixk_candidates:  list[tuple] = []
+
+    def _archive_base(acc: str) -> str:
+        return f"{_SEC_EDGAR_BASE}/Archives/edgar/data/{cik_int}/{acc.replace('-', '')}"
 
     def _build_entry(form_clean: str, acc: str, date: str,
-                     prim_doc: str, period_class: str) -> dict:
-        acc_nodash   = acc.replace("-", "")
-        archive_base = f"{_SEC_EDGAR_BASE}/Archives/edgar/data/{cik_int}/{acc_nodash}"
-        doc_url = (
+                     prim_doc: str, period_class: str,
+                     doc_url_override: str | None = None) -> dict:
+        archive_base = _archive_base(acc)
+        doc_url = doc_url_override or (
             f"{archive_base}/{prim_doc}"
             if prim_doc
             else _sec_fetch_filing_doc_url(f"{archive_base}/{acc}-index.htm")
@@ -802,12 +897,19 @@ def get_sec_filings(ticker: str, cik: str,
         accessions = recent_data.get("accessionNumber", [])
         dates      = recent_data.get("reportDate",      [])
         prim_docs  = recent_data.get("primaryDocument", [])
-        for form, acc, date, prim_doc in zip(form_types, accessions, dates, prim_docs):
+        filed      = recent_data.get("filingDate",      [""] * len(form_types))
+        for form, acc, date, prim_doc, filing_date in zip(
+            form_types, accessions, dates, prim_docs, filed,
+        ):
             form_clean = form.strip().upper()
+            date = date or filing_date   # 6-Ks haben oft kein reportDate
             if len(annuals) >= max_annuals and len(quarterly_latest) >= max_quarterly:
                 break
             if form_clean in _ANNUAL_FORMS and len(annuals) < max_annuals:
                 annuals.append(_build_entry(form_clean, acc, date, prim_doc, "annual"))
+            elif form_clean == "6-K":
+                if len(sixk_candidates) < _6K_MAX_CANDIDATES:
+                    sixk_candidates.append((form_clean, acc, date, prim_doc))
             elif form_clean in _QUARTERLY_FORMS and len(quarterly_latest) < max_quarterly:
                 quarterly_latest.append(_build_entry(form_clean, acc, date, prim_doc, "quarterly"))
 
@@ -837,6 +939,19 @@ def get_sec_filings(ticker: str, cik: str,
     except Exception as exc:
         print(f"      SEC EDGAR submissions API Fehler ({ticker}): {exc}")
 
+    # 6-K: den neuesten 6-K nehmen, der tatsächlich einen Finanzbericht enthält
+    # (vorher: einfach den neuesten → oft Deckblatt, Pillar-3 oder Ad-hoc-Meldung)
+    if len(quarterly_latest) < max_quarterly:
+        for form_clean, acc, date, prim_doc in sixk_candidates:
+            report_url = _sec_6k_report_url(_archive_base(acc), acc, prim_doc)
+            if report_url:
+                quarterly_latest.append(_build_entry(
+                    form_clean, acc, date, prim_doc, "quarterly", doc_url_override=report_url,
+                ))
+                print(f"      SEC 6-K Finanzbericht ({date}): {report_url.rsplit('/', 1)[-1]}")
+                if len(quarterly_latest) >= max_quarterly:
+                    break
+
     result = annuals + quarterly_latest
     print(
         f"      SEC EDGAR: {len(annuals)} Jahresberichte + "
@@ -864,13 +979,73 @@ _HTML_PRIORITY_KEYWORDS = [
 ]
 
 _MAX_HTML_CHARS = 60_000
+# SEC-Filings (10-K/20-F: 200k–1.8M Zeichen) — Embeddings kosten pro Filing nur Rappen,
+# eine zu kleine Kappung schneidet dagegen MD&A oder Finanzteil ab
+_MAX_HTML_CHARS_SEC = 400_000
+
+_BLOCK_TAGS = ["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "caption", "blockquote"]
+_SYMBOL_CELLS = {"$", "€", "£", "CHF", "USD"}
+_TRAILING_CELLS = {")", "%", ")%", "%)"}
+
+
+def _table_to_text(table) -> str:
+    """Tabelle zeilenweise: 'Total net sales | 416,161 | 391,035'. Zellen einzeln
+    zu filtern (alte Logik, min. 20 Zeichen) verwarf praktisch jede Zahl.
+    iXBRL-Tabellen trennen '$', ')' und '%' in eigene Zellen — die werden angeheftet."""
+    rows = []
+    for tr in table.find_all("tr"):
+        cells: list[str] = []
+        for c in tr.find_all(["td", "th"]):
+            t = c.get_text(" ", strip=True)
+            if not t or t in _SYMBOL_CELLS:
+                continue
+            if t in _TRAILING_CELLS and cells:
+                cells[-1] += t
+                continue
+            cells.append(t)
+        if cells and any(ch.isalnum() for ch in "".join(cells)):
+            rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
+def _extract_html_blocks(root) -> list[tuple[str, bool]]:
+    """Zerlegt HTML in Textblöcke in Dokumentreihenfolge → [(text, is_priority)].
+
+    - Fliesstext: nur innerste Block-Elemente (p ODER div, li, …) — SEC-iXBRL-
+      Filings enthalten Fliesstext in <div>, nicht <p> (Apple 10-K: 0 <p>).
+    - Tabellen: als EIN Block mit der vorangehenden Überschrift, damit die
+      Kopfzeile (Jahre/Spalten) beim Umsortieren nicht von den Zahlen getrennt wird.
+    """
+    blocks: list[tuple[str, bool]] = []
+    last_label = ""
+    for el in root.find_all(_BLOCK_TAGS + ["table"]):
+        if el.find_parent("table"):
+            continue
+        if el.name == "table":
+            text = _table_to_text(el)
+            if len(text) < 20:
+                continue
+            if last_label:
+                text = f"[Tabelle: {last_label}]\n{text}"
+        else:
+            if el.find(_BLOCK_TAGS + ["table"]):
+                continue    # kein innerster Block — Text kommt über die Kinder
+            text = el.get_text(" ", strip=True)
+            if len(text) < 20:
+                continue
+            if len(text) <= 150:
+                last_label = text
+        lower = text.lower()
+        blocks.append((text, any(kw in lower for kw in _HTML_PRIORITY_KEYWORDS)))
+    return blocks
 
 
 def load_html_document(url: str, doc_type: str = "unknown",
                        ticker: str = "") -> list:
     """
     Fetches *url*, strips boilerplate HTML, extracts relevant text sections,
-    caps at _MAX_HTML_CHARS (60 000 chars), and returns LangChain Document chunks.
+    caps at _MAX_HTML_CHARS (60 000 chars; SEC filings: _MAX_HTML_CHARS_SEC),
+    and returns LangChain Document chunks.
 
     Priority sections (paragraphs/tables containing _HTML_PRIORITY_KEYWORDS)
     are prepended so they land in the first chunks and score highest in
@@ -883,6 +1058,9 @@ def load_html_document(url: str, doc_type: str = "unknown",
     # Per-ticker cache dir when ticker is known, otherwise shared _html dir
     cache_dir  = Path(CACHE_DIR) / (ticker if ticker else "_html")
     cache_path = cache_dir / f"{url_hash}.html"
+    # Ungekürzter Text für die LM-Tonalitätsanalyse (tools/lm_tone.py) — die
+    # 60k-Kappung mit vorangestellten Finanztabellen wäre dort eine verzerrte Stichprobe
+    full_path  = cache_dir / f"{url_hash}.full.txt"
 
     raw_text: str = ""
     if cache_path.exists():
@@ -905,10 +1083,14 @@ def load_html_document(url: str, doc_type: str = "unknown",
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Remove noise tags
+        # Remove noise tags + versteckter iXBRL-Header (XBRL-Fakten, kein Lesetext)
         for tag in soup(["script", "style", "nav", "header", "footer",
-                         "aside", "noscript", "iframe", "form", "button"]):
+                         "aside", "noscript", "iframe", "form", "button", "ix:header"]):
             tag.decompose()
+        if "sec.gov" in url:
+            # Nur bei SEC: IR-Webseiten verstecken echten Inhalt oft in Tabs/Akkordeons
+            for tag in soup.find_all(style=re.compile(r"display:\s*none", re.I)):
+                tag.decompose()
 
         # Prefer semantic content containers
         content_root = (
@@ -919,29 +1101,20 @@ def load_html_document(url: str, doc_type: str = "unknown",
             or soup
         )
 
-        # Collect text blocks (paragraphs, table rows, headings)
-        priority_blocks: list[str] = []
-        normal_blocks:   list[str] = []
+        blocks = _extract_html_blocks(content_root)
+        priority_blocks = [t for t, prio in blocks if prio]
+        normal_blocks   = [t for t, prio in blocks if not prio]
 
-        for elem in content_root.find_all(
-            ["p", "li", "td", "th", "h1", "h2", "h3", "h4", "caption"]
-        ):
-            text = elem.get_text(" ", strip=True)
-            if len(text) < 20:
-                continue
-            lower = text.lower()
-            if any(kw in lower for kw in _HTML_PRIORITY_KEYWORDS):
-                priority_blocks.append(text)
-            else:
-                normal_blocks.append(text)
-
+        cap = _MAX_HTML_CHARS_SEC if "sec.gov" in url else _MAX_HTML_CHARS
         combined = "\n".join(priority_blocks) + "\n" + "\n".join(normal_blocks)
-        raw_text = combined[:_MAX_HTML_CHARS]
+        raw_text = combined[:cap]
 
         # Persist to cache
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(raw_text, encoding="utf-8")
+            # Volltext in Dokumentreihenfolge (ohne Umsortierung/Kappung) für LM
+            full_path.write_text((soup.body or soup).get_text("\n", strip=True), encoding="utf-8")
         except Exception:
             pass
 
@@ -957,14 +1130,166 @@ def load_html_document(url: str, doc_type: str = "unknown",
         chunk.metadata.update(
             {"source": url, "type": doc_type, "format": "html", "page": i}
         )
+        if full_path.exists():
+            chunk.metadata["full_text_path"] = str(full_path)
     return chunks
 
 
 # ── 2. Find IR PDFs ───────────────────────────────────────────────────────────
 
+def _registrable_domain(host: str) -> str:
+    """'library.e.abb.com' → 'abb.com'; 'www.roche.co.uk' → 'roche.co.uk'."""
+    parts = host.lower().split(":")[0].split(".")
+    if len(parts) >= 3 and parts[-2] in ("co", "com", "ac", "gov", "org") and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _company_domains(ir_url: str, ticker: str) -> set[str]:
+    """Offizielle Domains der Firma: aus der IR-URL und der yfinance-Website."""
+    domains = set()
+    if ir_url and "sec.gov" not in ir_url:
+        domains.add(_registrable_domain(urlparse(ir_url).netloc))
+    try:
+        website = yf.Ticker(ticker).info.get("website") or ""
+        if website:
+            domains.add(_registrable_domain(urlparse(website).netloc))
+    except Exception:
+        pass
+    return {d for d in domains if d}
+
+
+def _classify_pdf_label(label: str) -> tuple[str, int] | None:
+    """Wendet _PDF_TYPE_RULES + EU-Fallback an. None = ausgeschlossen/unbekannt."""
+    if any(kw in label for kw in EXCLUDE_KEYWORDS):
+        return None
+    for t, p, any_kws, all_kws in _PDF_TYPE_RULES:
+        if (any(k in label for k in any_kws) if any_kws else True) and \
+           (all(k in label for k in all_kws) if all_kws else True):
+            return t, p
+    if _EU_PDF_INTERIM.search(label):
+        return "interim_report", 4
+    if _EU_PDF_ANNUAL.search(label):
+        return "annual_report", 3
+    return None
+
+
+def _find_ir_pdfs_via_search(ticker: str, company_name: str, domains: set[str]) -> list[dict]:
+    """Fallback für IR-Websites mit Bot-Schutz/JS-Rendering (Nestlé, ABB):
+    Geschäftsberichts-PDFs per Websuche finden und direkt laden — PDF-Downloads
+    sind meist nicht geschützt, die Übersichtsseiten schon.
+    Nur PDFs von der offiziellen Firmen-Domain (keine Drittkopien)."""
+    from concurrent.futures import ThreadPoolExecutor
+    from tools.finance_tools import tavily_search
+    from tools.sentiment_engine import company_short_name
+
+    if not domains or not os.getenv("TAVILY_API_KEY"):
+        return []
+    name = company_short_name(company_name) or ticker
+    cur = date.today().year
+    queries = [
+        f"{name} annual report {cur - 1} pdf",
+        f"{name} financial statements {cur - 1} pdf",
+        f"{name} annual report {cur - 2} pdf",
+        f"{name} financial report {cur - 2} pdf",
+        f"{name} half-year report {cur} pdf",
+        f"{name} quarterly results {cur} pdf",
+    ]
+    with ThreadPoolExecutor(max_workers=len(queries)) as ex:
+        batches = list(ex.map(lambda q: _safe_search(tavily_search, q), queries))
+
+    found: dict[str, dict] = {}
+    for results in batches:
+        for r in results:
+            url = r.get("url", "")
+            host = urlparse(url).netloc
+            if ".pdf" not in urlparse(url).path.lower() or url in found:
+                continue
+            if _registrable_domain(host) not in domains:
+                continue
+            filename = unquote(url.split("/")[-1].split("?")[0])
+            title = r.get("title", "")
+            label = f"{title} {filename} {unquote(url)}".lower()
+            cls = _classify_pdf_label(label)
+            if not cls:
+                continue
+            year = _year_from_label(f"{title} {filename}", cur)
+            if not year:
+                continue   # ohne Jahr nicht zuordenbar (Duplikat-Risiko)
+            found[url] = {
+                "url": url, "filename": filename, "type": cls[0], "priority": cls[1],
+                "year": year, "text": title, "format": "pdf",
+                "source": "Websuche (offizielle Domain)",
+            }
+    if found:
+        print(f"      Websuche: {len(found)} IR-PDFs auf {', '.join(sorted(domains))} gefunden")
+    return list(found.values())
+
+
+def _year_from_label(label: str, current_year: int) -> int:
+    """Vierstellig ('2025') oder zweistellig im Dateinamen ('glo-ar-24-…', 'ar25e')."""
+    m = re.search(r"20[12][0-9]", label)
+    if m:
+        return int(m.group())
+    for yy in re.findall(r"(?:^|[-_ a-z])(\d{2})(?=[-_ a-z.]|$)", label.lower()):
+        year = 2000 + int(yy)
+        if current_year - 8 <= year <= current_year:
+            return year
+    return 0
+
+
+def _safe_search(fn, query: str) -> list[dict]:
+    try:
+        return fn(query, max_results=8)
+    except Exception:
+        return []
+
+
+def _annual_coverage_insufficient(docs: list[dict], wanted_years: set[int] | None = None) -> bool:
+    """True, wenn der neueste Jahresbericht fehlt/veraltet ist oder zu wenige Jahre
+    vorliegen (im wanted_years-Modus werden bewusst nur fehlende Jahre geladen)."""
+    years = [d["year"] for d in docs if d.get("period_class") == "annual" and d.get("year")]
+    needed = min(2, len(wanted_years)) if wanted_years else 2
+    if len(set(years)) < needed or not years:
+        return True
+    today = date.today()
+    # Ab April sollte der Bericht des Vorjahres publiziert sein
+    expected = today.year - 1 if today.month >= 4 else today.year - 2
+    return max(years) < expected
+
+
 def find_ir_pdfs(ir_url: str, ticker: str = "",
-                  max_annual: int = 3, max_quarterly: int = 4,
-                  wanted_years: set[int] | None = None) -> list[dict]:
+                 max_annual: int = 3, max_quarterly: int = 4,
+                 wanted_years: set[int] | None = None,
+                 company_name: str = "") -> list[dict]:
+    """
+    Findet IR-Dokumente: zuerst über die IR-Website bzw. SEC EDGAR
+    (_find_ir_pdfs_website), dann — für Nicht-SEC-Titel mit fehlenden oder
+    veralteten Jahresberichten — ergänzend über die Websuche.
+    """
+    docs = _find_ir_pdfs_website(ir_url, ticker, max_annual, max_quarterly, wanted_years)
+    if any(str(d.get("source", "")).startswith("SEC") for d in docs):
+        return docs
+    if docs and not _annual_coverage_insufficient(docs, wanted_years):
+        return docs
+
+    if not company_name:
+        try:
+            company_name = yf.Ticker(ticker).info.get("longName", ticker)
+        except Exception:
+            company_name = ticker
+    extra = _find_ir_pdfs_via_search(ticker, company_name, _company_domains(ir_url, ticker))
+    if not extra:
+        return docs
+    for d in docs:
+        d.pop("period_class", None)   # neu stempeln, gleiche Logik für alle Quellen
+    return _deduplicate_and_spread(docs + extra, max_annual=max_annual,
+                                   max_latest=max_quarterly, wanted_years=wanted_years)
+
+
+def _find_ir_pdfs_website(ir_url: str, ticker: str = "",
+                          max_annual: int = 3, max_quarterly: int = 4,
+                          wanted_years: set[int] | None = None) -> list[dict]:
     """
     Scrapes *ir_url* for IR documents.  Three-stage strategy:
 
@@ -988,7 +1313,14 @@ def find_ir_pdfs(ir_url: str, ticker: str = "",
         cik = get_sec_cik(sec_ticker)
         if cik:
             print(f"      {ticker} = Foreign Private Issuer, SEC EDGAR ({sec_ticker}, CIK {cik})")
-            return get_sec_filings(ticker, cik)
+            sec_docs = get_sec_filings(ticker, cik)
+            annual_years = [d["year"] for d in sec_docs if d["period_class"] == "annual"]
+            # Deregistrierte Filer (z.B. ABB seit 2024) liefern nur noch alte 20-F →
+            # dann die IR-Website verwenden statt veralteter SEC-Daten
+            if annual_years and max(annual_years) >= date.today().year - 2:
+                return sec_docs
+            print(f"      SEC-Daten veraltet (letzter Jahresbericht "
+                  f"{max(annual_years) if annual_years else '–'}) — nutze IR-Website")
 
     # ── SEC EDGAR URL: extract CIK and fetch filings directly ────────────────
     if ir_url and "sec.gov" in ir_url:
@@ -1516,6 +1848,81 @@ def build_vectorstore(ticker: str, documents: list, source_urls: list[str]):
     return vs
 
 
+# ── 5b. RAG-Kontext ───────────────────────────────────────────────────────────
+
+# Budget für den LLM-Kontext (Zeichen). Vorher 20k (annual) / 8k (quarterly) mit
+# 400-Zeichen-Kürzung pro Chunk: bei k=12 passten nur 4–5 von 13 Abfragen hinein —
+# Bilanz, Cashflow, EPS, Guidance und Dividende fielen komplett weg.
+_ANNUAL_CONTEXT_CHARS    = 80_000   # ≈ 20k Tokens
+_QUARTERLY_CONTEXT_CHARS = 40_000
+_MIN_CHARS_PER_YEAR      = 12_000   # bei vielen Jahren wächst das Budget mit
+_K_PER_QUERY             = 4        # Kandidaten pro Abfrage (Round-Robin)
+_FETCH_K                 = 400      # FAISS filtert nachträglich → grosser Kandidatenpool
+
+
+def _build_rag_context(vs, period_class: str, char_cap: int) -> str:
+    """Baut den LLM-Kontext aus dem Vectorstore.
+
+    - Budget pro Geschäftsjahr: jedes Jahr bekommt seine eigene Erfolgsrechnung,
+      Bilanz, Cashflow-Rechnung (vorher konkurrierten alle Jahre um dieselben k Plätze)
+    - Round-Robin über die Abfragen: erst der beste Treffer JEDER Abfrage, dann der
+      zweitbeste … — bei knappem Budget fehlt nie eine ganze Abfrage
+    - Chunks vollständig (keine 400-Zeichen-Kürzung), Duplikate nur einmal
+    - Query-Embeddings einmal berechnen statt pro Jahr × Abfrage
+    """
+    docs = list(vs.docstore._dict.values())
+    years = sorted(
+        {d.metadata.get("fiscal_year") for d in docs
+         if d.metadata.get("period_class") == period_class and d.metadata.get("fiscal_year")},
+        reverse=True,
+    ) or [None]
+    budget_per_year = max(char_cap // len(years), _MIN_CHARS_PER_YEAR)
+    query_vectors = _get_emb().embed_documents(STANDARD_QUERIES)
+
+    seen: set[int] = set()
+    out: list[str] = []
+    for year in years:
+        flt = {"period_class": period_class}
+        if year is not None:
+            flt["fiscal_year"] = year
+        ranked: list[list] = []
+        for query, vec in zip(STANDARD_QUERIES, query_vectors):
+            try:
+                hits = vs.similarity_search_by_vector(vec, k=_K_PER_QUERY, filter=flt, fetch_k=_FETCH_K)
+                if not hits and year is None:
+                    hits = vs.similarity_search_by_vector(vec, k=2)   # Metadaten fehlen
+            except Exception:
+                hits = []
+            ranked.append(hits)
+
+        selected: dict[int, list] = {}
+        used = 0
+        for rank in range(_K_PER_QUERY):
+            for qi, hits in enumerate(ranked):
+                if rank >= len(hits):
+                    continue
+                doc = hits[rank]
+                key = hash(doc.page_content)
+                cost = len(doc.page_content) + 80
+                if key in seen or used + cost > budget_per_year:
+                    continue
+                seen.add(key)
+                used += cost
+                selected.setdefault(qi, []).append(doc)
+
+        if not selected:
+            continue
+        out.append(f"\n##### GESCHÄFTSJAHR {year if year is not None else '?'} #####")
+        for qi in sorted(selected):
+            out.append(f"\n=== {STANDARD_QUERIES[qi].upper()} ===")
+            for doc in selected[qi]:
+                page = doc.metadata.get("page", "N/A")
+                src  = doc.metadata.get("source", "N/A")
+                yr   = doc.metadata.get("fiscal_year", "")
+                out.append(f"[Page {page} | {src} | year={yr}]\n{doc.page_content}")
+    return "\n".join(out)
+
+
 # ── 6. @tool get_ir_analysis ──────────────────────────────────────────────────
 
 _SYNTHESIS_SYSTEM = """\
@@ -1533,6 +1940,9 @@ WICHTIGSTE REGELN FÜR EINHEITEN:
 - Beispiel: Wenn im Bericht '420.1 Millionen CHF' steht, schreibe 0.4201.
 - Beispiel: Wenn im Bericht '1.2 Milliarden CHF' steht, schreibe 1.2.
 - Rechne Millionen-Beträge konsequent durch 1000.
+- Tausendertrennzeichen können Leerzeichen, Apostroph oder Komma sein ("89 490" = 89490).
+- "Notes"-Spalte VOR den Werten: "Sales 3 89 490 91 354" = Anmerkung 3, 89490, 91354 —
+  die Anmerkungsnummer NIE als Teil des Werts lesen. Klammern = negativ.
 
 HIERARCHIE DER DATEN:
 1. Suche zuerst nach der Tabelle 'Key Figures', 'Financial Highlights' oder 'Group Overview'.
@@ -1624,6 +2034,11 @@ _ANNUAL_HUMAN = """\
 Du bist ein Senior Buy-Side Analyst. Extrahiere Jahresdaten für {company} ({ticker}) aus den vorliegenden Jahresbericht-Auszügen.
 
 EINHEITEN: Alle '_bn'-Felder in MILLIARDEN. Millionen durch 1000 teilen.
+TABELLEN-LESEN (PDF-Extrakte): Tausendertrennzeichen können Leerzeichen, Apostroph oder Komma \
+sein ("89 490" = "89'490" = "89,490" = 89490). Viele Tabellen haben VOR den Werten eine \
+"Notes"-Spalte mit Anmerkungsnummern: "Sales 3 89 490 91 354" = Anmerkung 3, 2025: 89490, \
+2024: 91354 — die Anmerkungsnummer NIE als Teil des Werts lesen. Klammern = negativ. \
+Spaltenreihenfolge aus der Kopfzeile ableiten (meist aktuelles Jahr zuerst).
 HIERARCHIE: 1) Key Figures / Financial Highlights  2) Adjusted-Werte  3) Restated-Vorjahre
 
 Extrahiere Daten für JEDES im Context enthaltene Geschäftsjahr und gib eine Liste zurück (neuestes Jahr zuerst, max. 10 Jahre).
@@ -1686,6 +2101,11 @@ Du bist ein Senior Buy-Side Analyst. Extrahiere Zwischenbericht-Daten für {comp
 aus den vorliegenden Quartals-/Interim-Auszügen des laufenden Geschäftsjahres.
 
 EINHEITEN: Alle '_bn'-Felder in MILLIARDEN. Millionen durch 1000 teilen.
+TABELLEN-LESEN (PDF-Extrakte): Tausendertrennzeichen können Leerzeichen, Apostroph oder Komma \
+sein ("89 490" = "89'490" = "89,490" = 89490). Viele Tabellen haben VOR den Werten eine \
+"Notes"-Spalte mit Anmerkungsnummern: "Sales 3 89 490 91 354" = Anmerkung 3, 2025: 89490, \
+2024: 91354 — die Anmerkungsnummer NIE als Teil des Werts lesen. Klammern = negativ. \
+Spaltenreihenfolge aus der Kopfzeile ableiten (meist aktuelles Jahr zuerst).
 HIERARCHIE: 1) Key Figures / Financial Highlights  2) Adjusted-Werte  3) kumulierte (YTD) Werte, falls das Quartal selbst nicht separat ausgewiesen ist.
 
 Der Context kann Auszüge aus MEHREREN Zwischenberichten enthalten (z.B. Q1 UND 9M desselben Jahres).
@@ -1813,7 +2233,8 @@ def get_ir_analysis(ticker: str) -> dict:
         except Exception:
             present_years = set()
         wanted_years = (target_years - present_years) | {current_yr - 1}
-        pdfs = find_ir_pdfs(ir_url, ticker=ticker, max_quarterly=4, wanted_years=wanted_years)
+        pdfs = find_ir_pdfs(ir_url, ticker=ticker, max_quarterly=4, wanted_years=wanted_years,
+                            company_name=company_name)
         if not pdfs:
             print(f"      Keine IR-Dokumente fuer {ticker} gefunden.")
 
@@ -1866,33 +2287,8 @@ def get_ir_analysis(ticker: str) -> dict:
     except Exception:
         pass
 
-    def _build_context(filter_val: str, char_cap: int = 10000, k: int = 4) -> str:
-        """Retrieve chunks filtered by period_class and build context string."""
-        parts: list[str] = []
-        for query in STANDARD_QUERIES:
-            try:
-                # Use metadata filter; fetch_k ensures enough candidates across years
-                hits = vs.similarity_search(
-                    query, k=k,
-                    filter={"period_class": filter_val},
-                    fetch_k=max(20, k * 5),
-                )
-                if not hits:
-                    # Fallback: unfiltered if the filter returns nothing
-                    hits = vs.similarity_search(query, k=2)
-                if hits:
-                    parts.append(f"\n=== {query.upper()} ===")
-                    for doc in hits:
-                        page = doc.metadata.get("page", "N/A")
-                        src  = doc.metadata.get("source", "N/A")
-                        yr   = doc.metadata.get("fiscal_year", "")
-                        parts.append(
-                            f"[Page {page} | {src} | year={yr}] "
-                            f"{doc.page_content[:400]}"
-                        )
-            except Exception:
-                pass
-        return "\n".join(parts)[:char_cap]
+    def _build_context(filter_val: str, char_cap: int = _ANNUAL_CONTEXT_CHARS) -> str:
+        return _build_rag_context(vs, filter_val, char_cap)
 
     def _safe_parse(raw: str) -> dict | None:
         try:
@@ -1905,8 +2301,7 @@ def get_ir_analysis(ticker: str) -> dict:
         return None
 
     # ── Pass A: Annual extraction (gap-driven, up to 10 years) ───────────────
-    annual_k = min(max(len(wanted_years) if wanted_years else 3, 3) + 2, 12)
-    annual_context = _build_context("annual", char_cap=20000, k=annual_k)
+    annual_context = _build_context("annual", char_cap=_ANNUAL_CONTEXT_CHARS)
 
     annual_prompt = ChatPromptTemplate.from_messages([
         ("system", _ANNUAL_SYSTEM),
@@ -1935,7 +2330,7 @@ def get_ir_analysis(ticker: str) -> dict:
         c.metadata.get("period_class") == "quarterly" for c in (all_chunks or [])
     )
     if has_quarterly_chunks:
-        quarterly_context = _build_context("quarterly", char_cap=8000)
+        quarterly_context = _build_context("quarterly", char_cap=_QUARTERLY_CONTEXT_CHARS)
         quarterly_prompt = ChatPromptTemplate.from_messages([
             ("system", _QUARTERLY_MULTI_SYSTEM),
             ("human",  _QUARTERLY_MULTI_HUMAN),
@@ -1969,12 +2364,16 @@ def get_ir_analysis(ticker: str) -> dict:
         ):
             if latest_annual.get(field) not in (None, "not found"):
                 result[field] = latest_annual[field]
-        # Guidance/consensus/tone from annual top-level
+        # Guidance/consensus/tone from annual top-level. Nur Felder übernehmen, die
+        # noch auf dem Default stehen (Kennzahlen aus latest_annual haben Vorrang).
+        # Vorher: "k not in result" — da result eine Kopie von _EMPTY_IR ist, war das
+        # nie wahr, und Guidance/Tonalität/Key Statements gingen immer verloren.
         result.update({k: v for k, v in annual_top_level.items()
-                       if k in _EMPTY_IR and k not in result})
+                       if k in _EMPTY_IR and not k.startswith("ir_")
+                       and result.get(k) == _EMPTY_IR[k]})
     else:
         # Fallback: single-pass synthesis with existing prompt
-        fallback_context = _build_context("annual", char_cap=12000)
+        fallback_context = _build_context("annual", char_cap=_ANNUAL_CONTEXT_CHARS)
         fallback_prompt = ChatPromptTemplate.from_messages([
             ("system", _SYNTHESIS_SYSTEM),
             ("human",  _SYNTHESIS_HUMAN),
@@ -1994,7 +2393,42 @@ def get_ir_analysis(ticker: str) -> dict:
     result["ir_quarterly_latest"]  = ir_quarterly_latest
     result["ir_quarterly_periods"] = ir_quarterly_periods
     result["ir_sources"]           = source_urls
+    result["ir_tone"]              = _compute_tone(ticker, vs)
     return result
+
+
+def _compute_tone(ticker: str, vs) -> dict:
+    """Loughran-McDonald-Tonalität der Jahresberichte (deterministisch, kein LLM).
+    Liest alle Chunks aus dem Vectorstore — funktioniert auch bei frischem Cache.
+    Für gekappte HTML-Dokumente (SEC-Filings) wird der ungekürzte Volltext verwendet."""
+    from tools.lm_tone import compute_ir_tone
+    try:
+        chunks: list[tuple[str, dict]] = []
+        used_full: set[str] = set()
+        for d in vs.docstore._dict.values():
+            full = d.metadata.get("full_text_path")
+            if full:
+                if full in used_full:
+                    continue
+                try:
+                    chunks.append((Path(full).read_text(encoding="utf-8"), d.metadata))
+                    used_full.add(full)
+                    continue
+                except OSError:
+                    pass    # Volltext fehlt → gekappte Chunks verwenden
+            chunks.append((d.page_content, d.metadata))
+        tone = compute_ir_tone(chunks, cache_path=Path(CACHE_DIR) / ticker / "lm_tone.json")
+        if tone.get("comparison"):
+            c = tone["comparison"]
+            ch = c.get("risk_language_change_pct")
+            print(f"      IR-Tonalität (LM): FY{c['prior_year']}→FY{c['latest_year']} "
+                  f"{tone['tone_trend']} (Risikosprache {f'{ch:+.1f}%' if ch is not None else 'n/v'})")
+        else:
+            print(f"      IR-Tonalität (LM): {tone.get('reason') or 'kein Vorjahresvergleich'}")
+        return tone
+    except Exception as exc:
+        print(f"      IR-Tonalität fehlgeschlagen ({ticker}): {exc}")
+        return {"applicable": False, "reason": f"Fehler: {exc}", "years": [], "signals": []}
 
 
 # ── 7. Consensus estimates from IR ───────────────────────────────────────────

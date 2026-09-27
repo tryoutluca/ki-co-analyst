@@ -271,6 +271,13 @@ def search(q: str, _: str = Depends(get_current_user)):
 # ROUTES: ANALYSE (Job-based)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# print() der Agenten → Live-Progress des richtigen Jobs (siehe backend/job_stdout.py)
+from backend.job_stdout import JobStdout
+
+_job_stdout = JobStdout(sys.stdout, _jobs, _jobs_lock)
+sys.stdout = _job_stdout
+
+
 def _run_job(job_id: str, ticker: str):
     """Läuft in einem Background-Thread."""
     def _progress(msg: str):
@@ -278,33 +285,23 @@ def _run_job(job_id: str, ticker: str):
             _jobs[job_id]["progress"].append(msg)
 
     _progress(f"Starte Analyse für {ticker}…")
+    _job_stdout.bind(job_id)   # print() dieses Threads → Progress dieses Jobs
+    from graph.graph import run_analysis, AnalysisCancelled
+    cancel_event: threading.Event = _jobs[job_id]["cancel_event"]
     try:
-        # Wir leiten print() um, damit LangGraph-Logs als Progress erscheinen
-        import io
-
-        class ProgressCapture(io.StringIO):
-            def write(self, text: str):
-                text = text.strip()
-                if text:
-                    _progress(text)
-                return len(text)
-
-        old_stdout = sys.stdout
-        sys.stdout = ProgressCapture()
-
-        try:
-            from graph.graph import run_analysis
-            result = run_analysis(ticker)
-        finally:
-            sys.stdout = old_stdout
+        result = run_analysis(ticker, cancel_check=cancel_event.is_set)
 
         result["ticker"] = ticker.upper()
         if not result.get("date"):
             result["date"] = datetime.now().strftime("%Y-%m-%d")
 
-        # Deterministic recommendation based on upside/downside
+        # Die Empfehlung setzt der Supervisor deterministisch aus dem
+        # konfidenz-gewichteten Score (graph/supervisor.py: _apply_deterministic_score).
+        # Vorher wurde sie hier allein aus dem Upside neu gesetzt — das hat die
+        # Gewichtung von Sentiment, Risiko und Thematik wirkungslos gemacht.
+        # Nur noch Fallback, falls die Synthese keine Empfehlung liefert.
         upside = result.get("upside_downside_pct")
-        if isinstance(upside, (int, float)):
+        if not result.get("final_recommendation") and isinstance(upside, (int, float)):
             if upside > 10:
                 rec = "KAUFEN"
             elif upside > 5:
@@ -316,6 +313,7 @@ def _run_job(job_id: str, ticker: str):
             else:
                 rec = "VERKAUFEN"
             result["final_recommendation"] = rec
+            result["recommendation_fallback"] = "upside_only"
 
         hist_id = _save_history(result)
 
@@ -327,10 +325,16 @@ def _run_job(job_id: str, ticker: str):
             })
         _progress("✅ Analyse abgeschlossen")
 
+    except AnalysisCancelled as c:
+        with _jobs_lock:
+            _jobs[job_id].update({"status": "cancelled"})
+        _progress(f"⏹ Analyse abgebrochen (vor Knoten [{c}]) — nichts gespeichert")
     except Exception as e:
         with _jobs_lock:
             _jobs[job_id].update({"status": "error", "error": str(e)})
         _progress(f"❌ Fehler: {e}")
+    finally:
+        _job_stdout.bind(None)
 
 
 @app.post("/analyse/{ticker}")
@@ -346,10 +350,27 @@ def start_analysis(ticker: str, current_user: str = Depends(get_current_user)):
             "error":    None,
             "hist_id":  None,
             "started_at": datetime.now().isoformat(),
+            "cancel_event": threading.Event(),
         }
     thread = threading.Thread(target=_run_job, args=(job_id, ticker), daemon=True)
     thread.start()
     return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/analyse/jobs/{job_id}/cancel")
+def cancel_analysis(job_id: str, _: str = Depends(get_current_user)):
+    """Kooperativer Abbruch: der Graph stoppt vor dem nächsten Knoten
+    (der gerade laufende Agent wird noch fertig ausgeführt)."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job nicht gefunden")
+        if job["status"] == "running":
+            job["cancel_event"].set()
+            job["status"] = "cancelling"
+            job["progress"].append("⏹ Abbruch angefordert — stoppt nach dem laufenden Agenten")
+        status_now = job["status"]
+    return {"job_id": job_id, "status": status_now}
 
 
 @app.get("/analyse/jobs/{job_id}")

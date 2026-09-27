@@ -31,7 +31,27 @@ from graph.edges import (
 )
 
 
-def build_analysis_graph():
+class AnalysisCancelled(Exception):
+    """Analyse wurde vom Nutzer abgebrochen (vor dem genannten Knoten)."""
+
+
+def _guard(name: str, fn, cancel_check):
+    """Prüft vor jedem Knoten, ob abgebrochen wurde. Kooperativ: ein bereits
+    laufender Knoten (z.B. Fundamental mit IR-RAG) wird noch fertig ausgeführt —
+    Python-Threads lassen sich nicht von aussen beenden."""
+    if cancel_check is None:
+        return fn
+
+    def wrapped(state):
+        if cancel_check():
+            raise AnalysisCancelled(name)
+        return fn(state)
+
+    wrapped.__name__ = getattr(fn, "__name__", name)
+    return wrapped
+
+
+def build_analysis_graph(cancel_check=None):
     """
     Erstellt und kompiliert den LangGraph StateGraph.
 
@@ -53,28 +73,31 @@ def build_analysis_graph():
     """
     graph = StateGraph(AnalysisState)
 
+    def _add(name, fn):
+        graph.add_node(name, _guard(name, fn, cancel_check))
+
     # ── Bestehende Knoten ────────────────────────────────────────────────────
-    graph.add_node("classifier",        classifier_node)
-    graph.add_node("fundamental",       fundamental_node)
-    graph.add_node("update_fund_retry", update_fundamental_retry)
-    graph.add_node("news",              news_node)
-    graph.add_node("update_news_retry", update_news_retry)
-    graph.add_node("estimate_revision", estimate_revision_node)
-    graph.add_node("thematic",          thematic_node)
-    graph.add_node("optionality",       optionality_node)
-    graph.add_node("forward_estimate",  forward_estimate_node)
-    graph.add_node("risk",              risk_node)
-    graph.add_node("quality",           quality_node)
-    graph.add_node("supervisor",        supervisor_node)
+    _add("classifier",        classifier_node)
+    _add("fundamental",       fundamental_node)
+    _add("update_fund_retry", update_fundamental_retry)
+    _add("news",              news_node)
+    _add("update_news_retry", update_news_retry)
+    _add("estimate_revision", estimate_revision_node)
+    _add("thematic",          thematic_node)
+    _add("optionality",       optionality_node)
+    _add("forward_estimate",  forward_estimate_node)
+    _add("risk",              risk_node)
+    _add("quality",           quality_node)
+    _add("supervisor",        supervisor_node)
 
     # ── Neue Knoten ──────────────────────────────────────────────────────────
-    graph.add_node("anomaly_check",         anomaly_check_node)
-    graph.add_node("corporate_actions",     corporate_actions_node)
-    graph.add_node("supervisor_review",     supervisor_review_node)
-    graph.add_node("update_supervisor_round", update_supervisor_round)
-    graph.add_node("fundamental_critique",  fundamental_critique_node)
-    graph.add_node("news_critique",         news_critique_node)
-    graph.add_node("risk_critique",         risk_critique_node)
+    _add("anomaly_check",         anomaly_check_node)
+    _add("corporate_actions",     corporate_actions_node)
+    _add("supervisor_review",     supervisor_review_node)
+    _add("update_supervisor_round", update_supervisor_round)
+    _add("fundamental_critique",  fundamental_critique_node)
+    _add("news_critique",         news_critique_node)
+    _add("risk_critique",         risk_critique_node)
 
     # ── Entry Point: Phase 1 Classifier läuft VOR Fundamental ───────────────
     graph.set_entry_point("classifier")
@@ -156,11 +179,14 @@ def build_analysis_graph():
     return graph.compile()
 
 
-def run_analysis(ticker: str) -> dict:
+def run_analysis(ticker: str, cancel_check=None) -> dict:
     """
     Führt die vollständige Analyse via LangGraph aus.
+
+    cancel_check: optionale Funktion → True, wenn abgebrochen werden soll.
+    Wird vor jedem Knoten geprüft; bei True wirft der Graph AnalysisCancelled.
     """
-    compiled = build_analysis_graph()
+    compiled = build_analysis_graph(cancel_check)
 
     initial_state: AnalysisState = {
         "ticker":                   ticker.upper().strip(),
@@ -186,6 +212,7 @@ def run_analysis(ticker: str) -> dict:
         "supervisor_critique":        None,
         "supervisor_critique_target": None,
         "supervisor_review_action":   None,
+        "supervisor_review_notes":    None,
         "supervisor_rounds":          0,
         # Phase 1: Classifier + Confidence
         "business_model_classification": None,

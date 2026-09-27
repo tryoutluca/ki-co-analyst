@@ -2,217 +2,150 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { getHistory, getHistoryStats, type HistoryItem } from "@/lib/api";
-import { recColor, upsideClass, upsideLabel, scoreColor, safeNum } from "@/lib/utils";
-import { ArrowUpRight, TrendingUp, Clock, BarChart3, Bot, ChevronRight } from "lucide-react";
-
-const AGENTS = [
-  { icon: "🏷️", name: "Classifier",        desc: "Geschäftsmodell-Klassifikation & Peer-Gruppen" },
-  { icon: "🔍", name: "Fundamental",        desc: "IR-Dokumente · DCF · Multiples · Bilanz" },
-  { icon: "📰", name: "News / Sentiment",   desc: "Makro · Branchentrends · Nachrichten" },
-  { icon: "📐", name: "Estimate Revision",  desc: "Makro-adjustierte Konsensschätzungen" },
-  { icon: "🌐", name: "Thematic",           desc: "Megatrends · Adoptionskurven · Positionierung" },
-  { icon: "🎲", name: "Optionality",        desc: "Real Options · Pre-Revenue-Bewertung" },
-  { icon: "📈", name: "Forward Estimates",  desc: "Wachstums-Projektion · Szenarienmodell" },
-  { icon: "⚖️", name: "Risk (Advocatus)",  desc: "Gegenposition · Conviction Killers" },
-  { icon: "✍️", name: "Supervisor",         desc: "Synthese · Qualitätsprüfung · Final Memo" },
-];
+import { useUsername } from "@/lib/auth";
+import { safeNum, upsideClass, upsideLabel, recLabel, recStep } from "@/lib/utils";
+import { PIPELINE, AGENT_COUNT_LLM, GRAPH_NODE_COUNT } from "@/lib/pipeline";
+import { Diamond } from "@/components/brand/Brand";
 
 const EXAMPLES = [
-  { name: "Holcim",    ticker: "HOLN.SW", flag: "🇨🇭" },
-  { name: "Nestlé",    ticker: "NESN.SW", flag: "🇨🇭" },
-  { name: "Novartis",  ticker: "NOVN.SW", flag: "🇨🇭" },
-  { name: "Apple",     ticker: "AAPL",    flag: "🇺🇸" },
-  { name: "MSFT",      ticker: "MSFT",    flag: "🇺🇸" },
-  { name: "Rigetti",   ticker: "RGTI",    flag: "🇺🇸" },
+  { name: "Holcim", ticker: "HOLN.SW" }, { name: "Nestlé", ticker: "NESN.SW" },
+  { name: "Novartis", ticker: "NOVN.SW" }, { name: "Roche", ticker: "ROP.SW" },
+  { name: "Apple", ticker: "AAPL" }, { name: "Microsoft", ticker: "MSFT" },
 ];
 
-function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
-  return (
-    <div className="bg-white border border-slate-200 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-xs font-semibold tracking-widest uppercase text-slate-400">{label}</span>
-        <span className="text-slate-300">{icon}</span>
-      </div>
-      <div className="text-2xl font-bold text-slate-800">{value}</div>
-      {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
-    </div>
-  );
-}
-
-function RecBadge({ rec }: { rec: string }) {
-  return (
-    <span className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-semibold border ${recColor(rec)}`}>
-      {rec}
-    </span>
-  );
-}
+const REC_ORDER = ["KAUFEN", "ÜBERGEWICHTEN", "HALTEN", "UNTERGEWICHTEN", "VERKAUFEN"];
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [stats,   setStats]   = useState<{ total: number; last: HistoryItem | null } | null>(null);
+  const [stats, setStats]     = useState<{ total: number; last: HistoryItem | null; by_rec: Record<string, number> } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const username = useUsername();
 
   useEffect(() => {
-    getHistory(10).then(setHistory).catch(() => {});
-    getHistoryStats().then(setStats).catch(() => {});
+    Promise.all([
+      getHistory(10).then(setHistory).catch(() => {}),
+      getHistoryStats().then(setStats).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
 
+  const byRec = stats?.by_rec ?? {};
+  const maxRec = Math.max(1, ...REC_ORDER.map(r => byRec[r] ?? 0));
+
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 space-y-8">
-
-      {/* ── Hero ─────────────────────────────────────────────────────────── */}
-      <div className="relative rounded-2xl overflow-hidden text-white bg-[#0a1628]">
-        <div className="relative px-8 py-10 md:py-12">
-          <p className="text-xs font-semibold tracking-widest uppercase mb-3"
-             style={{ color: "#c9a84c" }}>
-            KI-gestützte Aktienanalyse · BFH Bachelor Thesis 2025/26
-          </p>
-          <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4 tracking-tight">
-            Institutional-Grade<br className="hidden md:block" />
-            Equity Research — automatisiert.
+    <div className="flex flex-col">
+      <section className="dot-grid border-b border-line px-5 md:px-14 pt-11 pb-9 flex flex-wrap justify-between items-end gap-10">
+        <div className="flex flex-col gap-3">
+          <div className="eyebrow">DASHBOARD{username ? ` · ${username.toUpperCase()}` : ""}</div>
+          <h1 className="m-0 font-display font-normal text-5xl md:text-[72px] leading-none tracking-[-0.02em]">
+            Ihr Research. <em className="text-gold-dark">Auf einen Blick.</em>
           </h1>
-          <p className="text-slate-300 text-sm md:text-base max-w-xl leading-relaxed mb-8">
-            Neun spezialisierte KI-Agenten analysieren Fundamentaldaten, IR-Dokumente,
-            Makro-Indikatoren und Risiken — und synthetisieren ein vollständiges
-            Investment Memo in 60–90 Sekunden.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <Link href="/analyse"
-                  className="flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm
-                             text-slate-900 transition-opacity hover:opacity-90"
-                  style={{ background: "#c9a84c" }}>
-              Analyse starten
-              <ArrowUpRight size={16} />
-            </Link>
-            <Link href="/history"
-                  className="flex items-center gap-2 px-6 py-3 rounded-lg font-semibold text-sm
-                             text-white border border-white/20 hover:bg-white/10 transition-colors">
-              <Clock size={15} />
-              Historie
-            </Link>
+          <div className="text-[15px] text-muted">
+            {AGENT_COUNT_LLM} KI-Agenten · {GRAPH_NODE_COUNT} Knoten · konfidenz-gewichtete Synthese
           </div>
         </div>
-      </div>
 
-      {/* ── Stats ────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard icon={<BarChart3 size={18} />} label="Analysen gesamt"
-                  value={String(stats?.total ?? "-")} sub="seit Inbetriebnahme" />
-        <StatCard icon={<TrendingUp size={18} />} label="Letzte Analyse"
-                  value={stats?.last?.ticker ?? "-"} sub={stats?.last?.date ?? ""} />
-        <StatCard icon={<Bot size={18} />} label="KI-Agenten"
-                  value="9" sub="Classifier + 8 Spezialisten" />
-        <StatCard icon={<ArrowUpRight size={18} />} label="Modelle"
-                  value="Claude + GPT" sub="Sonnet 4.6 / GPT-5.4-mini" />
-      </div>
-
-      {/* ── Content grid ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-        {/* Letzte Analysen */}
-        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-            <h2 className="text-base font-semibold text-slate-800">Letzte Analysen</h2>
-            <Link href="/history"
-                  className="text-xs text-slate-400 hover:text-slate-700 flex items-center gap-1">
-              Alle <ChevronRight size={12} />
-            </Link>
+        <div className="flex flex-wrap bg-card border border-line shadow-[0_30px_60px_-40px_rgba(60,45,10,0.35)]">
+          <div className="px-7 py-5 flex flex-col gap-1.5 bg-ink text-cream">
+            <div className="font-mono text-[11px] tracking-[0.12em] text-gold-dim">ANALYSEN</div>
+            <div className="font-display text-[40px] leading-none">{stats?.total ?? "–"}</div>
           </div>
-
-          {history.length === 0 ? (
-            <div className="px-6 py-12 text-center">
-              <div className="text-4xl mb-3 opacity-30">📊</div>
-              <p className="text-sm text-slate-400">Noch keine Analysen — starten Sie mit der Suche.</p>
-              <Link href="/analyse" className="mt-4 inline-block text-sm font-medium"
-                    style={{ color: "#c9a84c" }}>
-                Erste Analyse starten →
-              </Link>
-            </div>
-          ) : (
-            <div className="divide-y divide-slate-50">
-              {history.map(item => (
-                <Link key={item.id} href={`/history/${item.id}`}
-                      className="flex items-center gap-4 px-6 py-4 hover:bg-slate-50 transition-colors">
-                  {/* Ticker */}
-                  <div className="w-20 flex-shrink-0">
-                    <div className="font-bold text-slate-800">{item.ticker}</div>
-                    <div className="text-xs text-slate-400 truncate">{item.company}</div>
-                  </div>
-                  {/* Rec */}
-                  <div className="flex-1 min-w-0">
-                    <RecBadge rec={item.recommendation} />
-                  </div>
-                  {/* PT */}
-                  <div className="text-right hidden sm:block">
-                    <div className="text-sm font-semibold text-slate-700">
-                      {item.currency} {safeNum(item.price_target)} PT
-                    </div>
-                    <div className={`text-xs font-medium ${upsideClass(item.upside)}`}>
-                      {upsideLabel(item.upside)}
-                    </div>
-                  </div>
-                  {/* Score */}
-                  <div className={`text-lg font-bold w-10 text-right hidden md:block ${scoreColor(item.score)}`}>
-                    {item.score ?? "-"}
-                  </div>
-                  {/* Date */}
-                  <div className="text-xs text-slate-400 w-20 text-right flex-shrink-0">
-                    {item.date}
-                  </div>
-                </Link>
-              ))}
-            </div>
-          )}
+          <div className="px-7 py-5 flex flex-col gap-2.5 border-r border-line">
+            <div className="label-mono">ZULETZT</div>
+            <div className="font-display text-[30px] leading-none">{stats?.last?.ticker ?? "–"}</div>
+            <div className="font-mono text-[11px] text-muted">{stats?.last?.date ?? ""}</div>
+          </div>
+          <div className="px-7 py-5 flex flex-col gap-2 min-w-[220px]">
+            <div className="label-mono">EMPFEHLUNGEN</div>
+            {REC_ORDER.map(r => (
+              <div key={r} className="grid grid-cols-[110px_minmax(0,1fr)_20px] gap-2 items-center">
+                <span className="text-xs text-ink-2">{recLabel(r)}</span>
+                <div className="h-[5px] bg-bar"><div className="h-[5px] bg-gold" style={{ width: `${((byRec[r] ?? 0) / maxRec) * 100}%` }} /></div>
+                <span className="font-mono text-xs text-right">{byRec[r] ?? 0}</span>
+              </div>
+            ))}
+          </div>
         </div>
+      </section>
 
-        {/* Rechte Spalte: Quick-Start + Pipeline */}
-        <div className="space-y-5">
-
-          {/* Quick-Start */}
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-100">
-              <h2 className="text-base font-semibold text-slate-800">Schnell starten</h2>
-            </div>
-            <div className="p-4 grid grid-cols-2 gap-2">
-              {EXAMPLES.map(({ name, ticker, flag }) => (
-                <Link key={ticker} href={`/analyse?ticker=${ticker}`}
-                      className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border
-                                 border-slate-100 hover:border-slate-300 hover:bg-slate-50
-                                 transition-all text-slate-700">
-                  <span>{flag}</span>
-                  <div className="min-w-0">
-                    <div className="font-medium text-xs truncate">{name}</div>
-                    <div className="text-xs text-slate-400">{ticker}</div>
-                  </div>
-                </Link>
-              ))}
-            </div>
+      <div className="px-5 md:px-14 pt-10 pb-12 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-10">
+        <section className="flex flex-col gap-3.5 min-w-0">
+          <div className="flex justify-between items-baseline">
+            <h2 className="m-0 font-display font-normal text-[34px]">Letzte Analysen</h2>
+            <Link href="/history" className="text-sm font-semibold no-underline">Alle ansehen →</Link>
           </div>
-
-          {/* Agent-Pipeline */}
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-100">
-              <h2 className="text-base font-semibold text-slate-800">Agenten-Pipeline</h2>
-            </div>
-            <div className="divide-y divide-slate-50">
-              {AGENTS.map(({ icon, name, desc }) => (
-                <div key={name} className="flex items-center gap-3 px-5 py-3">
-                  <span className="text-base w-6 flex-shrink-0">{icon}</span>
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold text-slate-700">{name}</div>
-                    <div className="text-xs text-slate-400 truncate">{desc}</div>
-                  </div>
+          <div className="bg-card border border-line overflow-x-auto">
+            <div className="min-w-[640px]">
+              <div className="grid grid-cols-[110px_minmax(0,1fr)_150px_120px_90px_90px] gap-4 px-6 py-3 border-b border-ink font-mono text-[11px] tracking-[0.1em] text-muted">
+                <div>TICKER</div><div>UNTERNEHMEN</div><div>EMPFEHLUNG</div><div>KURSZIEL</div><div>UPSIDE</div><div>DATUM</div>
+              </div>
+              {loading ? (
+                <div className="px-6 py-10 text-sm text-muted">Lade …</div>
+              ) : history.length === 0 ? (
+                <div className="px-6 py-12 flex flex-col gap-3 items-start">
+                  <p className="m-0 text-[15px] text-ink-2">Noch keine Analysen gespeichert.</p>
+                  <Link href="/analyse" className="text-sm font-semibold no-underline">Erste Analyse starten →</Link>
                 </div>
+              ) : history.map(item => (
+                <Link key={item.id} href={`/history/${item.id}`}
+                  className="grid grid-cols-[110px_minmax(0,1fr)_150px_120px_90px_90px] gap-4 px-6 py-4 border-b border-line-2 last:border-b-0 items-center no-underline text-ink hover:bg-paper hover:text-ink">
+                  <span className="font-mono text-sm">{item.ticker}</span>
+                  <span className="text-[15px] truncate text-ink-2">{item.company}</span>
+                  <span className="font-display text-xl flex items-center gap-2">
+                    <span className="flex gap-[2px]" aria-hidden="true">
+                      {[0, 1, 2, 3, 4].map(i => (
+                        <span key={i} className="w-1.5 h-3" style={{ background: recStep(item.recommendation) === i ? "#B08D3C" : "#E4DCC8" }} />
+                      ))}
+                    </span>
+                    {recLabel(item.recommendation)}
+                  </span>
+                  <span className="font-mono text-sm">{item.currency} {safeNum(item.price_target)}</span>
+                  <span className={`font-mono text-sm ${upsideClass(item.upside)}`}>{upsideLabel(item.upside)}</span>
+                  <span className="font-mono text-xs text-muted">{item.date}</span>
+                </Link>
               ))}
             </div>
           </div>
-        </div>
+        </section>
+
+        <aside className="flex flex-col gap-6">
+          <section className="bg-card border border-line p-6 flex flex-col gap-4">
+            <h2 className="m-0 font-display font-normal text-[28px]">Schnellstart</h2>
+            <div className="grid grid-cols-2 gap-2">
+              {EXAMPLES.map(e => (
+                <button key={e.ticker} type="button"
+                  onClick={() => router.push(`/analyse?ticker=${e.ticker}&start=1&ts=${Date.now()}`)}
+                  className="text-left px-3 py-2.5 border border-line-2 hover:border-gold bg-white">
+                  <div className="text-sm text-ink">{e.name}</div>
+                  <div className="font-mono text-[11px] text-muted">{e.ticker}</div>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="bg-card border border-line p-6 flex flex-col gap-4">
+            <div className="flex justify-between items-baseline">
+              <h2 className="m-0 font-display font-normal text-[28px]">Pipeline</h2>
+              <div className="label-mono">{GRAPH_NODE_COUNT} KNOTEN</div>
+            </div>
+            <ol className="m-0 p-0 list-none flex flex-col">
+              {PIPELINE.map(n => (
+                <li key={n.key} className="grid grid-cols-[18px_minmax(0,1fr)_auto] gap-3 items-center min-h-8">
+                  <span className="flex justify-center"><Diamond status={n.optional ? "flag" : "done"} /></span>
+                  <span className="text-sm">{n.name}</span>
+                  <span className="font-mono text-[10px] tracking-[0.06em] text-muted">{n.tag}</span>
+                </li>
+              ))}
+            </ol>
+            <p className="m-0 text-xs text-muted">Hohle Raute = läuft nur bei Bedarf (Anomalie, Pre-Revenue, Senior-Review-Kritik).</p>
+          </section>
+        </aside>
       </div>
 
-      {/* Footer */}
-      <p className="text-center text-xs text-slate-400 pt-4 border-t border-slate-200">
-        KI-Co-Analyst · Berner Fachhochschule · Bachelor Thesis 2025/26 · Luca Lüdi
-        · Kein Ersatz für professionelle Anlageberatung (Art. 3 lit. c FIDLEG)
+      <p className="mx-5 md:mx-14 mb-10 pt-6 border-t border-line text-xs text-muted">
+        KI-Co-Analyst · Bachelorthesis Berner Fachhochschule · Keine Anlageberatung im Sinne von Art. 3 lit. c FIDLEG.
       </p>
     </div>
   );

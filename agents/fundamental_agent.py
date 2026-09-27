@@ -35,7 +35,7 @@ from tools.finance_tools import (
     get_price_history,
     get_stock_info,
 )
-from tools.ir_rag_tool import consensus_estimates_from_ir, get_ir_analysis
+from tools.ir_rag_tool import consensus_estimates_from_ir, get_ir_analysis, _EMPTY_IR
 from tools.multiples_engine import MultiplesEngine, compute_historical_averages
 from tools.schemas import FundamentalAgentOutput
 from tools.valuation_engine import build_valuation_table, run_dcf
@@ -171,7 +171,14 @@ def run_fundamental_agent(
         ir_analysis = ir_analysis_cache
     else:
         print(f"      Analysiere IR-Dokumente (RAG)...")
-        ir_analysis = get_ir_analysis.invoke(ticker)
+        try:
+            ir_analysis = get_ir_analysis.invoke(ticker)
+        except Exception as e:
+            # IR-Berichte sind eine Zusatzquelle: ohne sie weiter mit yfinance/SEC
+            # statt den ganzen Agenten (und damit Retry-Runden) scheitern zu lassen.
+            # ir_failed → data_source_errors "ir_rag" → Confidence-Deckel (siehe unten)
+            print(f"      ⚠ IR-Analyse fehlgeschlagen, fahre ohne IR-Daten fort: {e}")
+            ir_analysis = {**_EMPTY_IR, "error": f"IR-Analyse fehlgeschlagen: {e}", "ir_failed": True}
 
     # ── Multi-year IR data (new) ──────────────────────────────────────────────
     ir_annual_years      = (ir_analysis or {}).get("ir_annual_years", [])
@@ -314,7 +321,7 @@ def run_fundamental_agent(
         peer_comparison     = data_cache["peer_comparison"]
         estimate_anchors    = data_cache["estimate_anchors"]
         dcf_result          = data_cache["dcf_result"]
-        data_source_errors  = data_cache.get("data_source_errors", [])
+        data_source_errors  = list(data_cache.get("data_source_errors", []))
         hist_multiples_avg  = data_cache.get("hist_multiples_avg", {})
     else:
         print(f"      Hole historische Finanzdaten...")
@@ -481,6 +488,8 @@ def run_fundamental_agent(
             f"ignoriere ihn vollständig, stütze dich nur auf die übrigen): "
             f"{', '.join(sub_agent_errors)}"
         )
+    if isinstance(ir_analysis, dict) and ir_analysis.get("ir_failed") and "ir_rag" not in data_source_errors:
+        data_source_errors.append("ir_rag")
     if data_source_errors:
         senior_feedback += (
             f"\n\n⚠️ FEHLGESCHLAGENE DATENQUELLEN (deterministische Berechnung "

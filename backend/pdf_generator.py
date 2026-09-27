@@ -143,7 +143,9 @@ def generate_memo_pdf(data: dict) -> bytes:
         [[
             Paragraph(f"<font color='white'><b>{company}</b></font>",
                       _style(fontName="Helvetica-Bold", fontSize=18, textColor=WHITE, leading=22)),
-            Paragraph(f"<font color='#{rec_clr.hexval()[1:]}'><b>{rec}</b></font>",
+            # hexval() liefert "0xd97706" → "0x" abschneiden (vorher [1:] → "#xd97706",
+            # ungültige Farbe → PDF-Export brach immer ab)
+            Paragraph(f"<font color='#{rec_clr.hexval()[2:]}'><b>{rec}</b></font>",
                       _style(fontName="Helvetica-Bold", fontSize=15, textColor=rec_clr,
                              alignment=TA_RIGHT)),
         ]],
@@ -356,7 +358,12 @@ def generate_memo_pdf(data: dict) -> bytes:
         for r in risks:
             text = ""
             if isinstance(r, dict):
-                text = _s(r.get("point", r.get("argument", "")))
+                # key_risks kommt vom LLM oft als {description, affected_segment,
+                # time_horizon, quantification} statt als String — vorher wurden
+                # solche Risiken hier still verworfen (nur point/argument gelesen)
+                main = r.get("description") or r.get("point") or r.get("argument") or r.get("risk") or ""
+                extra = " · ".join(str(v) for v in (r.get("quantification"), r.get("time_horizon")) if v)
+                text = _s(f"{main} ({extra})" if main and extra else main)
             elif isinstance(r, str):
                 text = _s(r)
             if text:

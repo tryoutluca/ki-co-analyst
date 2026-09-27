@@ -1,158 +1,113 @@
 "use client";
 
 import { safeNum } from "@/lib/utils";
+import { type Memo, asList, asObj, str, SectionTitle, Panel, Empty } from "./ui";
 
-function assessmentBadge(a: string) {
-  const badges: Record<string, string> = {
-    ELEVATED: "bg-red-100 text-red-700 border-red-200",
-    FAIR:     "bg-emerald-100 text-emerald-700 border-emerald-200",
-    DISCOUNT: "bg-blue-100 text-blue-700 border-blue-200",
-  };
-  const icons: Record<string, string> = { ELEVATED: "🔴", FAIR: "🟢", DISCOUNT: "🔵" };
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${badges[a] ?? "bg-slate-100 text-slate-600"}`}>
-      {icons[a] ?? ""} {a}
-    </span>
-  );
+const ASSESSMENT: Record<string, { label: string; cls: string }> = {
+  DISCOUNT: { label: "Abschlag",  cls: "text-positive" },
+  FAIR:     { label: "Fair",      cls: "text-gold-text" },
+  ELEVATED: { label: "Erhöht",    cls: "text-negative" },
+};
+
+const TH = "px-4 py-3 text-left font-mono text-[11px] tracking-[0.1em] font-normal text-muted border-b border-ink whitespace-nowrap";
+const TD = "px-4 py-3 text-sm text-ink-2 border-b border-line-2 whitespace-nowrap";
+
+function cell(v: unknown): string {
+  if (v == null || v === "") return "–";
+  const f = typeof v === "number" ? v : NaN;
+  return Number.isFinite(f) ? (Math.abs(f) >= 100 ? f.toFixed(0) : f.toFixed(2)) : String(v);
 }
 
-function SectionHead({ children }: { children: React.ReactNode }) {
-  return (
-    <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                   border-b border-slate-100 pb-2">{children}</h3>
-  );
-}
-
-function MissingDataHint() {
-  return (
-    <div className="flex items-center gap-2 px-4 py-3 rounded-lg border border-amber-200
-                    bg-amber-50 text-sm text-amber-700">
-      ⚠️ Fundamentaldaten nicht verfügbar — Analyse unvollständig
-    </div>
-  );
-}
-
-export default function TabValuation({ data }: { data: Record<string, unknown> }) {
-  const vt    = (data.valuation_table    as Record<string, unknown>[]) ?? [];
-  const ff    = (data.full_financials     as Record<string, unknown>[]) ?? [];
-  const pc    = (data.peer_comparison     as Record<string, unknown>)   ?? {};
-  const peers = (pc.peers                 as Record<string, unknown>[]) ?? [];
-  const subj  = pc.subject_company        as Record<string, unknown> | undefined;
-  const avg   = pc.sector_averages        as Record<string, unknown> | undefined;
-  const tkr   = String(data.ticker ?? "");
-  const incomplete = Boolean(data.analysis_incomplete);
-
-  const th = "px-3 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400 bg-slate-50";
-  const td = "px-3 py-2 text-sm text-slate-700 border-b border-slate-50";
+export default function TabValuation({ d }: { d: Memo }) {
+  const vt    = asList(d.valuation_table);
+  const ff    = asList(d.full_financials);
+  const pc    = asObj(d.peer_comparison);
+  const peers = asList(pc?.peers);
+  const subj  = asObj(pc?.subject_company);
+  const avg   = asObj(pc?.sector_averages);
+  const ticker = str(d.ticker);
+  const incomplete = Boolean(d.analysis_incomplete);
 
   return (
-    <div className="space-y-8">
-
-      {/* Multiples Table */}
-      <div>
-        <SectionHead>Bewertungs-Multiples</SectionHead>
-        {vt.length > 0 ? (
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  {["Kennzahl","Aktuell","Peer Ø","Hist. Ø","Einschätzung","Quelle"].map(h =>
-                    <th key={h} className={th}>{h}</th>)}
-                </tr>
-              </thead>
+    <div className="flex flex-col gap-12">
+      <section className="flex flex-col gap-4">
+        <SectionTitle aside="AKTUELL · PEERS · HISTORISCH">Bewertungs-Multiples</SectionTitle>
+        {vt.length ? (
+          <Panel className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead><tr>{["Kennzahl", "Aktuell", "Peer Ø", "Hist. Ø", "Einschätzung", "Quelle"].map(h => <th key={h} className={TH}>{h}</th>)}</tr></thead>
               <tbody>
-                {vt.map((r, i) => (
-                  <tr key={i} className="hover:bg-slate-50">
-                    <td className={`${td} font-medium`}>{String(r.metric ?? "")}</td>
-                    <td className={`${td} font-semibold`}>{safeNum(r.current_value)}</td>
-                    <td className={td}>{safeNum(r.peer_average)}</td>
-                    <td className={td}>{safeNum(r.historical_average)}</td>
-                    <td className={td}>{assessmentBadge(String(r.assessment ?? "FAIR"))}</td>
-                    <td className={`${td} text-slate-400 text-xs`}>{String(r.source ?? "")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : incomplete ? <MissingDataHint /> : null}
-      </div>
-
-      {/* Full Financials */}
-      <div>
-        <SectionHead>Finanzübersicht &amp; Konsensschätzungen</SectionHead>
-        {ff.length > 0 ? (
-          <>
-            <div className="overflow-x-auto rounded-lg border border-slate-200">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr>
-                    {["Jahr","Umsatz","EBITDA","EBITDA-%","EBIT-%","EPS","KGV","DPS","FCF","ND/EBITDA","ROIC","Quelle"].map(h =>
-                      <th key={h} className={th}>{h}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {ff.map((y, i) => {
-                    const isEst = y.type === "E";
-                    return (
-                      <tr key={i} className={isEst ? "bg-blue-50/50" : "hover:bg-slate-50"}>
-                        <td className={`${td} font-medium`}>
-                          {isEst && <span className="text-blue-500 mr-1">📊</span>}
-                          {String(y.year ?? "")}
-                        </td>
-                        {["revenue_bn","ebitda_bn","ebitda_margin_pct","ebit_margin_pct",
-                          "eps_adj","pe_ratio","dps","fcf_bn","nd_ebitda","roic_pct"].map(k =>
-                          <td key={k} className={td}>{String(y[k] ?? "n/v")}</td>
-                        )}
-                        <td className={`${td} text-xs text-slate-400`}>{String(y.source ?? "")}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <p className="text-xs text-slate-400 mt-1">📊 = Schätzung</p>
-          </>
-        ) : incomplete ? <MissingDataHint /> : null}
-      </div>
-
-      {/* Peer Comparison */}
-      {(peers.length > 0 || subj || avg) && (
-        <div>
-          <SectionHead>Peer-Vergleich</SectionHead>
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
-            <table className="w-full text-sm">
-              <thead>
-                <tr>
-                  {["Unternehmen","Land","EV/EBITDA","Fwd P/E","EBIT-%","ND/EBITDA","Div %","Rev-Wachstum"].map(h =>
-                    <th key={h} className={th}>{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {[...peers, avg, subj].filter(Boolean).map((p, i) => {
-                  const pr = p as Record<string, unknown>;
-                  const isSub = pr.ticker === tkr;
-                  const isAvg = pr.ticker === "AVG";
+                {vt.map((r, i) => {
+                  const a = ASSESSMENT[str(r.assessment)] ?? { label: str(r.assessment, "–"), cls: "" };
                   return (
-                    <tr key={i}
-                        className={isSub ? "bg-amber-50 font-semibold" : isAvg ? "bg-slate-50 italic" : "hover:bg-slate-50"}>
-                      <td className={`${td} font-medium`}>
-                        {isSub ? "⭐ " : isAvg ? "Ø " : ""}
-                        {String(pr.company ?? "")}
-                      </td>
-                      <td className={td}>{String(pr.country ?? "")}</td>
-                      <td className={td}>{String(pr.ev_ebitda ?? "-")}</td>
-                      <td className={td}>{String(pr.forward_pe ?? "-")}</td>
-                      <td className={td}>{String(pr.ebit_margin_pct ?? "-")}</td>
-                      <td className={td}>{String(pr.nd_ebitda ?? "-")}</td>
-                      <td className={td}>{String(pr.dividend_yield_pct ?? "-")}</td>
-                      <td className={td}>{String(pr.revenue_growth_pct ?? "-")}</td>
+                    <tr key={i}>
+                      <td className={`${TD} font-medium text-ink`}>{str(r.metric)}</td>
+                      <td className={`${TD} font-mono`}>{safeNum(r.current_value)}</td>
+                      <td className={`${TD} font-mono`}>{safeNum(r.peer_average)}</td>
+                      <td className={`${TD} font-mono`}>{safeNum(r.historical_average)}</td>
+                      <td className={`${TD} ${a.cls}`}>{a.label}</td>
+                      <td className={`${TD} text-xs text-muted`}>{str(r.source)}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-          </div>
-        </div>
+          </Panel>
+        ) : <Empty>{incomplete ? "Fundamentaldaten nicht verfügbar — Analyse unvollständig." : "Keine Multiples vorhanden."}</Empty>}
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <SectionTitle aside="A = IST · E = SCHÄTZUNG (FORWARD-ESTIMATE-AGENT)">Finanzübersicht</SectionTitle>
+        {ff.length ? (
+          <Panel className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead><tr>{["Jahr", "Umsatz", "EBITDA", "EBITDA-%", "EBIT-%", "EPS", "KGV", "DPS", "FCF", "ND/EBITDA", "ROIC %", "Quelle"].map(h => <th key={h} className={TH}>{h}</th>)}</tr></thead>
+              <tbody>
+                {ff.map((y, i) => {
+                  const est = y.type === "E";
+                  return (
+                    <tr key={i} className={est ? "bg-[#FBF6EA]" : ""}>
+                      <td className={`${TD} font-mono ${est ? "text-gold-text" : "text-ink"}`}>{str(y.year)}</td>
+                      {["revenue_bn", "ebitda_bn", "ebitda_margin_pct", "ebit_margin_pct", "eps_adj", "pe_ratio", "dps", "fcf_bn", "nd_ebitda", "roic_pct"].map(k => (
+                        <td key={k} className={`${TD} font-mono`}>{cell(y[k])}</td>
+                      ))}
+                      <td className={`${TD} text-xs text-muted`}>{str(y.source)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Panel>
+        ) : <Empty>{incomplete ? "Fundamentaldaten nicht verfügbar — Analyse unvollständig." : "Keine Finanzübersicht vorhanden."}</Empty>}
+      </section>
+
+      {(peers.length > 0 || subj || avg) && (
+        <section className="flex flex-col gap-4">
+          <SectionTitle aside={str(pc?.sector).toUpperCase()}>Peer-Vergleich</SectionTitle>
+          <Panel className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead><tr>{["Unternehmen", "Land", "EV/EBITDA", "Fwd P/E", "EBIT-%", "ND/EBITDA", "Div %", "Umsatzwachstum %"].map(h => <th key={h} className={TH}>{h}</th>)}</tr></thead>
+              <tbody>
+                {[...peers, avg, subj].filter((p): p is Record<string, unknown> => Boolean(p)).map((p, i) => {
+                  const isSubj = p.ticker === ticker || p === subj;
+                  const isAvg  = p.ticker === "AVG" || p === avg;
+                  return (
+                    <tr key={i} className={isSubj ? "bg-[#FBF6EA]" : isAvg ? "bg-paper" : ""}>
+                      <td className={`${TD} ${isSubj ? "font-semibold text-ink" : ""} ${isAvg ? "italic" : ""}`}>
+                        {isAvg ? "Ø Peers" : str(p.company)}
+                      </td>
+                      <td className={TD}>{str(p.country, "–")}</td>
+                      {["ev_ebitda", "forward_pe", "ebit_margin_pct", "nd_ebitda", "dividend_yield_pct", "revenue_growth_pct"].map(k => (
+                        <td key={k} className={`${TD} font-mono`}>{cell(p[k])}</td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Panel>
+          {str(pc?.methodology) && <p className="m-0 text-xs text-muted">{str(pc?.methodology)}</p>}
+        </section>
       )}
     </div>
   );

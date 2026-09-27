@@ -96,10 +96,11 @@ Antworte ausschliesslich als JSON nach dem Schema."""
 def _research_trends(ticker: str, company: str, sector: str, industry: str) -> str:
     """Holt aktuelle Trend-Evidenz via Tavily (wenn verfügbar)."""
     try:
-        from langchain_community.tools.tavily_search import TavilySearchResults
-        search = TavilySearchResults(max_results=4)
-        query = f"{company} {industry} structural growth trends outlook 2026 2027 market"
-        results = search.invoke(query)
+        from datetime import date
+        from tools.finance_tools import tavily_search
+        yr = date.today().year
+        query = f"{company} {industry} structural growth trends outlook {yr} {yr + 1} market"
+        results = tavily_search(query, max_results=4)
         if isinstance(results, list) and results:
             parts = []
             for r in results[:4]:

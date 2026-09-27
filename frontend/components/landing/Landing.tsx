@@ -2,41 +2,53 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import Image from "next/image";
 import { login as apiLogin, register as apiRegister } from "@/lib/api";
+import { LogoMark, Wordmark } from "@/components/brand/Brand";
+import { AGENT_COUNT_LLM, GRAPH_NODE_COUNT } from "@/lib/pipeline";
+import PipelineGraph from "./PipelineGraph";
 
 type ModalType = "none" | "login" | "register";
 
-/* ─── Shared input style ─────────────────────────────────────────────── */
-const INPUT = "w-full px-4 py-3 rounded-lg border text-sm outline-none transition-all border-slate-200 focus:border-amber-400 focus:ring-2 focus:ring-amber-100 bg-slate-50 text-slate-800 placeholder-slate-400";
-const LABEL = "block text-xs font-semibold tracking-widest uppercase mb-1.5 text-slate-400";
+// Kontaktadresse für "Demo anfragen" — ohne gesetzte Variable führt der Button
+// zur Registrierung statt zu einem toten mailto-Link.
+const CONTACT_EMAIL = process.env.NEXT_PUBLIC_CONTACT_EMAIL ?? "";
 
-/* ─── Spinner ────────────────────────────────────────────────────────── */
-function Spinner() {
+const INPUT = "w-full h-12 px-3.5 border border-line-3 rounded-[2px] bg-white text-[15px] text-ink outline-none focus:border-gold";
+const BTN_DARK = "inline-flex items-center justify-center h-14 px-7 bg-ink text-cream font-semibold text-base rounded-[2px] no-underline hover:text-cream";
+const BTN_LINE = "inline-flex items-center justify-center h-14 px-7 border border-gold text-ink font-semibold text-base rounded-[2px] no-underline hover:text-ink";
+
+/* ─── Dialoge ─────────────────────────────────────────────────────────── */
+
+function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
-    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-    </svg>
+    <div className="bg-card border border-line w-full max-w-md p-8 flex flex-col gap-5 shadow-[0_40px_80px_-40px_rgba(60,45,10,0.5)]"
+      role="dialog" aria-modal="true" aria-labelledby="dlg-title">
+      <div className="flex justify-between items-start">
+        <h2 id="dlg-title" className="m-0 font-display font-normal text-[40px] leading-none">{title}</h2>
+        <button type="button" onClick={onClose} aria-label="Schliessen"
+          className="w-11 h-11 -mr-3 -mt-2 text-2xl text-muted hover:text-ink">×</button>
+      </div>
+      {children}
+    </div>
   );
 }
 
-/* ─── Login form ─────────────────────────────────────────────────────── */
-function LoginForm({
-  onClose,
-  onSwitch,
-  onSuccess,
-}: {
-  onClose: () => void;
-  onSwitch: () => void;
-  onSuccess: () => void;
-}) {
+function Field({ id, label, ...props }: { id: string; label: string } & React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="label-mono">{label}</label>
+      <input id={id} className={INPUT} {...props} />
+    </div>
+  );
+}
+
+function LoginForm({ onClose, onSwitch, onSuccess }: { onClose: () => void; onSwitch: () => void; onSuccess: () => void }) {
   const [user, setUser] = useState("");
   const [pw, setPw]     = useState("");
   const [err, setErr]   = useState("");
   const [busy, setBusy] = useState(false);
 
-  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr("");
     setBusy(true);
@@ -48,57 +60,26 @@ function LoginForm({
     } finally {
       setBusy(false);
     }
-  };
+  }
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden w-full max-w-md">
-      <div className="p-8">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h2 className="text-2xl font-bold text-slate-800">Anmelden</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Willkommen zurück</p>
-          </div>
-          <button type="button" onClick={onClose} className="text-slate-300 hover:text-slate-600 text-2xl leading-none transition-colors">×</button>
-        </div>
-
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label className={LABEL}>Benutzername</label>
-            <input type="text" value={user} onChange={e => setUser(e.target.value)}
-              placeholder="admin" autoComplete="username" required className={INPUT} />
-          </div>
-          <div>
-            <label className={LABEL}>Passwort</label>
-            <input type="password" value={pw} onChange={e => setPw(e.target.value)}
-              placeholder="••••••••" autoComplete="current-password" required className={INPUT} />
-          </div>
-          {err && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{err}</div>}
-          <button type="submit" disabled={busy}
-            className="w-full py-3.5 rounded-lg font-semibold text-sm text-white transition-colors disabled:opacity-60"
-            style={{ background: busy ? "#8a9bb0" : "#0a1628" }}>
-            {busy ? <span className="flex items-center justify-center gap-2"><Spinner /> Anmelden…</span> : "Anmelden →"}
-          </button>
-        </form>
-
-        <div className="mt-5 pt-5 border-t border-slate-100 flex flex-col items-center gap-2">
-          <p className="text-xs text-slate-400">
-            Noch kein Konto?{" "}
-            <button type="button" onClick={onSwitch} className="font-semibold underline" style={{ color: "#c9a84c" }}>Registrieren</button>
-          </p>
-        </div>
-      </div>
-    </div>
+    <Dialog title="Anmelden" onClose={onClose}>
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <Field id="lg-user" label="Benutzername" value={user} onChange={e => setUser(e.target.value)} autoComplete="username" required />
+        <Field id="lg-pw" label="Passwort" type="password" value={pw} onChange={e => setPw(e.target.value)} autoComplete="current-password" required />
+        {err && <div role="alert" className="px-4 py-3 text-sm border border-negative/40 text-negative bg-[#FBEFEF]">{err}</div>}
+        <button type="submit" disabled={busy} className="h-12 bg-ink text-cream font-semibold rounded-[2px] disabled:opacity-60">
+          {busy ? "Anmelden …" : "Anmelden"}
+        </button>
+      </form>
+      <p className="m-0 pt-4 border-t border-line text-sm text-muted">
+        Noch kein Konto? <button type="button" onClick={onSwitch} className="font-semibold text-gold-text underline">Registrieren</button>
+      </p>
+    </Dialog>
   );
 }
 
-/* ─── Register form ──────────────────────────────────────────────────── */
-function RegisterForm({
-  onClose,
-  onSwitch,
-}: {
-  onClose: () => void;
-  onSwitch: () => void;
-}) {
+function RegisterForm({ onClose, onSwitch }: { onClose: () => void; onSwitch: () => void }) {
   const [email, setEmail] = useState("");
   const [user, setUser]   = useState("");
   const [pw, setPw]       = useState("");
@@ -107,7 +88,7 @@ function RegisterForm({
   const [ok, setOk]       = useState(false);
   const [busy, setBusy]   = useState(false);
 
-  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr("");
     if (pw !== pw2) { setErr("Passwörter stimmen nicht überein."); return; }
@@ -122,410 +103,297 @@ function RegisterForm({
     } finally {
       setBusy(false);
     }
-  };
+  }
 
   if (ok) {
     return (
-      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden w-full max-w-md">
-        <div className="p-8 text-center">
-          <button type="button" onClick={onClose} className="absolute top-4 right-4 text-slate-300 hover:text-slate-600 text-2xl leading-none">×</button>
-          <div className="text-5xl mb-4">✅</div>
-          <h2 className="text-2xl font-bold text-slate-800 mb-2">Registrierung erfolgreich!</h2>
-          <p className="text-sm text-slate-500 mb-6">Du kannst dich jetzt anmelden.</p>
-          <button type="button" onClick={onSwitch}
-            className="px-6 py-3 rounded-lg font-semibold text-sm text-white"
-            style={{ background: "#0a1628" }}>
-            Jetzt anmelden →
-          </button>
-        </div>
-      </div>
+      <Dialog title="Konto erstellt" onClose={onClose}>
+        <p className="m-0 text-[15px] text-ink-2">Sie können sich jetzt anmelden.</p>
+        <button type="button" onClick={onSwitch} className="h-12 bg-ink text-cream font-semibold rounded-[2px]">Jetzt anmelden</button>
+      </Dialog>
     );
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden w-full max-w-md">
-      <div className="p-8">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h2 className="text-2xl font-bold text-slate-800">Registrieren</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Kostenloses Konto erstellen</p>
-          </div>
-          <button type="button" onClick={onClose} className="text-slate-300 hover:text-slate-600 text-2xl leading-none transition-colors">×</button>
-        </div>
-
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label className={LABEL}>E-Mail-Adresse</label>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)}
-              placeholder="name@beispiel.ch" autoComplete="email" required className={INPUT} />
-          </div>
-          <div>
-            <label className={LABEL}>Benutzername</label>
-            <input type="text" value={user} onChange={e => setUser(e.target.value)}
-              placeholder="max_muster" autoComplete="username" required className={INPUT} />
-          </div>
-          <div>
-            <label className={LABEL}>Passwort</label>
-            <input type="password" value={pw} onChange={e => setPw(e.target.value)}
-              placeholder="Min. 8 Zeichen" autoComplete="new-password" required className={INPUT} />
-          </div>
-          <div>
-            <label className={LABEL}>Passwort bestätigen</label>
-            <input type="password" value={pw2} onChange={e => setPw2(e.target.value)}
-              placeholder="••••••••" autoComplete="new-password" required className={INPUT} />
-          </div>
-          {err && <div className="px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{err}</div>}
-          <button type="submit" disabled={busy}
-            className="w-full py-3.5 rounded-lg font-semibold text-sm transition-colors disabled:opacity-60"
-            style={{ background: busy ? "#8a9bb0" : "#c9a84c", color: "#0a1628" }}>
-            {busy ? <span className="flex items-center justify-center gap-2"><Spinner /> Registrierung…</span> : "Konto erstellen →"}
-          </button>
-        </form>
-
-        <div className="mt-5 pt-5 border-t border-slate-100 text-center">
-          <p className="text-xs text-slate-400">
-            Bereits registriert?{" "}
-            <button type="button" onClick={onSwitch} className="font-semibold underline" style={{ color: "#c9a84c" }}>Anmelden</button>
-          </p>
-        </div>
-      </div>
-    </div>
+    <Dialog title="Registrieren" onClose={onClose}>
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <Field id="rg-mail" label="E-Mail" type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" required />
+        <Field id="rg-user" label="Benutzername" value={user} onChange={e => setUser(e.target.value)} autoComplete="username" required />
+        <Field id="rg-pw" label="Passwort (min. 8 Zeichen)" type="password" value={pw} onChange={e => setPw(e.target.value)} autoComplete="new-password" required />
+        <Field id="rg-pw2" label="Passwort bestätigen" type="password" value={pw2} onChange={e => setPw2(e.target.value)} autoComplete="new-password" required />
+        {err && <div role="alert" className="px-4 py-3 text-sm border border-negative/40 text-negative bg-[#FBEFEF]">{err}</div>}
+        <button type="submit" disabled={busy} className="h-12 bg-ink text-cream font-semibold rounded-[2px] disabled:opacity-60">
+          {busy ? "Registrierung …" : "Konto erstellen"}
+        </button>
+      </form>
+      <p className="m-0 pt-4 border-t border-line text-sm text-muted">
+        Bereits registriert? <button type="button" onClick={onSwitch} className="font-semibold text-gold-text underline">Anmelden</button>
+      </p>
+    </Dialog>
   );
 }
 
-/* ─── Navbar ─────────────────────────────────────────────────────────── */
-function Navbar({ onOpen }: { onOpen: (t: ModalType) => void }) {
-  const [scrolled, setScrolled] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+/* ─── Abschnitte ──────────────────────────────────────────────────────── */
 
-  useEffect(() => {
-    const fn = () => setScrolled(window.scrollY > 20);
-    window.addEventListener("scroll", fn, { passive: true });
-    return () => window.removeEventListener("scroll", fn);
-  }, []);
+function DemoButton({ onRegister, className }: { onRegister: () => void; className: string }) {
+  return CONTACT_EMAIL
+    ? <a href={`mailto:${CONTACT_EMAIL}?subject=Demo%20KI-Co-Analyst`} className={className}>Demo anfragen</a>
+    : <button type="button" onClick={onRegister} className={className}>Zugang anfragen</button>;
+}
 
+function Nav({ onOpen }: { onOpen: (t: ModalType) => void }) {
+  const [open, setOpen] = useState(false);
+  const links = [["#pipeline", "Pipeline"], ["#agenten", "So funktioniert es"], ["#methodik", "Methodik"], ["#kontakt", "Für Banken"]];
   return (
-    <header
-      className="fixed top-0 inset-x-0 z-50 transition-all duration-300"
-      style={{
-        background: scrolled ? "rgba(10,22,40,0.95)" : "rgba(10,22,40,0.7)",
-        backdropFilter: "blur(12px)",
-        WebkitBackdropFilter: "blur(12px)",
-        borderBottom: scrolled ? "1px solid rgba(201,168,76,0.2)" : "1px solid transparent",
-      }}
-    >
-      <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-        <a href="#" className="flex items-center gap-2.5 no-underline">
-          <Image src="/logo.png" alt="KI-Co-Analyst" width={32} height={32} className="rounded-lg" />
-          <span className="font-semibold text-white text-base tracking-tight">KI-Co-Analyst</span>
-        </a>
-
-        <nav className="hidden md:flex items-center gap-8">
-          <a href="#about" className="text-sm text-slate-300 hover:text-white transition-colors no-underline">Über uns</a>
-          <a href="#architecture" className="text-sm text-slate-300 hover:text-white transition-colors no-underline">Architektur</a>
-          <button type="button" onClick={() => onOpen("login")}
-            className="text-sm text-slate-300 hover:text-white transition-colors cursor-pointer bg-transparent border-none p-0">
-            Anmelden
-          </button>
-          <button type="button" onClick={() => onOpen("register")}
-            className="text-sm font-semibold px-4 py-2 rounded-lg transition-all cursor-pointer border-none"
-            style={{ background: "#c9a84c", color: "#0a1628" }}>
-            Registrieren
-          </button>
+    <header className="border-b border-line">
+      <div className="h-20 px-5 md:px-20 flex items-center justify-between">
+        <a href="#" className="no-underline" aria-label="KI-Co-Analyst Startseite"><Wordmark /></a>
+        <nav aria-label="Seitennavigation" className="hidden lg:flex items-center gap-10 text-[15px]">
+          {links.map(([h, l]) => <a key={h} href={h} className="text-ink-2 no-underline hover:text-ink">{l}</a>)}
+          <button type="button" onClick={() => onOpen("login")} className="text-ink-2 hover:text-ink">Anmelden</button>
+          <DemoButton onRegister={() => onOpen("register")}
+            className="inline-flex items-center h-11 px-5 bg-ink text-cream font-semibold rounded-[2px] no-underline hover:text-cream" />
         </nav>
-
-        <button type="button" className="md:hidden text-white p-1" onClick={() => setMenuOpen(v => !v)} aria-label="Menu">
-          <div className="space-y-1.5">
-            <span className={`block w-6 h-0.5 bg-white transition-all ${menuOpen ? "rotate-45 translate-y-2" : ""}`} />
-            <span className={`block w-6 h-0.5 bg-white transition-all ${menuOpen ? "opacity-0" : ""}`} />
-            <span className={`block w-6 h-0.5 bg-white transition-all ${menuOpen ? "-rotate-45 -translate-y-2" : ""}`} />
-          </div>
+        <button type="button" className="lg:hidden w-11 h-11 text-ink" onClick={() => setOpen(v => !v)}
+          aria-label={open ? "Menü schliessen" : "Menü öffnen"} aria-expanded={open}>
+          <span className="block w-6 h-px bg-ink mx-auto mb-1.5" /><span className="block w-6 h-px bg-ink mx-auto mb-1.5" /><span className="block w-6 h-px bg-ink mx-auto" />
         </button>
       </div>
-
-      {menuOpen && (
-        <div className="md:hidden px-6 pb-4 flex flex-col gap-4 border-t border-white/10">
-          <a href="#about" className="text-sm text-slate-300 no-underline" onClick={() => setMenuOpen(false)}>Über uns</a>
-          <a href="#architecture" className="text-sm text-slate-300 no-underline" onClick={() => setMenuOpen(false)}>Architektur</a>
-          <button type="button" className="text-sm text-slate-300 text-left bg-transparent border-none cursor-pointer"
-            onClick={() => { setMenuOpen(false); onOpen("login"); }}>Anmelden</button>
-          <button type="button"
-            className="text-sm font-semibold px-4 py-2 rounded-lg text-center border-none cursor-pointer"
-            style={{ background: "#c9a84c", color: "#0a1628" }}
-            onClick={() => { setMenuOpen(false); onOpen("register"); }}>
-            Registrieren
-          </button>
+      {open && (
+        <div className="lg:hidden px-5 pb-5 flex flex-col gap-1 border-t border-line">
+          {links.map(([h, l]) => <a key={h} href={h} onClick={() => setOpen(false)} className="py-2.5 text-ink-2 no-underline">{l}</a>)}
+          <button type="button" onClick={() => { setOpen(false); onOpen("login"); }} className="py-2.5 text-left text-ink-2">Anmelden</button>
         </div>
       )}
     </header>
   );
 }
 
-/* ─── Hero ────────────────────────────────────────────────────────────── */
-function Hero({ onOpen }: { onOpen: (t: ModalType) => void }) {
+function Certificate() {
   return (
-    <section
-      className="relative min-h-screen flex flex-col items-center justify-center text-center px-6 pt-16 bg-[#0a1628]"
-    >
-      <div className="relative max-w-4xl mx-auto">
-        <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold text-white leading-tight mb-6 tracking-tight">
-          Institutionelle Aktienanalyse.{" "}
-          <span style={{ color: "#c9a84c" }}>Automatisiert.</span>
+    <svg viewBox="0 0 500 600" className="w-[460px] max-w-full h-auto rotate-3 drop-shadow-[0_30px_40px_rgba(60,45,10,0.18)]"
+      role="img" aria-label="Illustration eines historischen Aktienzertifikats">
+      <rect x="0" y="0" width="500" height="600" fill="#FFFDF6" stroke="#B08D3C" strokeWidth="1.5" />
+      <rect x="14" y="14" width="472" height="572" fill="none" stroke="#B08D3C" strokeWidth="0.8" />
+      <rect x="22" y="22" width="456" height="556" fill="none" stroke="#C9A24A" strokeWidth="1" strokeDasharray="1 3" />
+      <g fill="#B08D3C">
+        {[[14, 14], [486, 14], [14, 586], [486, 586]].map(([cx, cy]) => (
+          <rect key={`${cx}-${cy}`} x={cx - 4} y={cy - 4} width="8" height="8" transform={`rotate(45 ${cx} ${cy})`} />
+        ))}
+      </g>
+      <g fill="none" stroke="#C9A24A" strokeWidth="0.6">
+        {Array.from({ length: 18 }, (_, i) => (
+          <ellipse key={i} cx="250" cy="170" rx="62" ry="22" transform={`rotate(${i * 10} 250 170)`} />
+        ))}
+        <circle cx="250" cy="170" r="70" />
+        <circle cx="250" cy="170" r="76" strokeDasharray="2 2" />
+      </g>
+      <circle cx="250" cy="170" r="14" fill="#B08D3C" />
+      <text x="250" y="292" textAnchor="middle" fontFamily="var(--font-instrument), Georgia, serif" fontSize="60" letterSpacing="18" fill="#121417">AKTIE</text>
+      <text x="250" y="322" textAnchor="middle" fontFamily="var(--font-jetbrains), monospace" fontSize="11" letterSpacing="2" fill="#7F6320">NAMENAKTIE · NR. 000021</text>
+      <line x1="150" y1="342" x2="350" y2="342" stroke="#C9A24A" strokeWidth="0.8" />
+      <text x="250" y="378" textAnchor="middle" fontFamily="var(--font-instrument), Georgia, serif" fontStyle="italic" fontSize="26" fill="#121417">Muster Robotics AG</text>
+      <g fill="#E6DDC7">
+        <rect x="70" y="404" width="360" height="3" /><rect x="90" y="416" width="320" height="3" />
+        <rect x="70" y="428" width="360" height="3" /><rect x="120" y="440" width="260" height="3" />
+      </g>
+      <path d="M62 520 C 80 490, 95 530, 110 505 S 140 500, 150 515 S 180 505, 200 508" fill="none" stroke="#121417" strokeWidth="1.2" />
+      <line x1="60" y1="534" x2="210" y2="534" stroke="#B08D3C" strokeWidth="0.8" />
+      <text x="60" y="552" fontFamily="var(--font-jetbrains), monospace" fontSize="9" letterSpacing="1.5" fill="#6A6D72">DER VERWALTUNGSRAT</text>
+      <circle cx="400" cy="515" r="42" fill="none" stroke="#B08D3C" strokeWidth="1.2" />
+      <circle cx="400" cy="515" r="34" fill="none" stroke="#C9A24A" strokeWidth="0.8" strokeDasharray="2 2" />
+      <text x="400" y="524" textAnchor="middle" fontFamily="var(--font-instrument), Georgia, serif" fontSize="28" fill="#9A7A2E">KI</text>
+    </svg>
+  );
+}
+
+const CHART = "0,146 10,139 20,140 30,132 40,131 50,127 60,119 70,118 80,110 90,107 100,99 110,91 120,89 130,92 140,85 150,79 160,80 170,85 180,85 190,82 200,87 210,79 220,83 230,78 240,71 250,64 260,60 270,63 280,57 290,56 300,57";
+
+function Hero({ onRegister }: { onRegister: () => void }) {
+  return (
+    <section className="dot-grid px-5 md:px-20 pt-16 lg:pt-24 pb-16 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_600px] gap-12 lg:min-h-[820px]">
+      <div className="flex flex-col gap-8 lg:pt-6">
+        <div className="eyebrow">MULTI-AGENT EQUITY RESEARCH</div>
+        <h1 className="m-0 font-display font-normal text-6xl md:text-[96px] leading-[0.98] tracking-[-0.025em] text-balance">
+          Aktienanalyse, geprüft von <em className="text-gold-dark">{AGENT_COUNT_LLM} KI-Agenten.</em>
         </h1>
-        <p className="text-lg sm:text-xl text-slate-300 leading-relaxed max-w-2xl mx-auto mb-10">
-          KI-Co-Analyst erstellt in Minuten vollständige Investment-Memos auf Buy-Side-Niveau —
-          mit Fundamentalanalyse, DCF-Modellen, Makrokontext und Risikobeurteilung.
+        <p className="m-0 text-xl leading-relaxed text-ink-2 max-w-[560px] text-pretty">
+          Der KI-Co-Analyst verbindet Fundamental-, Schätzungs-, Makro- und Themenanalyse zu einem gewichteten
+          Urteil – nachvollziehbar bis zum einzelnen Agenten. Für Research-Teams und Portfolio-Manager.
         </p>
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-          <button type="button" onClick={() => onOpen("register")}
-            className="px-8 py-3.5 rounded-xl font-semibold text-sm transition-opacity hover:opacity-90 border-none cursor-pointer"
-            style={{ background:"#c9a84c", color:"#0a1628" }}>
-            Kostenlos starten →
-          </button>
-          <a href="#comparison"
-            className="px-8 py-3.5 rounded-xl font-semibold text-sm transition-all no-underline"
-            style={{ border:"1px solid rgba(255,255,255,0.2)", color:"#e2e8f0", background:"rgba(255,255,255,0.04)" }}>
-            Vergleich ansehen
-          </a>
+        <div className="flex flex-wrap gap-4">
+          <DemoButton onRegister={onRegister} className={BTN_DARK} />
+          <a href="#methodik" className={BTN_LINE}>Methodik ansehen</a>
         </div>
       </div>
 
-      <div className="absolute bottom-8 flex flex-col items-center gap-2 animate-bounce pointer-events-none">
-        <span className="text-xs text-slate-500 tracking-widest uppercase">Mehr erfahren</span>
-        <svg width="16" height="10" viewBox="0 0 16 10" fill="none">
-          <path d="M1 1l7 7 7-7" stroke="#c9a84c" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
+      <div className="relative min-h-[520px] lg:h-[620px]">
+        <div className="absolute right-0 top-0 w-[88%] lg:w-auto"><Certificate /></div>
+        <div className="absolute left-0 bottom-0 w-[340px] max-w-full p-5 bg-card border border-line shadow-[0_30px_60px_-28px_rgba(60,45,10,0.35)] flex flex-col gap-3">
+          <div className="flex justify-between font-mono text-[11px] tracking-[0.08em] text-muted-2"><span>MRBT · 1 JAHR</span><span>BEISPIEL</span></div>
+          <svg viewBox="0 0 300 170" className="w-full h-[130px]" role="img" aria-label="Kursverlauf (Beispiel)" preserveAspectRatio="none">
+            <line x1="0" y1="60" x2="300" y2="60" stroke="#E4DCC8" strokeDasharray="3 4" />
+            <line x1="0" y1="110" x2="300" y2="110" stroke="#E4DCC8" strokeDasharray="3 4" />
+            <polygon points={`${CHART} 300,170 0,170`} fill="#EFE3C2" opacity="0.7" />
+            <polyline points={CHART} fill="none" stroke="#9A7A2E" strokeWidth="2" />
+            <circle cx="300" cy="57" r="4" fill="#121417" />
+          </svg>
+          <div className="flex items-baseline justify-between gap-3 pt-2.5 border-t border-line">
+            <div className="font-display text-[28px]">Übergewichten</div>
+            <div className="font-mono text-[10px] tracking-[0.08em] text-gold-text whitespace-nowrap">GEWICHTET</div>
+          </div>
+        </div>
       </div>
     </section>
   );
 }
 
-/* ─── Comparison ─────────────────────────────────────────────────────── */
-const COMPARISON = [
-  { label: "Zeitaufwand",        manual: "3–10 Werktage",           ki: "~3 Minuten" },
-  { label: "Datenquellen",       manual: "Manuell recherchiert",    ki: "IR-Dokumente, Makro, News, Konsens" },
-  { label: "Bewertungsmodell",   manual: "Excel-Eigenmodell",       ki: "DCF + Multiples + Peer-Vergleich" },
-  { label: "Szenarienanalyse",   manual: "Oft nur 1 Szenario",      ki: "Bear / Base / Bull automatisch" },
-  { label: "Risikobeurteilung",  manual: "Subjektiv, begrenzt",     ki: "Advocatus Diaboli Agent, Conviction Killers" },
-  { label: "Qualitätskontrolle", manual: "Peer Review nötig",       ki: "Supervisor-Agent + Konsistenz-Score" },
-  { label: "Skalierbarkeit",     manual: "1–2 Analysen / Woche",    ki: "Unlimitierte Analysen parallel" },
-  { label: "Nachvollziehbar",    manual: "Nur intern dokumentiert", ki: "Vollständiges Memo mit Quellenangaben" },
-];
-
-function Comparison() {
+function FactStrip() {
+  const facts = [
+    [`${GRAPH_NODE_COUNT} Knoten`, "Multi-Agent-Graph auf LangGraph"],
+    ["Konfidenz-gewichtet", "Deterministische Aggregation im Supervisor"],
+    ["Voller Trace", "Jeder Schritt einsehbar und prüfbar"],
+    ["Made in Bern", "Entwickelt an der Berner Fachhochschule"],
+  ];
   return (
-    <section id="comparison" className="py-24 px-6" style={{ background:"#f7f8fa" }}>
-      <div className="max-w-5xl mx-auto">
-        <div className="text-center mb-14">
-          <div className="text-xs font-bold tracking-widest uppercase mb-3" style={{ color:"#c9a84c" }}>Der Unterschied</div>
-          <h2 className="text-4xl font-bold text-slate-800 mb-4">Manuell vs. KI-Co-Analyst</h2>
-          <p className="text-slate-500 max-w-xl mx-auto">
-            Was ein erfahrener Analyst in einer Woche erarbeitet, liefert KI-Co-Analyst in Minuten —
-            strukturiert, nachvollziehbar und auf institutionellem Niveau.
-          </p>
+    <section className="px-5 md:px-20 border-y border-line bg-card grid grid-cols-2 lg:grid-cols-4">
+      {facts.map(([t, s], i) => (
+        <div key={t} className={`py-8 flex flex-col gap-1.5 ${i > 0 ? "lg:pl-8 lg:border-l lg:border-line" : ""} ${i % 2 === 1 ? "pl-6 border-l border-line lg:pl-8" : ""}`}>
+          <div className="font-display text-[30px]">{t}</div>
+          <div className="text-sm text-muted">{s}</div>
         </div>
-        <div className="rounded-2xl overflow-hidden border border-slate-200">
-          <div className="grid grid-cols-3 text-sm font-bold">
-            <div className="px-6 py-4 bg-slate-100 text-slate-500 uppercase tracking-widest text-xs">Kriterium</div>
-            <div className="px-6 py-4 bg-red-50 text-red-700 text-center border-l border-slate-200">Manuelle Analyse</div>
-            <div className="px-6 py-4 text-center border-l border-slate-200 font-bold" style={{ background:"#0a1628", color:"#c9a84c" }}>KI-Co-Analyst</div>
-          </div>
-          {COMPARISON.map(({ label, manual, ki }, i) => (
-            <div key={label} className="grid grid-cols-3 text-sm border-t border-slate-100"
-              style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-              <div className="px-6 py-4 font-medium text-slate-700">{label}</div>
-              <div className="px-6 py-4 text-slate-500 text-center border-l border-slate-100 flex items-center justify-center gap-2">
-                <span className="text-red-400">✗</span> {manual}
-              </div>
-              <div className="px-6 py-4 text-center border-l border-slate-100 flex items-center justify-center gap-2 font-medium text-slate-800">
-                <span className="text-emerald-500">✓</span> {ki}
-              </div>
+      ))}
+    </section>
+  );
+}
+
+function Pipeline() {
+  return (
+    <section id="pipeline" className="px-5 md:px-20 pt-24 lg:pt-36 flex flex-col gap-12">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-20 items-end">
+        <div className="flex flex-col gap-5">
+          <div className="eyebrow plain">DIE PIPELINE</div>
+          <h2 className="m-0 font-display font-normal text-5xl md:text-[64px] leading-[1.02] tracking-[-0.02em]">
+            Alle Verbindungen. <em className="text-gold-dark">Auf einen Blick.</em>
+          </h2>
+        </div>
+        <p className="m-0 text-lg leading-relaxed text-ink-2 text-pretty">
+          Vom Ticker bis zum Memo: in welcher Reihenfolge die Agenten arbeiten, wo Prüfschleifen greifen und wie
+          der Senior Review gezielt Kritik zurückspielt, bevor der Supervisor das Urteil formuliert.
+        </p>
+      </div>
+      <div className="bg-card border border-line p-6 md:p-10 flex flex-col gap-6 shadow-[0_40px_80px_-60px_rgba(60,45,10,0.35)]">
+        <div className="overflow-x-auto"><PipelineGraph /></div>
+        <div className="flex flex-wrap gap-x-8 gap-y-3 items-center pt-5 border-t border-line text-[13px] text-muted">
+          {[
+            ["#B08D3C", undefined, "Ablauf"],
+            ["#C9A24A", "7 5", "Bedingte Verzweigung"],
+            ["#8B8E93", "2 4", "Retry-Schleife"],
+          ].map(([c, dash, l]) => (
+            <div key={l} className="flex items-center gap-2.5">
+              <svg width="32" height="6" aria-hidden="true"><line x1="0" y1="3" x2="32" y2="3" stroke={c} strokeWidth="1.5" strokeDasharray={dash} /></svg>{l}
             </div>
           ))}
+          <div className="lg:ml-auto font-mono text-[11px] tracking-[0.08em]">LANGGRAPH · {GRAPH_NODE_COUNT} KNOTEN</div>
         </div>
       </div>
     </section>
   );
 }
 
-/* ─── Benefits ───────────────────────────────────────────────────────── */
-const BENEFITS = [
-  { icon:"⚡", title:"Blitzschnelle Resultate",  desc:"Von Ticker-Eingabe bis zum vollständigen Investment-Memo in unter 5 Minuten." },
-  { icon:"🏦", title:"Buy-Side Qualität",         desc:"DCF, EV/EBITDA-Vergleiche, Peer-Benchmarks und Makro-Einordnung auf institutionellem Standard." },
-  { icon:"🧠", title:"9 spezialisierte Agenten",  desc:"Jeder Agent übernimmt eine dedizierte Aufgabe – von Klassifikation bis zur finalen Qualitätsprüfung." },
-  { icon:"⚖️", title:"Integrierter Advocatus",   desc:"Ein dedizierter Risiko-Agent hinterfragt jede These aktiv und identifiziert Conviction Killers." },
-  { icon:"📂", title:"Analyse-Archiv",            desc:"Alle Analysen werden gespeichert und sind jederzeit abrufbar – mit Filterfunktion." },
-  { icon:"🔒", title:"Sicher & Privat",           desc:"Betrieb auf eigener Infrastruktur, keine Datenweitergabe. Zugangskontrolle per Login." },
-];
-
-function Benefits() {
+function HowItWorks() {
+  const steps = [
+    ["01", "Klassifizieren", "Der Business Model Classifier ordnet das Unternehmen ein und bestimmt, welche Methoden überhaupt gelten."],
+    ["02", "Analysieren", "Fundamental, News, Estimate Revision, Thematic, Optionality, Forward Estimate und Risk – mit Anomalie-Check und automatischen Retries."],
+    ["03", "Prüfen", "Quality-Check und Senior Review. Bei Schwächen geht gezielte Kritik zurück an Fundamental, News oder Risk."],
+    ["04", "Synthese", "Der Supervisor gewichtet nach Konfidenz und liefert das Memo: Empfehlung, Conviction und Routing-Log."],
+  ];
   return (
-    <section id="about" className="py-24 px-6 bg-white">
-      <div className="max-w-5xl mx-auto">
-        <div className="text-center mb-14">
-          <div className="text-xs font-bold tracking-widest uppercase mb-3" style={{ color:"#c9a84c" }}>Warum KI-Co-Analyst</div>
-          <h2 className="text-4xl font-bold text-slate-800 mb-4">Analyse ohne Kompromisse</h2>
-          <p className="text-slate-500 max-w-xl mx-auto">
-            KI-Co-Analyst kombiniert modernste Sprachmodelle mit strukturierten Finanzmodellen —
-            für Research, das sich nach Goldman Sachs anfühlt, nicht nach ChatGPT.
-          </p>
+    <section id="agenten" className="px-5 md:px-20 pt-24 lg:pt-36 pb-24 lg:pb-32 flex flex-col gap-16">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-20 items-end">
+        <div className="flex flex-col gap-5">
+          <div className="eyebrow plain">SO FUNKTIONIERT ES</div>
+          <h2 className="m-0 font-display font-normal text-5xl md:text-[64px] leading-[1.02] tracking-[-0.02em]">
+            Ein Research-Team aus Spezialisten. <em className="text-gold-dark">In Minuten.</em>
+          </h2>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {BENEFITS.map(({ icon, title, desc }) => (
-            <div key={title} className="p-6 rounded-2xl border border-slate-100 hover:border-slate-200 transition-all"
-              style={{ background:"#fafafa" }}>
-              <div className="text-3xl mb-4">{icon}</div>
-              <h3 className="font-semibold text-slate-800 mb-2">{title}</h3>
-              <p className="text-sm text-slate-500 leading-relaxed">{desc}</p>
+        <p className="m-0 text-lg leading-relaxed text-ink-2 text-pretty">
+          Statt eines einzelnen Modells arbeiten spezialisierte Agenten Schritt für Schritt – jeder baut auf den
+          Ergebnissen des vorherigen auf. Ein Senior Review prüft, ein Supervisor entscheidet.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 border-t border-ink">
+        {steps.map(([n, t, p], i) => (
+          <div key={n} className={`pt-8 pb-4 flex flex-col gap-4 lg:pr-8 ${i > 0 ? "lg:pl-8 lg:border-l lg:border-line" : ""}`}>
+            <div className="font-mono text-[13px] text-gold-dark">{n}</div>
+            <h3 className="m-0 font-display font-normal text-[32px]">{t}</h3>
+            <p className="m-0 text-base leading-relaxed text-ink-2">{p}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Methodik() {
+  const items = [
+    ["I", "Vollständige Transparenz", `Jeder der ${GRAPH_NODE_COUNT} Knoten landet im Routing-Log: welcher Pfad genommen wurde, welche Retries und welche Kritik-Runde.`],
+    ["II", "Methodische Disziplin", "Die Klassifikation verhindert falsche Werkzeuge – etwa ein DCF für Unternehmen ohne Umsatz."],
+    ["III", "Wissenschaftlich fundiert", "Entwickelt und verteidigt als Bachelorthesis an der Berner Fachhochschule, gestützt auf eine Analyse von über zwölf KI-Research-Systemen."],
+  ];
+  return (
+    <section id="methodik" className="px-5 md:px-20 py-24 lg:py-32 bg-ink text-cream-2 grid grid-cols-1 lg:grid-cols-[480px_minmax(0,1fr)] gap-12 lg:gap-24">
+      <div className="flex flex-col gap-6">
+        <div className="font-mono text-xs tracking-[0.14em] text-gold-dim">METHODIK &amp; VERTRAUEN</div>
+        <h2 className="m-0 font-display font-normal text-5xl md:text-[60px] leading-[1.04] tracking-[-0.02em]">
+          Keine Blackbox. <em className="text-gold-dim">Ein Co-Analyst.</em>
+        </h2>
+        <p className="m-0 text-lg leading-relaxed text-dark-muted">
+          Entscheidungen bleiben beim Menschen. Der KI-Co-Analyst liefert die Grundlage – begründet, gewichtet und überprüfbar.
+        </p>
+      </div>
+      <div className="flex flex-col">
+        {items.map(([n, t, p], i) => (
+          <div key={n} className={`grid grid-cols-[64px_minmax(0,1fr)] gap-6 py-8 border-t border-dark-line ${i === items.length - 1 ? "border-b" : ""}`}>
+            <div className="font-mono text-[13px] text-gold-dim pt-2">{n}</div>
+            <div className="flex flex-col gap-2">
+              <h3 className="m-0 font-display font-normal text-[30px]">{t}</h3>
+              <p className="m-0 text-base leading-relaxed text-dark-muted">{p}</p>
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
       </div>
     </section>
   );
 }
 
-/* ─── Architecture ───────────────────────────────────────────────────── */
-const AGENTS = [
-  { icon:"🏷️", name:"Classifier",        desc:"Geschäftsmodell-Klassifikation & Peer-Gruppen" },
-  { icon:"🔍", name:"Fundamental",        desc:"IR-Dokumente · DCF · Multiples · Bilanz" },
-  { icon:"📰", name:"News & Sentiment",   desc:"Makro · Branchentrends · Nachrichten" },
-  { icon:"📐", name:"Estimate Revision",  desc:"Makro-adjustierte Konsensschätzungen" },
-  { icon:"🌐", name:"Thematic",           desc:"Megatrends · Adoptionskurven · Positionierung" },
-  { icon:"🎲", name:"Optionality",        desc:"Real Options · Pre-Revenue-Bewertung" },
-  { icon:"📈", name:"Forward Estimates",  desc:"Wachstums-Projektion · Szenarienmodell" },
-  { icon:"⚖️", name:"Risk / Advocatus",  desc:"Gegenposition · Conviction Killers" },
-  { icon:"✍️", name:"Supervisor",         desc:"Synthese · Qualitätsprüfung · Final Memo" },
-];
-
-function Architecture() {
+function Kontakt({ onRegister }: { onRegister: () => void }) {
   return (
-    <section id="architecture" className="py-24 px-6" style={{ background:"#0a1628" }}>
-      <div className="max-w-5xl mx-auto">
-        <div className="text-center mb-14">
-          <div className="text-xs font-bold tracking-widest uppercase mb-3" style={{ color:"#c9a84c" }}>Unter der Haube</div>
-          <h2 className="text-4xl font-bold text-white mb-4">9-Agenten Pipeline</h2>
-          <p className="text-slate-400 max-w-xl mx-auto">
-            Jede Analyse durchläuft sequenziell neun spezialisierte KI-Agenten.
-            Der Supervisor-Agent fasst alle Ergebnisse zu einem kohärenten Investment-Memo zusammen.
-          </p>
-        </div>
-        <div className="space-y-3">
-          {AGENTS.map(({ icon, name, desc }, i) => {
-            const isSup = i === AGENTS.length - 1;
-            return (
-              <div key={name} className="flex items-center gap-4 p-4 rounded-xl border"
-                style={isSup
-                  ? { background:"rgba(201,168,76,0.06)", borderColor:"rgba(201,168,76,0.4)" }
-                  : { background:"rgba(255,255,255,0.03)", borderColor:"rgba(255,255,255,0.08)" }}>
-                <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold"
-                  style={isSup
-                    ? { background:"#c9a84c", color:"#0a1628" }
-                    : { background:"rgba(255,255,255,0.08)", color:"#8a9bb0" }}>{i + 1}</div>
-                <div className="text-2xl w-8 text-center flex-shrink-0">{icon}</div>
-                <div className="flex-1">
-                  <div className="font-semibold text-sm" style={{ color: isSup ? "#c9a84c" : "#fff" }}>{name}</div>
-                  <div className="text-xs text-slate-400 mt-0.5">{desc}</div>
-                </div>
-                {isSup && (
-                  <div className="hidden sm:block px-3 py-1 rounded-full text-xs font-semibold"
-                    style={{ background:"rgba(201,168,76,0.15)", color:"#c9a84c" }}>Final Output</div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
-          {["Investment-Memo","DCF-Modell","Peer-Vergleich","Szenarien","Conviction-Score"].map(t => (
-            <div key={t} className="px-4 py-1.5 rounded-full text-xs font-medium"
-              style={{ background:"rgba(201,168,76,0.1)", color:"#c9a84c", border:"1px solid rgba(201,168,76,0.25)" }}>{t}</div>
-          ))}
-        </div>
-      </div>
+    <section id="kontakt" className="px-5 md:px-20 pt-24 lg:pt-36 pb-20 flex flex-col items-center gap-7 text-center">
+      <LogoMark size={28} />
+      <h2 className="m-0 font-display font-normal text-5xl md:text-[72px] leading-[1.02] tracking-[-0.02em] max-w-[900px] text-balance">
+        Bereit für einen Pilot mit Ihrem <em className="text-gold-dark">Research-Team?</em>
+      </h2>
+      <p className="m-0 text-lg leading-relaxed text-ink-2 max-w-[560px]">
+        Wir zeigen den KI-Co-Analysten an Titeln aus Ihrem Coverage-Universum.
+      </p>
+      <DemoButton onRegister={onRegister} className={BTN_DARK} />
+      <footer className="mt-16 w-full pt-8 border-t border-line flex flex-wrap justify-between gap-3 text-sm text-muted">
+        <span>© {new Date().getFullYear()} KI-Co-Analyst · Luca Lüdi · Keine Anlageberatung (Art. 3 lit. c FIDLEG)</span>
+        <span className="font-mono text-xs tracking-[0.08em]">BERN · SCHWEIZ</span>
+      </footer>
     </section>
   );
 }
 
-/* ─── CTA Banner ─────────────────────────────────────────────────────── */
-function CTABanner({ onOpen }: { onOpen: (t: ModalType) => void }) {
-  return (
-    <section className="py-20 px-6" style={{ background:"#f7f8fa" }}>
-      <div className="max-w-3xl mx-auto text-center">
-        <h2 className="text-4xl font-bold text-slate-800 mb-4">Bereit für professionelles Research?</h2>
-        <p className="text-slate-500 mb-8">Starten Sie noch heute und erhalten Sie Ihre erste Aktienanalyse in unter 5 Minuten.</p>
-        <button type="button" onClick={() => onOpen("register")}
-          className="px-10 py-4 rounded-xl font-bold text-sm transition-all border-none cursor-pointer"
-          style={{ background:"#c9a84c", color:"#0a1628" }}>
-          Jetzt kostenlos registrieren →
-        </button>
-        <p className="text-xs text-slate-400 mt-4">Keine Kreditkarte · Sofortzugang · Eigene Infrastruktur</p>
-      </div>
-    </section>
-  );
-}
+/* ─── Seite ───────────────────────────────────────────────────────────── */
 
-/* ─── Footer ─────────────────────────────────────────────────────────── */
-function Footer({ onOpen }: { onOpen: (t: ModalType) => void }) {
-  return (
-    <footer style={{ background:"#0a1628", borderTop:"1px solid rgba(255,255,255,0.08)" }}>
-      <div className="max-w-6xl mx-auto px-6 py-14">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-10">
-          <div>
-            <div className="flex items-center gap-2.5 mb-4">
-              <Image src="/logo.png" alt="KI-Co-Analyst" width={32} height={32} className="rounded-lg" />
-              <span className="font-semibold text-white">KI-Co-Analyst</span>
-            </div>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              Institutionelle Aktienanalyse, automatisiert durch einen Multi-Agenten-Workflow.
-            </p>
-          </div>
-          <div>
-            <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">Produkt</div>
-            <ul className="space-y-2.5">
-              <li><a href="#about" className="text-sm text-slate-400 hover:text-white transition-colors no-underline">Über uns</a></li>
-              <li><a href="#architecture" className="text-sm text-slate-400 hover:text-white transition-colors no-underline">Architektur</a></li>
-              <li><a href="#comparison" className="text-sm text-slate-400 hover:text-white transition-colors no-underline">Vergleich</a></li>
-              <li>
-                <button type="button" onClick={() => onOpen("login")}
-                  className="text-sm text-slate-400 hover:text-white transition-colors bg-transparent border-none cursor-pointer p-0">
-                  Anmelden
-                </button>
-              </li>
-            </ul>
-          </div>
-          <div>
-            <div className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">Rechtliches</div>
-            <ul className="space-y-2.5">
-              {["Disclaimer","Datenschutz","Impressum","AGB"].map(label => (
-                <li key={label}><a href="#" className="text-sm text-slate-400 hover:text-white transition-colors no-underline">{label}</a></li>
-              ))}
-            </ul>
-          </div>
-          <div className="p-4 rounded-xl text-xs text-slate-500 leading-relaxed"
-            style={{ background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.08)" }}>
-            <strong className="text-slate-400 block mb-1">⚠️ Haftungsausschluss</strong>
-            Die Inhalte dienen ausschliesslich zu Informationszwecken und stellen keine Anlageberatung dar.
-          </div>
-        </div>
-        <div className="mt-10 pt-6 flex flex-col sm:flex-row items-center justify-between gap-3"
-          style={{ borderTop:"1px solid rgba(255,255,255,0.06)" }}>
-          <p className="text-xs text-slate-600">© {new Date().getFullYear()} KI-Co-Analyst. Alle Rechte vorbehalten.</p>
-          <p className="text-xs text-slate-600">Entwickelt in der Schweiz 🇨🇭</p>
-        </div>
-      </div>
-    </footer>
-  );
-}
-
-/* ─── Page (modal state lives here) ─────────────────────────────────── */
 export default function Landing() {
   const router = useRouter();
   const [modal, setModal] = useState<ModalType>("none");
-
   const open  = useCallback((t: ModalType) => setModal(t), []);
   const close = useCallback(() => setModal("none"), []);
 
-  // ESC key + body scroll lock
   useEffect(() => {
     if (modal === "none") return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
@@ -537,43 +405,25 @@ export default function Landing() {
     };
   }, [modal, close]);
 
-  const handleLoginSuccess = useCallback(() => {
-    close();
-    router.push("/dashboard");
-  }, [close, router]);
-
   return (
-    <>
-      <Navbar onOpen={open} />
-      <Hero   onOpen={open} />
-      <Comparison />
-      <Benefits />
-      <Architecture />
-      <CTABanner onOpen={open} />
-      <Footer    onOpen={open} />
+    <div className="bg-paper text-ink">
+      <Nav onOpen={open} />
+      <Hero onRegister={() => open("register")} />
+      <FactStrip />
+      <Pipeline />
+      <HowItWorks />
+      <Methodik />
+      <Kontakt onRegister={() => open("register")} />
 
-      {/* Modal overlay — always in DOM, shown/hidden via conditional */}
       {modal !== "none" && (
-        <div
-          className="fixed inset-0 flex items-center justify-center p-4"
-          style={{ background:"rgba(10,22,40,0.8)", backdropFilter:"blur(6px)", zIndex:200 }}
-          onClick={(e) => { if (e.target === e.currentTarget) close(); }}
-        >
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-ink/70 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) close(); }}>
           {modal === "login" && (
-            <LoginForm
-              onClose={close}
-              onSwitch={() => setModal("register")}
-              onSuccess={handleLoginSuccess}
-            />
+            <LoginForm onClose={close} onSwitch={() => setModal("register")} onSuccess={() => { close(); router.push("/dashboard"); }} />
           )}
-          {modal === "register" && (
-            <RegisterForm
-              onClose={close}
-              onSwitch={() => setModal("login")}
-            />
-          )}
+          {modal === "register" && <RegisterForm onClose={close} onSwitch={() => setModal("login")} />}
         </div>
       )}
-    </>
+    </div>
   );
 }

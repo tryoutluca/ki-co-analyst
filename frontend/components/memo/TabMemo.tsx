@@ -1,115 +1,63 @@
 "use client";
 
-function ampelIcon(signal: string) {
-  const s = signal.toLowerCase();
-  if (s.includes("positiv") || s.includes("tailwind")) return "🟢";
-  if (s.includes("negativ") || s.includes("headwind")) return "🔴";
-  return "🟡";
-}
+import { type Memo, asList, str, textOf, SectionTitle, Panel, Empty } from "./ui";
 
-export default function TabMemo({ data }: { data: Record<string, unknown> }) {
-  const investmentCase  = (data.investment_case  as unknown[]) ?? [];
-  const macroAmpel      = (data.macro_ampel      as unknown[]) ?? [];
-  const sources         = (data.sources          as string[])  ?? [];
+export default function TabMemo({ d }: { d: Memo }) {
+  const cases   = asList(d.investment_case);
+  const sources = asList<unknown>(d.sources).map(textOf).filter(Boolean);
+  const reasoning = str(d.final_reasoning).split("│").map(s => s.trim()).filter(Boolean);
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
-
-      {/* Left: 3/5 */}
-      <div className="lg:col-span-3 space-y-6">
-        <section>
-          <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                         border-b border-slate-100 pb-2">
-            Unternehmensbeschreibung
-          </h3>
-          <p className="text-sm text-slate-700 leading-relaxed">
-            {String(data.company_description ?? "-")}
-          </p>
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-10">
+      <div className="flex flex-col gap-10 min-w-0">
+        <section className="flex flex-col gap-3">
+          <div className="eyebrow plain">UNTERNEHMEN</div>
+          <p className="m-0 text-[17px] leading-relaxed text-ink-2 max-w-[860px]">{str(d.company_description, "–")}</p>
         </section>
 
-        <section>
-          <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                         border-b border-slate-100 pb-2">
-            Investment Case
-          </h3>
-          <div className="space-y-2">
-            {investmentCase.map((item, i) => {
-              const d = item as Record<string, string>;
-              return (
-                <div key={i}
-                     className="pl-3 border-l-2 border-amber-300 py-1 text-sm text-slate-700 leading-relaxed">
-                  {d.point ?? String(item)}
-                  {d.source && (
-                    <span className="block text-xs text-slate-400 mt-0.5">{d.source}</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        <section>
-          <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                         border-b border-slate-100 pb-2">
-            Finale Begründung
-          </h3>
-          <p className="text-sm text-slate-700 leading-relaxed bg-slate-50 rounded-lg p-4">
-            {String(data.final_reasoning ?? "-")}
-          </p>
-        </section>
-      </div>
-
-      {/* Right: 2/5 */}
-      <div className="lg:col-span-2 space-y-6">
-        <section>
-          <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                         border-b border-slate-100 pb-2">
-            Makro-Ampel
-          </h3>
-          <div className="space-y-2">
-            {macroAmpel.map((amp, i) => {
-              const a = amp as Record<string, string>;
-              const icon = ampelIcon(a.signal ?? "");
-              const bg = a.signal?.toLowerCase().includes("positiv") ? "bg-emerald-50 border-emerald-200"
-                       : a.signal?.toLowerCase().includes("negativ") ? "bg-red-50 border-red-200"
-                       : "bg-amber-50 border-amber-200";
-              return (
-                <div key={i} className={`flex gap-3 p-3 rounded-lg border ${bg}`}>
-                  <span className="text-base flex-shrink-0">{icon}</span>
-                  <div>
-                    <div className="text-xs font-semibold text-slate-700">{a.category}</div>
-                    <div className="text-xs text-slate-600 mt-0.5">{a.key_point}</div>
+        <section className="flex flex-col gap-4">
+          <SectionTitle>Investment Case</SectionTitle>
+          {cases.length ? (
+            <ol className="m-0 p-0 list-none border-t border-ink">
+              {cases.map((c, i) => (
+                <li key={i} className="grid grid-cols-[48px_minmax(0,1fr)] gap-4 py-4 border-b border-line-2">
+                  <span className="font-mono text-[13px] text-gold-dark">{String(i + 1).padStart(2, "0")}</span>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[15px] leading-relaxed text-ink-2">{textOf(c)}</span>
+                    {str(c.source) && <span className="font-mono text-[10px] tracking-[0.08em] text-muted-2">{str(c.source).toUpperCase()}</span>}
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        <section>
-          <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                         border-b border-slate-100 pb-2">
-            Advocatus Diaboli
-          </h3>
-          <div className="p-4 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800 leading-relaxed">
-            {String(data.advocatus_diaboli_summary ?? "-")}
-          </div>
-        </section>
-
-        {sources.length > 0 && (
-          <section>
-            <h3 className="text-xs font-bold tracking-widest uppercase text-slate-400 mb-3
-                           border-b border-slate-100 pb-2">
-              Quellen
-            </h3>
-            <div className="space-y-1">
-              {sources.map((s, i) => (
-                <div key={i} className="text-xs text-slate-500">• {s}</div>
+                </li>
               ))}
-            </div>
-          </section>
-        )}
+            </ol>
+          ) : <Empty>Kein Investment Case vorhanden.</Empty>}
+        </section>
+
+        <section className="flex flex-col gap-4">
+          <SectionTitle>Finale Begründung</SectionTitle>
+          <div className="flex flex-col gap-3">
+            {reasoning.length ? reasoning.map((r, i) => (
+              <p key={i} className="m-0 text-[15px] leading-relaxed text-ink-2">{r}</p>
+            )) : <Empty>–</Empty>}
+          </div>
+        </section>
       </div>
+
+      <aside className="flex flex-col gap-6 min-w-0">
+        <section className="bg-ink text-cream-2 p-6 flex flex-col gap-3">
+          <div className="font-mono text-[11px] tracking-[0.12em] text-gold-dim">ADVOCATUS DIABOLI</div>
+          <p className="m-0 font-display text-xl leading-snug">{str(d.advocatus_diaboli_summary, "–")}</p>
+        </section>
+        <Panel className="p-6 flex flex-col gap-3">
+          <h2 className="m-0 font-display font-normal text-[28px]">Quellen</h2>
+          {sources.length ? (
+            <ul className="m-0 p-0 list-none">
+              {sources.map((s, i) => (
+                <li key={i} className="py-2 border-t border-line-2 text-sm text-ink-2 break-words">{s}</li>
+              ))}
+            </ul>
+          ) : <Empty>Keine Quellen angegeben.</Empty>}
+        </Panel>
+      </aside>
     </div>
   );
 }

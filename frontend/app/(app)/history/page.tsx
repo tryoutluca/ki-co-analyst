@@ -3,131 +3,80 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getHistory, deleteHistoryItem, type HistoryItem } from "@/lib/api";
-import { recColor, upsideClass, upsideLabel, safeNum, scoreColor } from "@/lib/utils";
-import { Trash2, ExternalLink, Search } from "lucide-react";
+import { safeNum, upsideClass, upsideLabel, recLabel } from "@/lib/utils";
+import { Trash2 } from "lucide-react";
 
-function RecBadge({ rec }: { rec: string }) {
-  return (
-    <span className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-semibold border ${recColor(rec)}`}>
-      {rec}
-    </span>
-  );
-}
+const COLS = "grid-cols-[110px_minmax(0,1fr)_100px_150px_120px_90px_90px_44px]";
 
 export default function HistoryPage() {
-  const [items,   setItems]  = useState<HistoryItem[]>([]);
+  const [items, setItems]     = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search,  setSearch]  = useState("");
+  const [search, setSearch]   = useState("");
 
   useEffect(() => {
-    getHistory(100).then(setItems).finally(() => setLoading(false));
+    getHistory(100).then(setItems).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
-  async function handleDelete(id: string) {
-    if (!confirm("Analyse löschen?")) return;
-    await deleteHistoryItem(id);
-    setItems(prev => prev.filter(i => i.id !== id));
+  async function handleDelete(item: HistoryItem) {
+    if (!confirm(`Analyse ${item.ticker} vom ${item.date} löschen?`)) return;
+    await deleteHistoryItem(item.id);
+    setItems(prev => prev.filter(i => i.id !== item.id));
   }
 
-  const filtered = search
-    ? items.filter(i =>
-        i.ticker.toLowerCase().includes(search.toLowerCase()) ||
-        i.company.toLowerCase().includes(search.toLowerCase()))
+  const q = search.toLowerCase();
+  const filtered = q
+    ? items.filter(i => i.ticker.toLowerCase().includes(q) || i.company.toLowerCase().includes(q))
     : items;
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8">
+    <div className="flex flex-col">
+      <section className="dot-grid border-b border-line px-5 md:px-14 pt-11 pb-9 flex flex-wrap justify-between items-end gap-8">
+        <div className="flex flex-col gap-3">
+          <div className="eyebrow">HISTORIE · {items.length} {items.length === 1 ? "ANALYSE" : "ANALYSEN"}</div>
+          <h1 className="m-0 font-display font-normal text-5xl md:text-[72px] leading-none tracking-[-0.02em]">
+            Alle Analysen. <em className="text-gold-dark">Nachvollziehbar.</em>
+          </h1>
+        </div>
+        <div className="flex items-center gap-3">
+          <label htmlFor="hist-q" className="label-mono">Suche</label>
+          <input id="hist-q" value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Ticker oder Unternehmen"
+            className="w-[260px] h-11 px-3.5 border border-line-3 rounded-[2px] bg-white text-[15px] outline-none focus:border-gold" />
+        </div>
+      </section>
 
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="font-serif text-2xl font-bold text-slate-800">Analyse-Historie</h1>
-          <p className="text-sm text-slate-400 mt-0.5">
-            {items.length} gespeicherte {items.length === 1 ? "Analyse" : "Analysen"}
-          </p>
-        </div>
-        <div className="relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Suchen…"
-            className="pl-9 pr-4 py-2 border border-slate-200 rounded-lg text-sm
-                       focus:outline-none focus:border-blue-400 bg-white w-56"
-          />
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="text-center py-20 text-slate-400 text-sm">Lade…</div>
-      ) : filtered.length === 0 ? (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm py-20 text-center">
-          <div className="text-4xl mb-3 opacity-20">📂</div>
-          <p className="text-sm text-slate-400">
-            {search ? "Keine Treffer." : "Noch keine Analysen gespeichert."}
-          </p>
-          {!search && (
-            <Link href="/analyse"
-                  className="mt-4 inline-block text-sm font-medium"
-                  style={{ color: "#c9a84c" }}>
-              Erste Analyse starten →
-            </Link>
-          )}
-        </div>
-      ) : (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100">
-                  {["Ticker","Unternehmen","Datum","Empfehlung","Kursziel","Upside","Score",""].map(h => (
-                    <th key={h}
-                        className="px-4 py-3 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {filtered.map(item => (
-                  <tr key={item.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 font-serif font-bold text-slate-800">
-                      {item.ticker}
-                    </td>
-                    <td className="px-4 py-3 text-slate-600 max-w-48 truncate">{item.company}</td>
-                    <td className="px-4 py-3 text-slate-500">{item.date}</td>
-                    <td className="px-4 py-3">
-                      <RecBadge rec={item.recommendation} />
-                    </td>
-                    <td className="px-4 py-3 font-medium text-slate-700">
-                      {item.currency} {safeNum(item.price_target)}
-                    </td>
-                    <td className={`px-4 py-3 font-medium ${upsideClass(item.upside)}`}>
-                      {upsideLabel(item.upside)}
-                    </td>
-                    <td className={`px-4 py-3 font-bold ${scoreColor(item.score)}`}>
-                      {item.score ?? "-"}<span className="text-slate-400 font-normal">/10</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <Link href={`/history/${item.id}`}
-                              className="p-1.5 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors">
-                          <ExternalLink size={14} />
-                        </Link>
-                        <button
-                          onClick={() => handleDelete(item.id)}
-                          className="p-1.5 rounded hover:bg-red-50 text-slate-400 hover:text-red-500 transition-colors">
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <div className="px-5 md:px-14 pt-10 pb-12">
+        <div className="bg-card border border-line overflow-x-auto">
+          <div className="min-w-[860px]">
+            <div className={`grid ${COLS} gap-4 px-6 py-3 border-b border-ink font-mono text-[11px] tracking-[0.1em] text-muted`}>
+              <div>TICKER</div><div>UNTERNEHMEN</div><div>DATUM</div><div>EMPFEHLUNG</div><div>KURSZIEL</div><div>UPSIDE</div><div>KONSISTENZ</div><div />
+            </div>
+            {loading ? (
+              <div className="px-6 py-10 text-sm text-muted">Lade …</div>
+            ) : filtered.length === 0 ? (
+              <div className="px-6 py-12 flex flex-col gap-3 items-start">
+                <p className="m-0 text-[15px] text-ink-2">{search ? "Keine Treffer." : "Noch keine Analysen gespeichert."}</p>
+                {!search && <Link href="/analyse" className="text-sm font-semibold no-underline">Erste Analyse starten →</Link>}
+              </div>
+            ) : filtered.map(item => (
+              <div key={item.id} className={`grid ${COLS} gap-4 px-6 py-4 border-b border-line-2 last:border-b-0 items-center hover:bg-paper`}>
+                <Link href={`/history/${item.id}`} className="font-mono text-sm text-ink no-underline hover:underline">{item.ticker}</Link>
+                <Link href={`/history/${item.id}`} className="text-[15px] truncate text-ink-2 no-underline hover:text-ink">{item.company}</Link>
+                <span className="font-mono text-xs text-muted">{item.date}</span>
+                <span className="font-display text-xl">{recLabel(item.recommendation)}</span>
+                <span className="font-mono text-sm">{item.currency} {safeNum(item.price_target)}</span>
+                <span className={`font-mono text-sm ${upsideClass(item.upside)}`}>{upsideLabel(item.upside)}</span>
+                <span className="font-mono text-sm">{item.score ?? "–"}<span className="text-muted"> / 10</span></span>
+                <button type="button" onClick={() => handleDelete(item)}
+                  className="w-11 h-11 flex items-center justify-center text-muted hover:text-negative"
+                  aria-label={`Analyse ${item.ticker} vom ${item.date} löschen`}>
+                  <Trash2 size={16} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

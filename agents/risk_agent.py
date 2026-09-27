@@ -9,6 +9,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.finance_tools import get_stock_info, get_price_history
 from tools.schemas import RiskAgentOutput, FundamentalAgentOutput, NewsAgentOutput
+from tools.lm_tone import format_tone_for_prompt
 
 load_dotenv()
 
@@ -32,6 +33,14 @@ KATEGORIEN (genau eine Argument pro Kategorie, total 5):
 - Operatives Risiko: Margen, Wachstum, Execution
 - Regulierungsrisiko: Regulierung, Steuern, Geopolitik
 - Sentiment-Risiko: Positionierung, Momentum, technische Faktoren
+
+TONALITÄT DER GESCHÄFTSBERICHTE (falls vorhanden):
+- Deterministisch gemessene Veränderung der Sprache im Jahresbericht (Loughran-McDonald)
+- Ein Anstieg von Unsicherheits-, Negativ- oder Litigation-Sprache ist ein Frühwarnsignal:
+  das Management formuliert vorsichtiger, oft bevor es in den Zahlen sichtbar wird
+- Nutze ein Signal als Beleg im passenden Argument (Operatives Risiko / Regulierungsrisiko)
+  und zitiere die Werte. Bei "eingeschränkt vergleichbar" nur als schwaches Indiz verwenden.
+- Stabile/verbesserte Tonalität NICHT als Gegenargument erfinden
 
 MAKRO/INDUSTRIE-INTEGRATION:
 - Die News-Analyse hat spezifische Makro-Indikatoren und Industrie-Faktoren identifiziert
@@ -65,12 +74,15 @@ def run_risk_agent(
     news_output: NewsAgentOutput,
     supervisor_critique: str | None = None,
     business_model_context: dict | None = None,
+    ir_tone: dict | None = None,
 ) -> RiskAgentOutput:
     """Führt Advocatus-Diaboli-Analyse durch — gibt strukturiertes JSON zurück.
 
     Args:
         business_model_context: Output des Classifier-Agenten (Phase 1).
             Beeinflusst, welche Risikokategorien priorisiert werden.
+        ir_tone: Loughran-McDonald-Tonalität der Geschäftsberichte
+            (ir_analysis["ir_tone"], siehe tools/lm_tone.py).
     """
 
     stock_info = get_stock_info.invoke(ticker)
@@ -172,6 +184,7 @@ NEWS-ANALYSE (JSON):
 
 {macro_text}
 {industry_text}
+{tone_text}
 {classification_block}
 {confidence_block}
 {senior_feedback_block}
@@ -200,6 +213,7 @@ Erstelle EXAKT 3 Szenarien (Bear/Base/Bull) deren Wahrscheinlichkeiten sich auf 
         "news_json":            json.dumps(news_output, indent=2, ensure_ascii=False),
         "macro_text":           macro_text,
         "industry_text":        industry_text,
+        "tone_text":            format_tone_for_prompt(ir_tone),
         "classification_block": classification_block,
         "confidence_block":     confidence_block,
         "senior_feedback_block": senior_feedback_block,

@@ -10,7 +10,64 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.tools.tavily_search import TavilySearchResults
+from urllib.parse import urlparse
+
+# ── Tavily ───────────────────────────────────────────────────────────────────
+_TAVILY_URL = "https://api.tavily.com/search"
+
+
+def tavily_search(
+    query: str,
+    *,
+    topic: str = "general",
+    max_results: int = 5,
+    time_range: str | None = None,
+    timeout: int = 20,
+) -> list[dict]:
+    """Direkter Tavily-REST-Aufruf (ersetzt das deprecated TavilySearchResults).
+
+    topic="news" liefert zusätzlich published_date → published_ts für die
+    Recency-Gewichtung. time_range: "day" | "week" | "month" | "year".
+    Returns: [{title, url, content, source, published, published_ts, score}],
+    [] wenn kein API-Key gesetzt ist. Wirft bei HTTP-/Netzwerkfehlern.
+    """
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return []
+    payload = {"query": query, "topic": topic, "max_results": max_results}
+    if time_range:
+        payload["time_range"] = time_range
+    resp = requests.post(
+        _TAVILY_URL, json=payload, timeout=timeout,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    resp.raise_for_status()
+
+    out = []
+    for r in resp.json().get("results", []):
+        ts = None
+        pub = r.get("published_date")
+        if pub:
+            try:
+                from email.utils import parsedate_to_datetime
+                ts = parsedate_to_datetime(pub).timestamp()
+            except (TypeError, ValueError):
+                try:
+                    ts = datetime.fromisoformat(pub.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    ts = None
+        url = r.get("url", "nicht verfügbar")
+        out.append({
+            "title":        r.get("title") or (r.get("content") or "")[:80],
+            "url":          url,
+            "content":      r.get("content", ""),
+            "source":       urlparse(url).netloc.removeprefix("www.") if url.startswith("http") else "N/A",
+            "published":    datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "N/A",
+            "published_ts": ts,
+            "score":        r.get("score"),
+        })
+    return out
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _parse_date(value) -> str:
@@ -318,22 +375,49 @@ def get_price_history(ticker: str) -> dict:
 
 @tool
 def get_recent_news(ticker: str) -> list:
-    """Holt aktuelle News-Artikel via yfinance."""
+    """Holt aktuelle News-Artikel via yfinance (bis 30, Filterung in sentiment_engine)."""
     try:
         stock = yf.Ticker(ticker)
-        news = stock.news or []
-        result = []
-        for item in news[:10]:
-            result.append({
-                "title": item.get("title", "N/A"),
-                "summary": item.get("summary", ""),
-                "published": datetime.fromtimestamp(item.get("providerPublishTime", 0)).strftime("%Y-%m-%d %H:%M") if item.get("providerPublishTime") else "N/A",
-                "source": item.get("publisher", "N/A"),
-                "url": item.get("link", "nicht verfügbar"),
-            })
-        return result
+        news = stock.get_news(count=30) or []
+        return [parse_yf_news_item(item) for item in news]
     except Exception as e:
         return [{"error": str(e), "ticker": ticker}]
+
+
+def parse_yf_news_item(item: dict) -> dict:
+    """Normalisiert ein yfinance-News-Item. yfinance ≥0.2.50 verschachtelt alles
+    unter 'content' (title/pubDate/provider/canonicalUrl); ältere Versionen
+    liefern flache Felder (title/providerPublishTime/publisher/link)."""
+    c = item.get("content") if isinstance(item.get("content"), dict) else None
+    if c is not None:
+        ts = None
+        pub = c.get("pubDate") or c.get("displayTime")
+        if pub:
+            try:
+                ts = datetime.fromisoformat(pub.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                ts = None
+        url = ((c.get("canonicalUrl") or {}).get("url")
+               or (c.get("clickThroughUrl") or {}).get("url")
+               or "nicht verfügbar")
+        title = c.get("title") or "N/A"
+        summary = c.get("summary") or c.get("description") or ""
+        source = (c.get("provider") or {}).get("displayName") or "N/A"
+    else:
+        ts = item.get("providerPublishTime") or None
+        url = item.get("link", "nicht verfügbar")
+        title = item.get("title", "N/A")
+        summary = item.get("summary", "")
+        source = item.get("publisher", "N/A")
+    return {
+        "headline": title,
+        "title": title,
+        "summary": summary,
+        "published": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "N/A",
+        "published_ts": ts,
+        "source": source,
+        "url": url,
+    }
 
 
 
@@ -1575,7 +1659,6 @@ def discover_peers_via_tavily(
         except Exception:
             _desc_snippet = ""
 
-        search = TavilySearchResults(max_results=5)
         queries = [
             # Query 1: Konkurrenten mit Geschäftsmodell-Kontext (nicht nur GICS-Sektor)
             f"publicly listed stock competitors of {company_name} ({ticker}) "
@@ -1592,7 +1675,9 @@ def discover_peers_via_tavily(
         ]
         all_results = []
         for query in queries:
-            all_results.extend(search.invoke(query))
+            all_results.extend(tavily_search(query, max_results=5))
+        if not all_results:
+            return []
         search_context = "\n\n".join([
             f"URL: {r.get('url', '')}\n{r.get('content', '')[:500]}"
             for r in all_results[:9]
@@ -2014,26 +2099,50 @@ def get_peer_financials(ticker: str, peers_override: list | None = None) -> dict
 @tool
 def get_strategic_milestones(ticker: str, company_name: str) -> list:
     """Fetches major strategic developments (leadership changes, M&A, regulatory events)
-    for a company over the past 12 months via Tavily web search. Works for any ticker."""
-    try:
-        search = TavilySearchResults(max_results=5)
-        query = (
-            f"major strategic developments, leadership changes, M&A, "
-            f"and regulatory milestones for {company_name} ({ticker}) in 2025/2026"
-        )
-        results = search.invoke(query)
-        if not results:
-            return [{"info": f"Keine strategischen Meilensteine für {ticker} gefunden"}]
-        return [
-            {
-                "title": item.get("title", item.get("content", "")[:80]),
-                "url": item.get("url", "nicht verfügbar"),
-                "content": item.get("content", "")[:400],
-            }
-            for item in results
-        ]
-    except Exception as e:
-        return [{"info": f"Tavily nicht erreichbar: {str(e)}"}]
+    for a company over the past 12 months via Tavily news search. Works for any ticker.
+
+    Mehrere kurze, themenspezifische News-Queries statt einer langen Keyword-Query:
+    Tavily liefert auf lange Keyword-Listen fast nur irrelevante Treffer.
+    Relevanzfilter/Dedup/Recency erfolgen in tools/sentiment_engine.py."""
+    from tools.sentiment_engine import company_query_name
+
+    if not os.getenv("TAVILY_API_KEY"):
+        return [{"info": "Tavily nicht konfiguriert (TAVILY_API_KEY fehlt)"}]
+
+    name = company_query_name(company_name) or ticker
+    # Ein Thema pro Query — kombinierte Begriffe ("acquisition divestiture")
+    # verwässern das Tavily-Ranking messbar
+    queries = [
+        f"{name} acquisition",
+        f"{name} divestiture spin-off",
+        f"{name} CEO",
+        f"{name} investigation lawsuit",
+        f"{name} guidance outlook",
+    ]
+    results: list[dict] = []
+    errors: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as ex:
+        futs = {
+            ex.submit(tavily_search, q, topic="news", time_range="year", max_results=5): q
+            for q in queries
+        }
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                results.extend(fut.result())
+            except Exception as e:
+                errors.append(str(e))
+
+    seen: set[str] = set()
+    out = []
+    for r in results:
+        if r["url"] in seen:
+            continue
+        seen.add(r["url"])
+        out.append({**r, "content": (r.get("content") or "")[:400]})
+    if not out:
+        msg = f"Tavily nicht erreichbar: {errors[0]}" if errors else f"Keine strategischen Meilensteine für {ticker} gefunden"
+        return [{"info": msg}]
+    return out
 
 
 # ── Estimate-Anker ────────────────────────────────────────────────────────────

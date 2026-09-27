@@ -2,23 +2,29 @@
 
 import { useState } from "react";
 import { changePassword } from "@/lib/api";
-import { getUsername } from "@/lib/auth";
-import { CheckCircle, AlertCircle } from "lucide-react";
+import { useUsername } from "@/lib/auth";
 
-function SectionHead({ children }: { children: React.ReactNode }) {
-  return (
-    <h2 className="font-serif text-lg font-semibold text-slate-800 border-b border-slate-200 pb-2 mb-5">
-      {children}
-    </h2>
-  );
-}
+// Modelle wie im Code konfiguriert (graph/supervisor.py, tools/ir_rag_tool.py,
+// agents/*, graph/nodes.py) — bei Modellwechsel hier nachführen.
+const SYSTEM_INFO = [
+  { label: "Supervisor (Synthese)",        val: "Claude Sonnet 4.5" },
+  { label: "IR-Berichte (RAG-Extraktion)", val: "Claude Sonnet 4.6" },
+  { label: "Agenten & Sub-Agenten",        val: "GPT-5.4-mini" },
+  { label: "Senior Review · Corp. Actions", val: "GPT-4o-mini" },
+  { label: "Datenquellen",                 val: "yfinance · SEC EDGAR · IR-Berichte · Finnhub · Tavily" },
+  { label: "Frontend",                     val: "Next.js 16 · Tailwind CSS 4" },
+  { label: "Backend",                      val: "FastAPI · LangGraph" },
+];
+
+const INPUT = "w-full h-11 px-3.5 border border-line-3 rounded-[2px] bg-white text-[15px] outline-none focus:border-gold";
 
 export default function SettingsPage() {
-  const [oldPw,   setOldPw]   = useState("");
-  const [newPw,   setNewPw]   = useState("");
-  const [newPw2,  setNewPw2]  = useState("");
-  const [msg,     setMsg]     = useState<{ ok: boolean; text: string } | null>(null);
+  const [oldPw, setOldPw]   = useState("");
+  const [newPw, setNewPw]   = useState("");
+  const [newPw2, setNewPw2] = useState("");
+  const [msg, setMsg]       = useState<{ ok: boolean; text: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const username = useUsername();
 
   async function handlePwChange(e: React.FormEvent) {
     e.preventDefault();
@@ -28,7 +34,7 @@ export default function SettingsPage() {
     setLoading(true);
     try {
       await changePassword(oldPw, newPw);
-      setMsg({ ok: true, text: "Passwort erfolgreich geändert." });
+      setMsg({ ok: true, text: "Passwort geändert." });
       setOldPw(""); setNewPw(""); setNewPw2("");
     } catch {
       setMsg({ ok: false, text: "Aktuelles Passwort falsch oder Server-Fehler." });
@@ -37,84 +43,67 @@ export default function SettingsPage() {
     }
   }
 
-  const username = typeof window !== "undefined" ? getUsername() : "";
+  const fields = [
+    { id: "pw-old",  label: "Aktuelles Passwort", val: oldPw,  set: setOldPw,  auto: "current-password" },
+    { id: "pw-new",  label: "Neues Passwort",     val: newPw,  set: setNewPw,  auto: "new-password" },
+    { id: "pw-new2", label: "Wiederholen",        val: newPw2, set: setNewPw2, auto: "new-password" },
+  ];
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8">
-      <h1 className="font-serif text-2xl font-bold text-slate-800 mb-8">Einstellungen</h1>
+    <div className="flex flex-col">
+      <section className="dot-grid border-b border-line px-5 md:px-14 pt-11 pb-9 flex flex-col gap-3">
+        <div className="eyebrow">EINSTELLUNGEN{username ? ` · ${username.toUpperCase()}` : ""}</div>
+        <h1 className="m-0 font-display font-normal text-5xl md:text-[72px] leading-none tracking-[-0.02em]">
+          Konto <em className="text-gold-dark">&amp; System.</em>
+        </h1>
+      </section>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-
-        {/* Passwort */}
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">
-          <SectionHead>Passwort ändern</SectionHead>
-          <form onSubmit={handlePwChange} className="space-y-4">
-            {[
-              { label: "Aktuelles Passwort", val: oldPw, set: setOldPw, auto: "current-password" },
-              { label: "Neues Passwort",      val: newPw, set: setNewPw, auto: "new-password" },
-              { label: "Wiederholen",          val: newPw2, set: setNewPw2, auto: "new-password" },
-            ].map(({ label, val, set, auto }) => (
-              <div key={label}>
-                <label className="block text-xs font-semibold text-slate-500 mb-1.5">{label}</label>
-                <input
-                  type="password"
-                  value={val}
-                  onChange={e => set(e.target.value)}
-                  autoComplete={auto}
-                  required
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm
-                             focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100
-                             bg-slate-50"
-                />
+      <div className="px-5 md:px-14 pt-10 pb-12 grid grid-cols-1 lg:grid-cols-2 gap-10">
+        <section className="bg-card border border-line p-7 flex flex-col gap-5">
+          <h2 className="m-0 font-display font-normal text-[32px]">Passwort ändern</h2>
+          <form onSubmit={handlePwChange} className="flex flex-col gap-4">
+            {fields.map(f => (
+              <div key={f.id} className="flex flex-col gap-1.5">
+                <label htmlFor={f.id} className="label-mono">{f.label}</label>
+                <input id={f.id} type="password" value={f.val} onChange={e => f.set(e.target.value)}
+                  autoComplete={f.auto} required className={INPUT} />
               </div>
             ))}
-
             {msg && (
-              <div className={`flex items-center gap-2 p-3 rounded-lg text-sm
-                ${msg.ok ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                          : "bg-red-50 text-red-700 border border-red-200"}`}>
-                {msg.ok ? <CheckCircle size={15} /> : <AlertCircle size={15} />}
+              <div role="status" className={`px-4 py-3 text-sm border ${msg.ok ? "border-positive/40 text-positive bg-[#EEF6F1]" : "border-negative/40 text-negative bg-[#FBEFEF]"}`}>
                 {msg.text}
               </div>
             )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 rounded-lg font-semibold text-sm text-white
-                         transition-all disabled:opacity-50"
-              style={{ background: "#0a1628" }}>
-              {loading ? "Wird gespeichert…" : "Passwort aktualisieren"}
+            <button type="submit" disabled={loading}
+              className="h-12 rounded-[2px] bg-ink text-cream text-[15px] font-semibold disabled:opacity-50">
+              {loading ? "Wird gespeichert …" : "Passwort aktualisieren"}
             </button>
           </form>
-        </div>
+        </section>
 
-        {/* System-Info */}
-        <div className="space-y-5">
-          <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">
-            <SectionHead>System-Information</SectionHead>
-            <div className="space-y-3 text-sm">
-              {[
-                { label: "Angemeldeter Nutzer", val: username },
-                { label: "Analyse-Modell",      val: "Claude Sonnet 4.6" },
-                { label: "Classifier/Tools",    val: "GPT-5.4-mini" },
-                { label: "Peer-Daten",          val: "Yahoo Finance · Finnhub · Tavily" },
-                { label: "Frontend",            val: "Next.js 15 · Tailwind CSS" },
-                { label: "Backend",             val: "FastAPI · LangGraph · Python 3.12" },
-              ].map(({ label, val }) => (
-                <div key={label} className="flex justify-between items-center py-2 border-b border-slate-50">
-                  <span className="text-slate-500">{label}</span>
-                  <span className="font-medium text-slate-700">{val}</span>
+        <div className="flex flex-col gap-6">
+          <section className="bg-card border border-line p-7 flex flex-col gap-4">
+            <h2 className="m-0 font-display font-normal text-[32px]">System</h2>
+            <dl className="m-0">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-3 border-t border-line-2">
+                <dt className="text-sm text-muted">Angemeldet als</dt>
+                <dd className="m-0 text-sm text-ink text-right">{username || "–"}</dd>
+              </div>
+              {SYSTEM_INFO.map(({ label, val }) => (
+                <div key={label} className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-3 border-t border-line-2">
+                  <dt className="text-sm text-muted">{label}</dt>
+                  <dd className="m-0 text-sm text-ink text-right">{val}</dd>
                 </div>
               ))}
-            </div>
-          </div>
-
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-            <strong>Rechtlicher Hinweis:</strong> Dieses Tool ist ein akademisches Forschungsprojekt.
-            Alle Analysen dienen ausschliesslich Informationszwecken und stellen keine Anlageberatung
-            im Sinne von Art. 3 lit. c FIDLEG dar.
-          </div>
+            </dl>
+          </section>
+          <section className="bg-ink text-cream-2 p-6 flex flex-col gap-2">
+            <div className="font-mono text-[11px] tracking-[0.12em] text-gold-dim">RECHTLICHER HINWEIS</div>
+            <p className="m-0 text-sm leading-relaxed text-dark-muted">
+              Akademisches Forschungsprojekt. Alle Analysen dienen ausschliesslich Informationszwecken und
+              stellen keine Anlageberatung im Sinne von Art. 3 lit. c FIDLEG dar.
+            </p>
+          </section>
         </div>
       </div>
     </div>

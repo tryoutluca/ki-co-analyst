@@ -1,181 +1,159 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { recColor, upsideClass, upsideLabel, safeNum, scoreColor, convictionStars } from "@/lib/utils";
+import { useState } from "react";
+import { downloadMemoPdf } from "@/lib/api";
+import { safeNum, upsideClass, upsideLabel, recLabel, convictionBars, capitalize } from "@/lib/utils";
+import { type Memo, asObj, asList, str, num, textOf } from "./ui";
+import TabOverview  from "./TabOverview";
 import TabMemo      from "./TabMemo";
 import TabValuation from "./TabValuation";
-import TabMacro     from "./TabMacro";
 import TabRisk      from "./TabRisk";
+import TabMacro     from "./TabMacro";
 import TabQuality   from "./TabQuality";
-import { Download, Printer } from "lucide-react";
-import { downloadMemoPdf } from "@/lib/api";
 
-const TABS = ["📋 Memo", "📊 Bewertung", "📰 Makro", "⚠️ Risiken", "✅ Qualität"];
+const TABS = ["Übersicht", "Memo", "Bewertung", "Risiken", "Makro & News", "Qualität"];
 
-function RecBadge({ rec }: { rec: string }) {
-  return (
-    <span className={`inline-flex px-3 py-1 rounded-full text-xs font-bold border ${recColor(rec)}`}>
-      {rec}
-    </span>
-  );
+const BMT_LABEL: Record<string, string> = {
+  mature_cashflow: "Reifer Cashflow",
+  growth_with_revenue: "Wachstum",
+  optionality_play: "Optionality",
+  cyclical: "Zyklisch",
+  financial_institution: "Finanzinstitut",
+};
+
+/** "Muster Robotics AG" → ["Muster Robotics ", "AG"] (Rechtsform kursiv/gold wie im Entwurf). */
+function splitCompany(name: string): [string, string] {
+  const m = name.match(/^(.*\s)(AG|SA|Ltd\.?|Inc\.?|plc|N\.V\.|SE|Corp\.?|Holding|Group|GmbH)$/i);
+  return m ? [m[1], m[2]] : [name, ""];
 }
 
-interface KPI { label: string; val: string; cls: string }
-
-export default function MemoViewer({ data, histId }: { data: Record<string, unknown>; histId?: string }) {
+export default function MemoViewer({ data, histId }: { data: Memo; histId?: string }) {
   const [tab, setTab] = useState(0);
 
-  // All fields extracted as strings/primitives to avoid unknown-in-JSX TS errors
-  const rec        = String(data.final_recommendation ?? "HALTEN");
-  const conv       = String(data.conviction_level ?? "-");
-  const ccy        = String(data.currency ?? "");
-  const company    = String(data.company ?? "");
-  const sector     = String(data.sector ?? "");
-  const ticker     = String(data.ticker ?? "");
-  const date       = String(data.date ?? "");
-  const mktcapBn   = data.market_cap_bn as number | undefined;
-  const mktcap     = mktcapBn != null ? `${mktcapBn.toFixed(1)} Mrd.` : "n/v";
+  const ticker  = str(data.ticker);
+  const date    = str(data.date);
+  const company = str(data.company, ticker);
+  const ccy     = str(data.currency);
+  const rec     = str(data.final_recommendation, "–");
+  const conv    = str(data.conviction_level, "–");
+  const bars    = convictionBars(conv);
+  const score   = num(data.data_consistency_score);
+  const dur     = num(data.analysis_duration_s);
+  const updn    = num(data.upside_downside_pct);
+  const mcap    = num(data.market_cap_bn);
+  const agg     = asObj(data.aggregation);
+  const aggScore = num(agg?.score);
+  const bmc     = asObj(data.business_model_classification);
+  const bmt     = str(bmc?.business_model_type);
+  const incomplete = Boolean(data.analysis_incomplete);
+  const missing = asList<unknown>(data.missing_components).map(textOf).filter(Boolean);
+  const [head, suffix] = splitCompany(company);
 
-  const handleDownloadJson = useCallback(() => {
+  const onPdf = () => {
+    if (histId) downloadMemoPdf(histId, `${ticker}_${date}_memo.pdf`).catch(console.error);
+  };
+
+  const onJson = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
     a.download = `${ticker}_${date}_memo.json`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [data, ticker, date]);
+  };
 
-  const handleDownloadPdf = useCallback(() => {
-    if (!histId) return;
-    downloadMemoPdf(histId, `${ticker}_${date}_memo.pdf`).catch(console.error);
-  }, [histId, ticker, date]);
-  const incomplete = Boolean(data.analysis_incomplete);
-  const missing    = (data.missing_components as string[] | undefined) ?? [];
-  const bottomLine = data.summary_bottom_line ? String(data.summary_bottom_line) : "";
-  const execSum    = data.executive_summary   ? String(data.executive_summary)   : "";
-  const updn       = data.upside_downside_pct as number | undefined;
-  const score      = data.data_consistency_score as number | undefined;
-  const pt         = data.price_target;
-  const price      = data.current_price;
-
-  const kpis: KPI[] = [
-    { label: "Aktueller Kurs",      val: `${ccy} ${safeNum(price)}`, cls: "" },
-    { label: "Kursziel (12M)",       val: `${ccy} ${safeNum(pt)}`,   cls: "" },
-    { label: "Upside / DW",          val: upsideLabel(updn),         cls: upsideClass(updn) },
-    { label: "Marktkapitalisierung", val: mktcap,                    cls: "" },
-    { label: "Analyse-Datum",        val: date,                      cls: "" },
+  const kpis = [
+    { label: "KURS", val: `${ccy} ${safeNum(data.current_price)}`, cls: "" },
+    { label: "KURSZIEL 12M", val: `${ccy} ${safeNum(data.price_target)}`, cls: "" },
+    { label: "UPSIDE", val: upsideLabel(updn), cls: upsideClass(updn) },
+    { label: "MARKTKAP.", val: mcap != null ? `${mcap.toFixed(1)} Mrd` : "–", cls: "" },
+    { label: "AGGREGATIONS-SCORE", val: aggScore != null ? `${aggScore > 0 ? "+" : ""}${aggScore.toFixed(1)}` : "–", cls: "" },
   ];
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-
-      {/* ── Header ── */}
-      <div className="px-6 py-5 border-b border-slate-100">
-
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-3 flex-wrap">
-              <h2 className="font-serif text-2xl font-bold text-slate-800">{company}</h2>
-              <RecBadge rec={rec} />
-            </div>
-            <div className="text-sm text-slate-400 mt-1">
-              {ticker} · {sector} · {date}
-            </div>
-            <div className="text-sm text-slate-600 mt-0.5">
-              Conviction: <strong>{conv}</strong>{" "}
-              <span className="text-amber-500">{convictionStars(conv)}</span>
-            </div>
+    <div className="flex flex-col">
+      {/* ── Kopf ──────────────────────────────────────────────────────────── */}
+      <section className="dot-grid border-b border-line px-5 md:px-14 pt-11 pb-9 flex flex-wrap justify-between items-end gap-10">
+        <div className="flex flex-col gap-3 min-w-0">
+          <div className="eyebrow">ANALYSE · {ticker} · {date}</div>
+          <h1 className="m-0 font-display font-normal text-5xl md:text-[72px] leading-none tracking-[-0.02em] break-words">
+            {head}{suffix && <em className="text-gold-dark">{suffix}</em>}
+          </h1>
+          <div className="text-[15px] text-muted">
+            {[str(data.sector), bmt && `Klassifikation: ${BMT_LABEL[bmt] ?? bmt}`].filter(Boolean).join(" · ")}
           </div>
-          <div className="flex items-start gap-4">
-            <div className="flex gap-2">
-              <button
-                onClick={handleDownloadJson}
-                title="Als JSON herunterladen"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200
-                           text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300
-                           transition-colors"
-              >
-                <Download size={13} /> JSON
-              </button>
-              {histId && (
-                <button
-                  onClick={handleDownloadPdf}
-                  title="Investment Memo als PDF herunterladen"
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border
-                             text-xs font-medium transition-colors"
-                  style={{ borderColor: "#c9a84c", color: "#8a6820", background: "rgba(201,168,76,0.08)" }}
-                >
-                  <Printer size={13} /> PDF
-                </button>
-              )}
-            </div>
-            <div className="text-right">
-              <div className="text-xs text-slate-400 mb-1 tracking-widest uppercase">Konsistenz</div>
-              <div className={`font-serif text-4xl font-bold leading-none ${scoreColor(score)}`}>
-                {score ?? "-"}
-                <span className="text-base font-normal text-slate-400">/10</span>
+        </div>
+
+        <div className="flex flex-wrap bg-card border border-line shadow-[0_30px_60px_-40px_rgba(60,45,10,0.35)]">
+          <div className="px-7 py-5 flex flex-col gap-1.5 bg-ink text-cream">
+            <div className="font-mono text-[11px] tracking-[0.12em] text-gold-dim">EMPFEHLUNG</div>
+            <div className="font-display text-[40px] leading-none">{recLabel(rec)}</div>
+          </div>
+          <div className="px-7 py-5 flex flex-col gap-2.5 border-r border-line">
+            <div className="label-mono">CONVICTION</div>
+            <div className="flex items-center gap-3">
+              <div className="font-display text-[30px] leading-none">{capitalize(conv)}</div>
+              <div className="flex gap-1" role="img" aria-label={`Conviction ${bars} von 3`}>
+                {[0, 1, 2].map(i => (
+                  <span key={i} className="w-[18px] h-1.5" style={{ background: i < bars ? "#B08D3C" : "#E4DCC8" }} />
+                ))}
               </div>
             </div>
           </div>
-        </div>
-
-        {/* Unvollständige Analyse */}
-        {incomplete && (
-          <div className="mt-3 flex items-center gap-2 px-4 py-2.5 rounded-lg border border-red-200
-                          bg-red-50 text-sm text-red-700 font-medium">
-            ⚠️ Analyse unvollständig — fehlende Komponenten: {missing.join(", ") || "unbekannt"}.
-            Empfehlung hat reduzierte Aussagekraft (Conviction begrenzt).
-          </div>
-        )}
-
-        {/* KPI row */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5">
-          {kpis.map(({ label, val, cls }) => (
-            <div key={label} className="bg-slate-50 rounded-lg px-3 py-2.5">
-              <div className="text-xs text-slate-400 uppercase tracking-widest mb-1">{label}</div>
-              <div className={`font-semibold text-sm text-slate-800 ${cls}`}>{val}</div>
+          <div className="px-7 py-5 flex flex-col gap-2.5 border-r border-line">
+            <div className="label-mono">DATENKONSISTENZ</div>
+            <div className="font-mono text-[26px] leading-none">
+              {score ?? "–"}<span className="text-sm text-muted"> / 10</span>
             </div>
-          ))}
-        </div>
-
-        {/* Executive summary */}
-        {(bottomLine || execSum) && (
-          <div className="mt-4 p-4 rounded-lg border-l-4 bg-blue-50 border-blue-200">
-            {bottomLine && (
-              <div className="font-semibold text-sm text-blue-800 mb-1">💡 {bottomLine}</div>
-            )}
-            {execSum && (
-              <div className="text-sm text-slate-600 leading-relaxed">{execSum}</div>
-            )}
           </div>
-        )}
-      </div>
+          <div className="px-7 py-5 flex flex-col gap-2.5">
+            <div className="label-mono">LAUFZEIT</div>
+            <div className="font-mono text-[26px] leading-none">{dur != null ? `${Math.round(dur)} s` : "–"}</div>
+          </div>
+        </div>
+      </section>
 
-      {/* ── Tabs ── */}
-      <div className="flex border-b border-slate-100 overflow-x-auto">
-        {TABS.map((t, i) => (
-          <button
-            key={t}
-            onClick={() => setTab(i)}
-            className={`px-5 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 ${
-              tab === i
-                ? "border-[#c9a84c] text-slate-800"
-                : "border-transparent text-slate-400 hover:text-slate-600"
-            }`}
-          >
-            {t}
-          </button>
+      {incomplete && (
+        <div className="mx-5 md:mx-14 mt-6 px-5 py-3 border border-negative/40 bg-[#FBEFEF] text-sm text-negative">
+          Analyse unvollständig — fehlende Komponenten: {missing.join(", ") || "unbekannt"}.
+          Die Conviction ist deshalb auf «niedrig» begrenzt.
+        </div>
+      )}
+
+      {/* ── Kennzahlen-Leiste ─────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-5 border-b border-line bg-card px-5 md:px-14">
+        {kpis.map((k, i) => (
+          <div key={k.label} className={`py-5 flex flex-col gap-1.5 ${i > 0 ? "md:pl-7 md:border-l md:border-line" : ""}`}>
+            <div className="label-mono">{k.label}</div>
+            <div className={`font-mono text-xl ${k.cls}`}>{k.val}</div>
+          </div>
         ))}
       </div>
 
-      {/* ── Tab content ── */}
-      <div className="p-6">
-        {tab === 0 && <TabMemo      data={data} />}
-        {tab === 1 && <TabValuation data={data} />}
-        {tab === 2 && <TabMacro     data={data} />}
-        {tab === 3 && <TabRisk      data={data} />}
-        {tab === 4 && <TabQuality   data={data} />}
+      {/* ── Tabs ──────────────────────────────────────────────────────────── */}
+      <div role="tablist" aria-label="Memo-Bereiche" className="flex gap-8 px-5 md:px-14 border-b border-line overflow-x-auto">
+        {TABS.map((t, i) => (
+          <button key={t} type="button" role="tab" aria-selected={tab === i} onClick={() => setTab(i)}
+            className={`h-14 whitespace-nowrap text-[15px] border-b-2 ${
+              tab === i ? "border-gold text-ink font-semibold" : "border-transparent text-muted hover:text-ink"
+            }`}>
+            {t}
+          </button>
+        ))}
+        <button type="button" onClick={onJson}
+          className="ml-auto h-14 whitespace-nowrap font-mono text-[11px] tracking-[0.1em] text-muted hover:text-ink">
+          JSON ↓
+        </button>
+      </div>
+
+      <div className="px-5 md:px-14 pt-10 pb-12" role="tabpanel">
+        {tab === 0 && <TabOverview d={data} histId={histId} onPdf={onPdf} />}
+        {tab === 1 && <TabMemo d={data} />}
+        {tab === 2 && <TabValuation d={data} />}
+        {tab === 3 && <TabRisk d={data} />}
+        {tab === 4 && <TabMacro d={data} />}
+        {tab === 5 && <TabQuality d={data} />}
       </div>
     </div>
   );

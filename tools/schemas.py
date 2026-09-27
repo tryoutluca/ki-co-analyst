@@ -25,6 +25,10 @@ class IndustryFactor(BaseModel):
     headline: str
 
 class NewsItem(BaseModel):
+    id: str = Field(
+        default="",
+        description="ID aus dem Input, z.B. 'N3' (Firmen-News) oder 'M1' (Meilenstein)"
+    )
     headline: str = Field(description="Exakte Headline des Artikels")
     source: str = Field(description="Quellenname z.B. Reuters, cash.ch, Yahoo Finance")
     url: str = Field(description="Exakte URL des Artikels oder 'nicht verfügbar'")
@@ -38,6 +42,14 @@ class NewsItem(BaseModel):
     summary: str = Field(description="2-3 Sätze Zusammenfassung der News")
     sentiment_impact: Literal["sehr positiv", "positiv", "neutral", "negativ", "sehr negativ"] = Field(
         description="Sentiment-Auswirkung dieser spezifischen News"
+    )
+    relevant: bool = Field(
+        default=True,
+        description=(
+            "false, wenn die Meldung NICHT dieses Unternehmen betrifft: Namensvetter "
+            "(anderes Unternehmen/Produkt mit gleichem Namen), separat börsennotierte "
+            "Tochter, oder die Firma wird nur beiläufig erwähnt"
+        )
     )
 
 class NewsRisk(BaseModel):
@@ -406,6 +418,19 @@ class NewsAgentOutput(BaseModel):
     confidence_rationale: str = Field(
         default="",
         description="Kurzbegründung (1-2 Sätze) für self_confidence."
+    )
+    # ── Vom System gesetzt (tools/sentiment_engine.py) — vom LLM leer lassen ──
+    llm_sentiment_score: Optional[int] = Field(
+        default=None,
+        description="Vom System gesetzt: ursprüngliches LLM-Gesamturteil. Vom LLM leer lassen."
+    )
+    sentiment_breakdown: dict = Field(
+        default_factory=dict,
+        description="Vom System gesetzt: Komponenten und Gewichte des Scores. Vom LLM leer lassen."
+    )
+    research_log: list[dict] = Field(
+        default_factory=list,
+        description="Vom System gesetzt: Suchen der autonomen Nachrecherche. Vom LLM leer lassen."
     )
 
 

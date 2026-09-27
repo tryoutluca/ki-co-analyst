@@ -1,41 +1,60 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, Suspense } from "react";
+import { useEffect, useRef, useState, useCallback, Suspense, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
-import { searchTicker, startAnalysis, getJobStatus } from "@/lib/api";
-import { recColor, upsideClass, upsideLabel, safeNum, scoreColor } from "@/lib/utils";
-import { Search, Play, X, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
+import { searchTicker, startAnalysis, getJobStatus, cancelAnalysis } from "@/lib/api";
+import { pipelineState, PIPELINE } from "@/lib/pipeline";
+import PipelineRun from "@/components/pipeline/PipelineRun";
 import MemoViewer from "@/components/memo/MemoViewer";
+
+const EXAMPLES = ["HOLN.SW", "NESN.SW", "NOVN.SW", "ROP.SW", "AAPL", "MSFT"];
+const POLL_MS = 2000;
+
+type Status = "idle" | "running" | "done" | "error";
+
+function elapsedLabel(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
 function AnalyseInner() {
   const params = useSearchParams();
 
-  const [query,    setQuery]    = useState(params.get("ticker") ?? "");
-  const [results,  setResults]  = useState<{ ticker: string; display: string }[]>([]);
+  const [query, setQuery]       = useState(params.get("ticker") ?? "");
+  const [results, setResults]   = useState<{ ticker: string; display: string }[]>([]);
   const [selected, setSelected] = useState(params.get("ticker") ?? "");
   const [showDrop, setShowDrop] = useState(false);
 
-  const [jobId,    setJobId]    = useState<string | null>(null);
-  const [status,   setStatus]   = useState<"idle"|"running"|"done"|"error">("idle");
+  const [status, setStatus]     = useState<Status>("idle");
+  const [running, setRunning]   = useState("");          // Ticker des laufenden Jobs
   const [progress, setProgress] = useState<string[]>([]);
-  const [result,   setResult]   = useState<Record<string, unknown> | null>(null);
-  const [histId,   setHistId]   = useState<string | null>(null);
+  const [result, setResult]     = useState<Record<string, unknown> | null>(null);
+  const [histId, setHistId]     = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [startedAt, setStartedAt] = useState(0);
+  const [now, setNow]           = useState(0);
+  const [notice, setNotice]     = useState("");
 
-  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const afterRef   = useRef(0);
-  const progressEl = useRef<HTMLDivElement>(null);
+  const pollRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const afterRef = useRef(0);
+  const jobRef   = useRef<string | null>(null);
+  const handledParams = useRef("");
 
-  // Auto-scroll progress
+  const stopPolling = () => { if (pollRef.current) clearInterval(pollRef.current); pollRef.current = null; };
+  useEffect(() => stopPolling, []);   // Polling beim Verlassen der Seite beenden
+
+  // Laufzeit-Anzeige
   useEffect(() => {
-    if (progressEl.current) {
-      progressEl.current.scrollTop = progressEl.current.scrollHeight;
-    }
-  }, [progress]);
+    if (status !== "running") return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [status]);
 
-  // Ticker search
+  // Ticker-Suche (Ergebnisse nur anzeigen, solange eine Suche aktiv ist — abgeleitet statt per setState)
+  const searching = query.length >= 2 && query !== selected;
+  const visibleResults = searching ? results : [];
   useEffect(() => {
-    if (query.length < 2) { setResults([]); return; }
+    if (!searching) return;
     const t = setTimeout(async () => {
       try {
         const res = await searchTicker(query);
@@ -44,9 +63,8 @@ function AnalyseInner() {
       } catch { setResults([]); }
     }, 300);
     return () => clearTimeout(t);
-  }, [query]);
+  }, [query, searching]);
 
-  // Polling
   const poll = useCallback(async (jid: string) => {
     try {
       const data = await getJobStatus(jid, afterRef.current);
@@ -55,43 +73,68 @@ function AnalyseInner() {
         afterRef.current += data.progress.length;
       }
       if (data.status === "done") {
-        clearInterval(pollRef.current!);
+        stopPolling();
         setStatus("done");
         setResult(data.result);
         setHistId(data.hist_id);
       } else if (data.status === "error") {
-        clearInterval(pollRef.current!);
+        stopPolling();
         setStatus("error");
         setErrorMsg(data.error ?? "Unbekannter Fehler");
+      } else if (data.status === "cancelled") {
+        stopPolling();
       }
-    } catch { /* ignore transient errors */ }
+    } catch { /* transiente Netzwerkfehler ignorieren */ }
   }, []);
 
-  async function handleStart() {
-    if (!selected) return;
+  const start = useCallback(async (ticker: string) => {
+    if (!ticker) return;
+    stopPolling();
     setStatus("running");
+    setRunning(ticker);
     setProgress([]);
     setResult(null);
+    setHistId(null);
     setErrorMsg("");
+    setNotice("");
+    setStartedAt(Date.now());
+    setNow(Date.now());
     afterRef.current = 0;
-
     try {
-      const { job_id } = await startAnalysis(selected);
-      setJobId(job_id);
-      pollRef.current = setInterval(() => poll(job_id), 2000);
+      const { job_id } = await startAnalysis(ticker);
+      jobRef.current = job_id;
+      pollRef.current = setInterval(() => poll(job_id), POLL_MS);
     } catch (e: unknown) {
       setStatus("error");
       setErrorMsg(String(e));
     }
-  }
+  }, [poll]);
 
-  function handleReset() {
-    clearInterval(pollRef.current!);
+  // ?ticker=X&start=1 (Kopfzeile, "Neu berechnen") → Analyse direkt starten
+  useEffect(() => {
+    const key = params.toString();
+    const t = params.get("ticker");
+    if (params.get("start") === "1" && t && handledParams.current !== key) {
+      handledParams.current = key;
+      setQuery(t);
+      setSelected(t);
+      start(t.toUpperCase());
+    }
+  }, [params, start]);
+
+  // Abbruch: UI kehrt sofort zurück; das Backend stoppt vor dem nächsten Agenten
+  // und speichert nichts in der Historie.
+  async function cancel() {
+    const jid = jobRef.current;
+    stopPolling();
     setStatus("idle");
-    setResult(null);
     setProgress([]);
-    setJobId(null);
-    setHistId(null);
+    setNotice(`Analyse von ${running} abgebrochen — der laufende Agent wird im Hintergrund noch beendet, danach stoppt die Pipeline. Es wird nichts gespeichert.`);
+    jobRef.current = null;
+    if (jid) {
+      try { await cancelAnalysis(jid); }
+      catch { setNotice(`Abbruch von ${running} konnte nicht an den Server gesendet werden.`); }
+    }
   }
 
   function selectTicker(t: string) {
@@ -100,165 +143,148 @@ function AnalyseInner() {
     setShowDrop(false);
   }
 
+  const nodes = useMemo(() => pipelineState(progress, status === "done"), [progress, status]);
+  const finished = nodes.filter(n => n.status === "done" || n.status === "flag" || n.status === "skip").length;
+  const active = nodes.find(n => n.status === "active");
+  const feed = progress.slice(-120);
+
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 space-y-6">
-
-      {/* ── Search bar ─────────────────────────────────────────────────── */}
-      <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-5">
-        <h1 className="font-serif text-xl font-semibold text-slate-800 mb-4">
-          Aktienanalyse starten
-        </h1>
-
-        <div className="flex gap-3 items-start flex-wrap">
-          {/* Input + Dropdown */}
-          <div className="relative flex-1 min-w-64">
-            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-              <Search size={16} />
-            </div>
-            <input
-              type="text"
-              value={query}
-              onChange={e => { setQuery(e.target.value); setSelected(""); }}
-              onFocus={() => results.length > 0 && setShowDrop(true)}
-              onBlur={() => setTimeout(() => setShowDrop(false), 150)}
-              placeholder="Unternehmen oder Ticker suchen…  z.B. Holcim, AAPL"
-              className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-lg text-sm
-                         focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100
-                         bg-slate-50 text-slate-800 placeholder-slate-400"
-            />
-            {showDrop && results.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200
-                              rounded-lg shadow-lg z-50 overflow-hidden">
-                {results.map(r => (
-                  <button key={r.ticker}
-                          onMouseDown={() => selectTicker(r.ticker)}
-                          className="w-full text-left px-4 py-2.5 text-sm hover:bg-slate-50
-                                     transition-colors border-b border-slate-50 last:border-0">
-                    <span className="font-semibold text-slate-800 mr-2">{r.ticker}</span>
-                    <span className="text-slate-500">{r.display.replace(r.ticker + " – ", "")}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Selected badge */}
-          {selected && (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium"
-                 style={{ background: "rgba(201,168,76,0.1)", borderColor: "#c9a84c", color: "#8a6820" }}>
-              {selected}
-              <button onClick={() => { setSelected(""); setQuery(""); }}>
-                <X size={13} />
-              </button>
-            </div>
-          )}
-
-          {/* Run button */}
-          <button
-            onClick={status === "idle" || status === "error" ? handleStart : handleReset}
-            disabled={status === "running" || !selected}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-semibold text-sm
-                       text-white shadow transition-all disabled:opacity-50"
-            style={{ background: status === "done" ? "#1e7c45" : "#0a1628" }}
-          >
-            {status === "running" ? (
-              <><Loader2 size={15} className="animate-spin" /> Läuft…</>
-            ) : status === "done" ? (
-              <><CheckCircle size={15} /> Neue Analyse</>
-            ) : (
-              <><Play size={15} /> Analyse starten</>
-            )}
-          </button>
+    <div className="flex flex-col">
+      {/* ── Suche ───────────────────────────────────────────────────────── */}
+      <section className="dot-grid border-b border-line px-5 md:px-14 pt-11 pb-9 flex flex-col gap-6">
+        <div className="flex flex-col gap-3">
+          <div className="eyebrow">NEUE ANALYSE</div>
+          <h1 className="m-0 font-display font-normal text-5xl md:text-[64px] leading-none tracking-[-0.02em]">
+            Aktie <em className="text-gold-dark">analysieren.</em>
+          </h1>
         </div>
 
-        {/* Example tickers */}
-        <div className="flex flex-wrap gap-2 mt-4">
-          <span className="text-xs text-slate-400 self-center">Beispiele:</span>
-          {["HOLN.SW","NESN.SW","NOVN.SW","AAPL","MSFT","RGTI"].map(t => (
-            <button key={t}
-                    onClick={() => selectTicker(t)}
-                    className="px-2.5 py-1 rounded text-xs border border-slate-200
-                               hover:border-slate-400 text-slate-600 hover:text-slate-900
-                               transition-colors bg-white">
+        <form
+          onSubmit={e => { e.preventDefault(); start((selected || query).trim().toUpperCase()); }}
+          className="flex flex-wrap gap-3 items-start"
+        >
+          <div className="relative flex-1 min-w-[260px] max-w-[560px]">
+            <label htmlFor="analyse-q" className="sr-only">Unternehmen oder Ticker</label>
+            <input
+              id="analyse-q"
+              value={query}
+              onChange={e => { setQuery(e.target.value); setSelected(""); }}
+              onFocus={() => visibleResults.length > 0 && setShowDrop(true)}
+              onBlur={() => setTimeout(() => setShowDrop(false), 150)}
+              placeholder="Unternehmen oder Ticker, z. B. Holcim oder AAPL"
+              autoComplete="off"
+              className="w-full h-14 px-4 border border-line-3 rounded-[2px] bg-white text-base text-ink outline-none focus:border-gold"
+            />
+            {showDrop && visibleResults.length > 0 && (
+              <ul className="absolute top-full left-0 right-0 mt-1 m-0 p-0 list-none bg-card border border-line z-50 shadow-[0_20px_40px_-20px_rgba(60,45,10,0.3)]">
+                {visibleResults.map(r => (
+                  <li key={r.ticker}>
+                    <button type="button" onMouseDown={() => selectTicker(r.ticker)}
+                      className="w-full text-left px-4 py-3 text-sm hover:bg-paper border-b border-line-2 last:border-0">
+                      <span className="font-mono text-ink mr-3">{r.ticker}</span>
+                      <span className="text-muted">{r.display.replace(r.ticker + " – ", "")}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <button type="submit" disabled={status === "running" || !(selected || query).trim()}
+            className="h-14 px-8 rounded-[2px] bg-ink text-cream text-base font-semibold disabled:opacity-50">
+            {status === "running" ? "Analyse läuft …" : status === "done" ? "Neue Analyse" : "Analyse starten"}
+          </button>
+        </form>
+
+        <div className="flex flex-wrap gap-2 items-center">
+          <span className="label-mono mr-1">Beispiele</span>
+          {EXAMPLES.map(t => (
+            <button key={t} type="button" onClick={() => selectTicker(t)}
+              className="h-9 px-3 font-mono text-xs border border-line-3 rounded-[2px] bg-card text-ink-2 hover:border-gold">
               {t}
             </button>
           ))}
         </div>
-      </div>
+      </section>
 
-      {/* ── Progress ───────────────────────────────────────────────────── */}
-      {(status === "running" || (status === "done" && progress.length > 0)) && (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-          <div className="flex items-center gap-3 px-5 py-3 border-b border-slate-100"
-               style={{ background: "#0a1628" }}>
-            <div className="flex gap-1.5">
-              <div className="w-3 h-3 rounded-full bg-red-400" />
-              <div className="w-3 h-3 rounded-full bg-amber-400" />
-              <div className="w-3 h-3 rounded-full bg-green-400" />
-            </div>
-            <span className="text-xs text-slate-400 font-mono">
-              {status === "running"
-                ? `Analyse läuft — ${selected}…`
-                : `✓ Abgeschlossen — ${selected}`}
-            </span>
-            {status === "running" && (
-              <Loader2 size={13} className="animate-spin text-slate-400 ml-auto" />
-            )}
-            {status === "done" && (
-              <CheckCircle size={13} className="text-emerald-400 ml-auto" />
-            )}
-          </div>
-          <div ref={progressEl}
-               className="h-52 overflow-y-auto p-4 font-mono text-xs text-slate-600 space-y-0.5"
-               style={{ background: "#f8fafc" }}>
-            {progress.map((line, i) => (
-              <div key={i} className={
-                line.startsWith("✅") ? "text-emerald-700 font-semibold" :
-                line.startsWith("❌") ? "text-red-600 font-semibold" :
-                line.startsWith("⚠")  ? "text-amber-700" :
-                "text-slate-600"
-              }>
-                {line}
+      {/* ── Live-Lauf ───────────────────────────────────────────────────── */}
+      {status === "running" && (
+        <section className="px-5 md:px-14 py-10 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_400px] gap-10" aria-live="polite">
+          <div className="flex flex-col gap-4 min-w-0">
+            <div className="flex flex-wrap justify-between items-baseline gap-3">
+              <h2 className="m-0 font-display font-normal text-[34px]">
+                {running} · <em className="text-gold-dark">{active ? active.name : "startet"}</em>
+              </h2>
+              <div className="flex items-center gap-5">
+                <div className="label-mono">{finished} / {PIPELINE.length} KNOTEN · {elapsedLabel(now - startedAt)}</div>
+                <button type="button" onClick={cancel}
+                  className="h-11 px-5 rounded-[2px] border border-negative/50 text-negative text-sm font-semibold hover:bg-[#FBEFEF]">
+                  Abbrechen
+                </button>
               </div>
-            ))}
-            {status === "running" && (
-              <div className="text-slate-400 animate-pulse">█</div>
-            )}
+            </div>
+            <div className="h-[3px] bg-bar" role="progressbar" aria-valuemin={0} aria-valuemax={PIPELINE.length} aria-valuenow={finished}>
+              <div className="h-[3px] bg-gold transition-[width] duration-500" style={{ width: `${(finished / PIPELINE.length) * 100}%` }} />
+            </div>
+            <div className="bg-card border border-line">
+              <div className="px-6 py-3 border-b border-ink font-mono text-[11px] tracking-[0.1em] text-muted">LIVE-REASONING</div>
+              <div className="h-[460px] overflow-y-auto px-6 py-3 flex flex-col-reverse">
+                <div className="flex flex-col">
+                  {feed.map((line, i) => {
+                    const node = /^\[[a-z_]+\]/.test(line);
+                    const bad = /❌|Fehler/.test(line);
+                    return (
+                      <div key={progress.length - feed.length + i}
+                        className={`fade-in font-mono text-xs leading-relaxed py-0.5 break-words ${
+                          bad ? "text-negative" : node ? "text-ink font-medium pt-2" : "text-muted"
+                        }`}>
+                        {line}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           </div>
+          <aside className="bg-card border border-line p-6 flex flex-col gap-4 self-start">
+            <div className="flex justify-between items-baseline">
+              <h2 className="m-0 font-display font-normal text-[28px]">Pipeline-Lauf</h2>
+              <div className="label-mono">LIVE</div>
+            </div>
+            <PipelineRun nodes={nodes} />
+          </aside>
+        </section>
+      )}
+
+      {notice && status === "idle" && (
+        <div role="status" className="mx-5 md:mx-14 mt-8 px-6 py-4 border border-line-3 bg-card text-sm text-ink-2">
+          {notice}
         </div>
       )}
 
-      {/* ── Error ──────────────────────────────────────────────────────── */}
       {status === "error" && (
-        <div className="flex items-start gap-3 p-5 bg-red-50 border border-red-200 rounded-xl">
-          <AlertCircle size={18} className="text-red-500 flex-shrink-0 mt-0.5" />
-          <div>
-            <div className="font-semibold text-red-700 text-sm">Analyse fehlgeschlagen</div>
-            <div className="text-red-600 text-sm mt-1">{errorMsg}</div>
-          </div>
+        <div className="mx-5 md:mx-14 my-10 px-6 py-5 border border-negative/40 bg-[#FBEFEF]">
+          <div className="font-display text-2xl text-negative">Analyse fehlgeschlagen</div>
+          <div className="text-sm text-negative mt-1 break-words">{errorMsg}</div>
         </div>
       )}
 
-      {/* ── Result ─────────────────────────────────────────────────────── */}
-      {status === "done" && result && (
-        <MemoViewer data={result} histId={histId ?? undefined} />
-      )}
+      {status === "done" && result && <MemoViewer data={result} histId={histId ?? undefined} />}
 
-      {/* ── Empty state ────────────────────────────────────────────────── */}
       {status === "idle" && (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm">
-          <div className="py-20 text-center">
-            <div className="text-5xl mb-4 opacity-20">📊</div>
-            <h3 className="font-serif text-xl font-semibold text-slate-700 mb-2">
-              Bereit zur Analyse
-            </h3>
-            <p className="text-sm text-slate-400 max-w-xs mx-auto">
-              Suchen Sie eine Aktie oben und klicken Sie{" "}
-              <strong className="text-slate-600">Analyse starten</strong>.
-              Die Analyse dauert ca. 60–90 Sekunden.
-            </p>
-          </div>
-        </div>
+        <section className="px-5 md:px-14 py-16 grid grid-cols-1 md:grid-cols-4 border-t-0">
+          {[
+            ["01", "Klassifizieren", "Das Geschäftsmodell bestimmt, welche Bewertungsmethoden gelten."],
+            ["02", "Analysieren", "Fundamental, News, Thematik, Forward-Schätzung und Risiko — mit Retries."],
+            ["03", "Prüfen", "Qualitätscheck und Senior Review, bei Bedarf mit gezielter Kritik."],
+            ["04", "Synthese", "Der Supervisor gewichtet nach Konfidenz und schreibt das Memo."],
+          ].map(([n, t, p], i) => (
+            <div key={n} className={`pt-8 pr-8 flex flex-col gap-3 border-t border-ink ${i > 0 ? "md:pl-8 md:border-l md:border-l-line" : ""}`}>
+              <div className="font-mono text-[13px] text-gold-dark">{n}</div>
+              <h3 className="m-0 font-display font-normal text-[28px]">{t}</h3>
+              <p className="m-0 text-[15px] leading-relaxed text-ink-2">{p}</p>
+            </div>
+          ))}
+        </section>
       )}
     </div>
   );

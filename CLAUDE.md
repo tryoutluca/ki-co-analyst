@@ -17,6 +17,7 @@ cd frontend && npx tsc --noEmit   # type-check only
 # Tests
 pytest tests/test_period_guards.py -m "not integration" -v   # unit only (no network)
 pytest tests/test_period_guards.py -v                          # all incl. live yfinance
+pytest tests/ -m "not integration" -q                          # all unit tests (no network)
 
 # Run a single analysis (CLI)
 python main.py ABBN.SW
@@ -60,6 +61,14 @@ The heaviest node. Sequence:
 | `multiples_engine.py` | Deterministic EV/EBITDA, P/E, FCF-yield etc. Has period-contamination guards (`_fcf_suspect`, `_guard_warnings`). Never call with quarterly FCF as annual input. |
 | `period_classifier.py` | `classify_pdf_period(title)` → `"annual"|"quarterly"|"h1"|"9m"|None`. Used by IR-RAG to tag document types. |
 | `valuation_engine.py` | DCF model |
+| `sentiment_engine.py` | Deterministic news sentiment: junk/relevance filter, cross-source dedup, source/recency weighting (news 14d, milestones 180d half-life), then aggregates the LLM's per-item ratings (IDs `M*` milestones, `N*` Yahoo news, `R*` research) into `overall_sentiment_score`. Items the LLM marks `relevant: false` (namesakes, listed subsidiaries) are excluded. LLM's own score kept as `llm_sentiment_score`; details in `sentiment_breakdown`. |
+| `lm_tone.py` | Loughran-McDonald tone of annual reports (English only), YoY change → `ir_analysis["ir_tone"]` → Risk agent. Word lists in `tools/data/lm_wordlists.json` (LM 2018; research use, commercial use needs licence). Per-year results accumulate in `ir_cache/{ticker}/lm_tone.json`. |
+
+`finance_tools.tavily_search()` is the only Tavily entry point (direct REST, no LangChain wrapper). Use `topic="news"` to get publication dates.
+
+### News Agent Autonomy (`agents/news_research.py`)
+
+Before the main news LLM call, a tool-use loop lets the LLM decide whether to run targeted follow-up searches (`search_news`) or stop (`finish_research`). Code-enforced guardrails: max 3 searches, `tool_choice="required"`, and finishing with < 3 real company items and no search is rejected. Results go through `prepare_research_items()` and count toward the milestone component. Log in `news_output["research_log"]`.
 | `schemas.py` | Pydantic output schemas (ForwardEstimateOutput, etc.) |
 
 ### IR-RAG Document Strategy
@@ -69,6 +78,12 @@ The heaviest node. Sequence:
 - **1 latest report** (quarterly if available, else annual)
 
 All chunks are tagged with `period_class` ("annual"/"quarterly") and `fiscal_year` in metadata. Two LLM extraction passes: annual context → `ir_annual_years`, quarterly context → `ir_quarterly_latest`.
+
+**HTML/SEC extraction** (`load_html_document`): SEC iXBRL filings put prose in `<div>` (not `<p>`) and split numbers into short table cells — `_extract_html_blocks()` reads innermost blocks and whole tables row-wise (with the preceding heading as label). Cap 400k chars for sec.gov, 60k otherwise. Foreign private issuers (`_SEC_FOREIGN_FILERS`): the quarterly doc is chosen via `_sec_6k_report_url()` (EX-99 "financial report" exhibit or `ticker-YYYYMMDD.htm` primary doc), and SEC data older than 2 years (e.g. ABB, deregistered 2024) falls back to the IR website.
+
+**Document discovery** (`find_ir_pdfs`): IR website / SEC first (`_find_ir_pdfs_website`); for non-SEC tickers with missing, stale (< prior FY from April) or < 2 annual reports, a Tavily search fallback (`_find_ir_pdfs_via_search`) adds PDFs from the company's own domain only — needed for bot-protected / JS-only sites (Nestlé, ABB). `_PDF_TYPE_RULES` order matters (interim before annual: "Halbjahresbericht" contains "jahresbericht"). One document per fiscal year, ranked by `_annual_doc_rank` (financial report/statements > annual/integrated report > results release > presentation), English before German.
+
+**RAG context** (`_build_rag_context`): per-fiscal-year budget, round-robin over `STANDARD_QUERIES`, full chunks, deduplicated. Budgets: `_ANNUAL_CONTEXT_CHARS` 80k, `_QUARTERLY_CONTEXT_CHARS` 40k (min 12k per year). Previously 20k/8k with 400-char chunk truncation cut off balance sheet, cash flow, EPS and dividend queries entirely.
 
 **Routing rule:** `ir_annual_years` → historical A-columns + MultiplesEngine inputs only. `ir_quarterly_latest` → QuarterlySignal → ForwardEstimateAgent E-columns only. Never mix.
 

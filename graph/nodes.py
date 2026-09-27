@@ -407,6 +407,7 @@ def risk_node(state: AnalysisState) -> dict:
         output = run_risk_agent(
             ticker, f_out, n_out,
             business_model_context=state.get("business_model_classification"),
+            ir_tone=(state.get("ir_analysis_cache") or {}).get("ir_tone"),
         )
 
         if hasattr(output, "model_dump"):
@@ -688,6 +689,7 @@ def supervisor_review_node(state: AnalysisState) -> dict:
                 "supervisor_review_action":   "request_critique",
                 "supervisor_critique":        review.get("critique_text", ""),
                 "supervisor_critique_target": target,
+                "supervisor_review_notes":    notes,
                 "routing_log": state.get("routing_log", []) + [log_entry],
             }
         else:
@@ -697,6 +699,7 @@ def supervisor_review_node(state: AnalysisState) -> dict:
                 "supervisor_review_action":   "approve",
                 "supervisor_critique":        None,
                 "supervisor_critique_target": None,
+                "supervisor_review_notes":    notes,
                 "routing_log": state.get("routing_log", []) + [log_entry],
             }
 
@@ -706,6 +709,7 @@ def supervisor_review_node(state: AnalysisState) -> dict:
             "supervisor_review_action":   "approve",
             "supervisor_critique":        None,
             "supervisor_critique_target": None,
+            "supervisor_review_notes":    f"Review fehlgeschlagen ({e}) — automatisch freigegeben",
             "routing_log": state.get("routing_log", []) + [log_entry],
         }
 
@@ -831,6 +835,7 @@ def risk_critique_node(state: AnalysisState) -> dict:
             n_out,
             supervisor_critique=critique,
             business_model_context=state.get("business_model_classification"),
+            ir_tone=(state.get("ir_analysis_cache") or {}).get("ir_tone"),
         )
         if hasattr(output, "model_dump"):
             output = output.model_dump()
@@ -859,6 +864,61 @@ def risk_critique_node(state: AnalysisState) -> dict:
 
 
 # ── Bestehender Supervisor-Synthese-Knoten ────────────────────────────────────
+
+
+def _first_text(*values) -> str:
+    for v in values:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _build_agent_results(state: AnalysisState, memo: dict) -> list[dict]:
+    """Kernaussage + Konfidenz pro Agent für die Dashboard-Tabelle — aus den
+    echten Agent-Outputs, nicht vom Supervisor-LLM umformuliert.
+    confidence None = deterministischer Knoten oder Agent nicht gelaufen."""
+    f_out = state.get("fundamental_output") or {}
+    n_out = state.get("news_output") or {}
+    r_out = state.get("risk_output") or {}
+    rev   = state.get("revised_estimates") or {}
+    th    = state.get("thematic_analysis") or {}
+    fe    = state.get("forward_estimates") or {}
+    opt   = state.get("optionality_analysis") or {}
+    conf  = state.get("agent_confidence_scores") or {}
+
+    case = f_out.get("investment_case") or []
+    first_case = case[0].get("point") if case and isinstance(case[0], dict) else ""
+    target = state.get("supervisor_critique_target")
+
+    def _row(key, name, tag, text, confidence, ran=True):
+        return {
+            "key": key, "name": name, "tag": tag,
+            "text": text or ("Nicht relevant für dieses Geschäftsmodell." if not ran else "–"),
+            "confidence": confidence if isinstance(confidence, (int, float)) else None,
+            "ran": ran,
+            "after_critique": target == key,
+        }
+
+    return [
+        _row("fundamental", "Fundamental", "KENNZAHLEN · BEWERTUNG",
+             _first_text(first_case, f_out.get("valuation_assessment")),
+             conf.get("fundamental"), ran=bool(f_out) and not f_out.get("error")),
+        _row("news", "News", "NACHRICHTENLAGE",
+             _first_text(n_out.get("sentiment_vs_fundamentals_reasoning"), n_out.get("macro_summary")),
+             conf.get("news"), ran=bool(n_out) and not n_out.get("error")),
+        _row("estimate_revision", "Estimate Revision", "MAKRO-REVISION · DETERMINISTISCH",
+             _first_text(rev.get("summary")), None, ran=bool(rev)),
+        _row("thematic", "Thematic", "THEMEN · TRENDS",
+             _first_text(th.get("thematic_thesis"), th.get("summary")),
+             th.get("self_confidence"), ran=bool(th)),
+        _row("forward_estimate", "Forward Estimate", "WACHSTUM",
+             _first_text(fe.get("overall_thesis")), fe.get("self_confidence"), ran=bool(fe)),
+        _row("risk", "Risk", "RISIKOPROFIL",
+             _first_text(r_out.get("counter_position"), memo.get("advocatus_diaboli_summary")),
+             conf.get("risk"), ran=bool(r_out) and not r_out.get("error")),
+        _row("optionality", "Optionality", "PRE-REVENUE",
+             _first_text(opt.get("optionality_thesis")), opt.get("self_confidence"), ran=bool(opt)),
+    ]
 
 
 def supervisor_node(state: AnalysisState) -> dict:
@@ -902,6 +962,27 @@ def supervisor_node(state: AnalysisState) -> dict:
         memo["forward_estimates"] = state.get("forward_estimates")
         memo["thematic_analysis"] = state.get("thematic_analysis")
         memo["optionality_analysis"] = state.get("optionality_analysis")
+        # Transparenz für das Dashboard: Senior Review, Kernaussage + Konfidenz
+        # pro Agent, deterministischer Sentiment-Breakdown
+        memo["senior_review"] = {
+            "action":   state.get("supervisor_review_action"),
+            "target":   state.get("supervisor_critique_target"),
+            "critique": state.get("supervisor_critique"),
+            "notes":    state.get("supervisor_review_notes"),
+            "rounds":   state.get("supervisor_rounds", 0),
+        }
+        memo["agent_results"] = _build_agent_results(state, memo)
+        # MemoViewer und PDF lesen market_cap_bn — der Fundamental-Agent berechnet
+        # den Wert, er kam aber nie im Memo an (Anzeige war immer "n/v")
+        if memo.get("market_cap_bn") in (None, "", "-") and f_out.get("market_cap_bn") not in (None, "", "-"):
+            memo["market_cap_bn"] = f_out.get("market_cap_bn")
+        if isinstance(n_out, dict) and not n_out.get("error"):
+            memo["news_sentiment"] = {
+                "score":       n_out.get("overall_sentiment_score"),
+                "llm_score":   n_out.get("llm_sentiment_score"),
+                "breakdown":   n_out.get("sentiment_breakdown"),
+                "research_log": n_out.get("research_log"),
+            }
 
         log_entry = (
             f"[supervisor] ✅ Memo erstellt | "

@@ -63,11 +63,17 @@ export async function startAnalysis(ticker: string): Promise<{ job_id: string }>
   return data;
 }
 
+/** Kooperativer Abbruch: das Backend stoppt vor dem nächsten Agenten. */
+export async function cancelAnalysis(jobId: string) {
+  const { data } = await api.post(`/analyse/jobs/${jobId}/cancel`);
+  return data as { job_id: string; status: string };
+}
+
 export async function getJobStatus(jobId: string, after = 0) {
   const { data } = await api.get(`/analyse/jobs/${jobId}`, { params: { after } });
   return data as {
     job_id: string;
-    status: "running" | "done" | "error";
+    status: "running" | "cancelling" | "cancelled" | "done" | "error";
     ticker: string;
     progress: string[];
     result: Record<string, unknown> | null;

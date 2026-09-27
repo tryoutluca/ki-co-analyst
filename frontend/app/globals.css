@@ -1,33 +1,100 @@
-@import url("https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;500;600;700&display=swap");
 @import "tailwindcss";
 
-:root {
-  --navy:  #0a1628;
-  --blue:  #1a2f45;
-  --gold:  #c9a84c;
-  --gray:  #8a9bb0;
-  --off-w: #f7f8fa;
+/* ── Design-Tokens (Homepage/Dashboard-Entwurf: Papier, Tinte, Gold) ─────── */
+@theme inline {
+  --color-paper:      #F7F4EC;   /* Seitenhintergrund */
+  --color-card:       #FFFDF8;   /* Flächen, Karten */
+  --color-ink:        #121417;   /* Text, dunkle Flächen */
+  --color-ink-2:      #3A3D42;   /* Fliesstext */
+  --color-muted:      #5C5F64;   /* Sekundärtext */
+  --color-muted-2:    #6A6D72;   /* Tertiärtext, Tags */
+  --color-subtle:     #8B8E93;   /* übersprungen / inaktiv */
+  --color-line:       #E4DCC8;   /* Linien */
+  --color-line-2:     #EDE5D2;   /* Tabellen-Trennlinien */
+  --color-line-3:     #D9CDAE;   /* Input-Rahmen */
+  --color-gold:       #B08D3C;   /* Akzent, Linien, Marker */
+  --color-gold-dark:  #9A7A2E;   /* Kursive Akzentwörter */
+  --color-gold-text:  #7F6320;   /* Gold als Text (AA auf Papier) */
+  --color-gold-light: #C9A24A;   /* bedingte Verzweigungen */
+  --color-gold-dim:   #D9B45A;   /* Gold auf dunklem Grund */
+  --color-cream:      #F2E6C4;   /* Text auf dunklen Buttons */
+  --color-cream-2:    #EDE7D8;   /* Text im dunklen Methodik-Block */
+  --color-dark-muted: #B9B3A5;   /* Sekundärtext auf dunklem Grund */
+  --color-dark-line:  #3A3528;
+  --color-bar:        #EFE7D3;   /* Konfidenz-Balken Hintergrund */
+  --color-positive:   #1E6B45;
+  --color-negative:   #9B2C2C;
+
+  --font-display: var(--font-instrument), Georgia, serif;
+  --font-sans:    var(--font-hanken), system-ui, sans-serif;
+  --font-mono:    var(--font-jetbrains), ui-monospace, monospace;
 }
 
 * { box-sizing: border-box; }
 
 body {
-  background: var(--off-w);
-  color: #1a202c;
-  font-family: "Inter", -apple-system, sans-serif;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
-.font-serif { font-family: "Playfair Display", Georgia, serif !important; }
+a { color: var(--color-gold-text); }
+a:hover { color: #5E4916; }
 
-::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--color-line-3); border-radius: 3px; }
 
-.gold-line {
-  display: block;
-  width: 3rem;
-  height: 2px;
-  background: var(--gold);
-  border-radius: 1px;
+/* Punktraster aus dem Entwurf (Hero, Kopfbereiche) */
+.dot-grid {
+  background-image: radial-gradient(#DCCFAE 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Kleine Mono-Überschrift mit Goldstrich: "── MULTI-AGENT EQUITY RESEARCH" */
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-gold-text);
+}
+.eyebrow::before {
+  content: "";
+  width: 32px;
+  height: 1px;
+  background: var(--color-gold);
+}
+.eyebrow.plain::before { display: none; }
+
+.label-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+/* ── Live-Pipeline ─────────────────────────────────────────────────────── */
+@keyframes diamond-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(176, 141, 60, 0.45); }
+  100% { box-shadow: 0 0 0 8px rgba(176, 141, 60, 0); }
+}
+.diamond-active { animation: diamond-pulse 1.4s ease-out infinite; }
+
+/* Pipeline-Animation der Homepage: scroll-gesteuert in components/landing/PipelineGraph.tsx */
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+.fade-in { animation: fade-in 0.35s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .diamond-active, .fade-in { animation: none; }
+  .pipeline-packet { display: none; }
 }
