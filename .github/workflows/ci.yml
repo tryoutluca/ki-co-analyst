@@ -1,0 +1,42 @@
+# CI: läuft bei jedem Push auf main/staging und bei Pull Requests.
+# Railway ("Wait for CI") deployt erst, wenn dieser Workflow grün ist.
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend-Unit-Tests
+    runs-on: ubuntu-latest
+    env:
+      # Module erzeugen LLM-Clients beim Import — Unit-Tests machen keine echten Aufrufe
+      OPENAI_API_KEY: sk-dummy
+      ANTHROPIC_API_KEY: sk-ant-dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: pytest tests -m "not integration" -q
+
+  frontend:
+    name: Frontend Type-Check & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint

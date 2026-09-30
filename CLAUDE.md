@@ -23,6 +23,18 @@ pytest tests/ -m "not integration" -q                          # all unit tests 
 python main.py ABBN.SW
 ```
 
+## Environments & Deployment
+
+| Branch | Railway environment | Database |
+|--------|--------------------|----------|
+| `staging` | staging (test system) | own Postgres + own volume |
+| `main` | production | production Postgres |
+
+- All new work is pushed to `staging` first. `main` only receives changes that were tested on staging (merge `staging` → `main`).
+- Never push directly to `main` without an explicit request from the user.
+- CI (`.github/workflows/ci.yml`) runs backend unit tests + frontend `tsc`/lint on every push to `main`/`staging`; Railway waits for green CI before deploying.
+- One-off DB cleanups (`scripts/*.py`) run inside the Railway container (`railway ssh`), first on staging, always with `--dry-run` first.
+
 ## Architecture
 
 This is a **LangGraph multi-agent financial analysis system** with a FastAPI backend and Next.js frontend.
