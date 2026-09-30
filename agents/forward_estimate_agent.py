@@ -92,6 +92,15 @@ Der Konsens ist Referenz, nicht Ziel. Deine eigene begründete Projektion
 ist das Ziel. Wenn du abweichst, ist das legitim und sogar erwünscht —
 aber begründe die Abweichung in deviation_from_consensus.
 
+=== MANAGEMENT-GUIDANCE & LAUFENDES GESCHÄFTSJAHR (stärkster Anker für FY+1) ===
+{guidance_block}
+Liegt eine QUANTIFIZIERTE Guidance für das erste Forward-Jahr vor (z.B. Umsatzspanne,
+Margenspanne), muss deine Projektion für dieses Jahr innerhalb der Spanne liegen.
+Abweichung nur mit konkretem, benanntem Grund in growth_rationale (z.B. Halbjahres-Ist
+liegt klar unter dem anteiligen Guidance-Pfad). Übernahmen/Desinvestitionen (im Ist des
+laufenden Jahres sichtbar) verändern das Umsatzniveau sprunghaft — dann ist ein Wachstum
+weit über dem historischen Schnitt korrekt und KEIN Plausibilitätsproblem.
+
 === QUARTALSSIGNAL (NUR Forward-Logik, NICHT für Actuals) ===
 {quarterly_block}
 
@@ -162,6 +171,36 @@ def _build_historical_block(hist_rows: list) -> str:
             f"EPS {rr.get('eps_adj','-')}, ROIC {rr.get('roic_pct','-')}%"
         )
     return "\n".join(lines) if lines else "Keine Ist-Jahre gefunden."
+
+
+def _build_guidance_block(fundamental_output: dict) -> str:
+    """Aktuellste Guidance (Zwischenbericht vor Jahresbericht) + Ist-Zahlen des laufenden GJ."""
+    ir = fundamental_output.get("_ir_analysis") if isinstance(fundamental_output, dict) else None
+    ir = ir if isinstance(ir, dict) else {}
+    lines: list[str] = []
+
+    latest = ir.get("guidance_latest")
+    if isinstance(latest, dict) and latest.get("statement"):
+        change = latest.get("change")
+        change_txt = f", {change}" if change and change != "not found" else ""
+        lines.append(f"Guidance FY{latest.get('fiscal_year')} ({latest.get('source')}{change_txt}): "
+                     f"\"{latest['statement']}\"")
+    for key in ("guidance_2026", "guidance_2027"):
+        val = ir.get(key)
+        if isinstance(val, str) and val.strip() and val != "not found" and "Zwischenbericht" not in val:
+            lines.append(f"Guidance {key[-4:]} (Jahresbericht): \"{val}\"")
+
+    for p in ir.get("ir_quarterly_periods") or []:
+        if not isinstance(p, dict):
+            continue
+        fields = [("Umsatz", "revenue_bn", " Mrd"), ("EBIT", "ebit_bn", " Mrd"),
+                  ("Reingewinn", "net_income_bn", " Mrd"), ("YoY", "yoy_comparable_growth_pct", "%")]
+        vals = [f"{name} {p[k]}{unit}" for name, k, unit in fields
+                if isinstance(p.get(k), (int, float))]
+        if vals:
+            lines.append(f"Ist {p.get('quarter', '?')}: " + ", ".join(vals))
+
+    return "\n".join(lines) if lines else "Keine Guidance und keine Zwischenberichte verfügbar."
 
 
 def _pick_base_year(hist_rows: list, oneoff_flags: list) -> dict | None:
@@ -278,7 +317,10 @@ def run_forward_estimate_agent(
         _dep    = _qs.get("prior_year_comp_depressed", False)
         _parts  = [f"Quartalssignal ({_metric}):"]
         if _ttm is not None:
-            _parts.append(f"  run_rate_ttm: {_ttm:.2f} Mrd (Summe letzte 4 Quartale) → Niveau-Anker für FY+1")
+            _months = _qs.get("period_months")
+            _basis = (f"{_qs.get('period_label') or f'{_months}M'} × 12/{_months} annualisiert"
+                      if _months else "Summe letzte 4 Quartale")
+            _parts.append(f"  run_rate_ttm: {_ttm:.2f} Mrd ({_basis}) → Niveau-Anker für FY+1")
         if _yoy is not None:
             _damp = " → STARK GEDÄMPFT (Basiseffekt/Zyklus)" if (_dep or _is_cyclical) else ""
             _parts.append(f"  YoY-Wachstum letztes Q: {_yoy:+.1f}%{_damp}")
@@ -339,6 +381,7 @@ def run_forward_estimate_agent(
             "thematic_block": thematic_block,
             "consensus_block": consensus_block,
             "quarterly_block": quarterly_block,
+            "guidance_block": _build_guidance_block(fundamental_output),
             "format_instructions": parser.get_format_instructions(),
         })
         output = result.model_dump()

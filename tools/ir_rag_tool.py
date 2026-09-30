@@ -217,7 +217,7 @@ _HTML_IR_KEYWORDS = [
 
 # URL path segments that indicate a report-index sub-page (EU/CH multi-level IR sites)
 _SUBPAGE_FOLLOW_PATTERNS = [
-    "financial-report", "annual-report", "half-year-report", "interim-report",
+    "financial-report", "annual-report", "half-year-report", "semi-annual-report", "interim-report",
     "results-and-presentations", "financial-results", "results",
     "publications", "downloads", "filings", "reports",
     "geschaeftsbericht", "jahresbericht", "halbjahresbericht", "berichte",
@@ -230,7 +230,7 @@ _EU_PDF_ANNUAL  = re.compile(
     re.I,
 )
 _EU_PDF_INTERIM = re.compile(
-    r"half[_\-\s]year|interim|halbjahr|semest|six[_\-\s]month|h1[-_\s\.]|h2[-_\s\.]",
+    r"half[_\-\s]year|semi[_\-\s]?annual|interim|halbjahr|semest|six[_\-\s]month|h1[-_\s\.]|h2[-_\s\.]",
     re.I,
 )
 
@@ -268,7 +268,10 @@ _PDF_TYPE_RULES: list[tuple[str, int, list[str], list[str]]] = [
     # Zwischenberichte VOR Jahresberichten prüfen: "Halbjahresbericht" enthält
     # "jahresbericht", "half-year financial statements" enthält "financial statements"
     # (kein "q4": "Q4 and full-year results" ist ein Jahresabschluss)
+    # "semi-annual report" enthält "annual report" (Rieter: H1-2026-Bericht wurde
+    # als Jahresbericht 2026 eingestuft → Quartalspfad lief nie)
     ("interim_report",       4, ["half-year", "half year", "h1 results", "h2 results",
+                                 "semi-annual", "semiannual", "semi annual", "semester",
                                  "interim", "halbjahr", "six month", "semestriel",
                                  "quarterly report", "nine month", "nine-month",
                                  "hy-report", "-hyr-", "first quarter", "second quarter",
@@ -314,10 +317,13 @@ STANDARD_QUERIES = [
     # 3. Bilanz (Für ROE, ROIC, Assets)
     "Consolidated Balance Sheet total assets equity liabilities cash debt",
     "Konsolidierte Bilanz Bilanzsumme Eigenkapital Nettoverschuldung",
-    
+
     # 4. Cashflow (Für FCF & Investitionen)
     "Consolidated Statement of Cash Flows operating investing free cash flow FCF",
     "Geldflussrechnung Investitionen Sachanlagen Capex",
+    # D&A (→ EBITDA, wenn nicht ausgewiesen) und Steuersatz (→ ROIC)
+    "Depreciation amortisation impairment of property plant equipment intangible assets",
+    "Income taxes tax expense profit before taxes effective tax rate",
     
     # 5. EPS & Guidance (Für Bewertung & Ausblick)
     "Adjusted EPS earnings per share bereinigter Gewinn pro Aktie restated",
@@ -1860,6 +1866,59 @@ _K_PER_QUERY             = 4        # Kandidaten pro Abfrage (Round-Robin)
 _FETCH_K                 = 400      # FAISS filtert nachträglich → grosser Kandidatenpool
 
 
+# Kennzahlenseite ("Key figures", "at a glance", "Kennzahlen") deterministisch finden,
+# statt auf die Ähnlichkeitssuche zu hoffen: Rieter 2025 — Umsatz, EBITDA, Net debt
+# standen alle auf Seite 2, die Extraktion lieferte trotzdem "not found".
+_KEY_FIGURE_GROUPS = [
+    re.compile(p, re.I) for p in (
+        r"\b(sales|revenues?|net sales|umsatz|nettoumsatz)\b",
+        r"\bEBITDA\b",
+        r"\b(operating )?EBIT\b|operating (profit|result|income)|betriebsergebnis",
+        r"net (profit|income|result)|reingewinn|konzerngewinn|jahresergebnis",
+        r"net (debt|liquidity|cash)|nettoverschuldung|nettoliquidit",
+        r"free cash ?flow|operating cash ?flow|geldfluss",
+        r"capital expenditure|capex|investitionen",
+        r"dividend|dividende",
+        r"equity ratio|eigenkapitalquote|shareholders.? equity",
+        r"order intake|auftragseingang|employees|mitarbeitende",
+    )
+]
+_KEY_FIGURES_MAX_PAGE  = 20      # Kennzahlen stehen vorne im Bericht
+_KEY_FIGURES_MIN_SCORE = 5       # mind. 5 der 10 Kennzahl-Gruppen auf einer Seite
+_KEY_FIGURES_MAX_CHARS = 6_000
+
+
+def _key_figures_chunks(docs: list, period_class: str, year) -> list:
+    """Alle Chunks der besten Kennzahlenseite je Quelldokument dieses Jahres."""
+    pages: dict[tuple, list] = {}
+    for d in docs:
+        md = d.metadata
+        if md.get("period_class") != period_class or md.get("fiscal_year") != year:
+            continue
+        page = md.get("page")
+        if not isinstance(page, int) or page > _KEY_FIGURES_MAX_PAGE:
+            continue
+        pages.setdefault((md.get("source"), page), []).append(d)
+
+    best: dict = {}   # source → (score, page, chunks)
+    for (src, page), chunks in pages.items():
+        text = " ".join(c.page_content for c in chunks)
+        score = sum(1 for rx in _KEY_FIGURE_GROUPS if rx.search(text))
+        if score < _KEY_FIGURES_MIN_SCORE:
+            continue
+        if src not in best or (score, -page) > (best[src][0], -best[src][1]):
+            best[src] = (score, page, chunks)
+
+    out, used = [], 0
+    for _, _, chunks in sorted(best.values(), key=lambda b: -b[0]):
+        for c in chunks:
+            if used + len(c.page_content) > _KEY_FIGURES_MAX_CHARS:
+                return out
+            out.append(c)
+            used += len(c.page_content)
+    return out
+
+
 def _build_rag_context(vs, period_class: str, char_cap: int) -> str:
     """Baut den LLM-Kontext aus dem Vectorstore.
 
@@ -1895,8 +1954,15 @@ def _build_rag_context(vs, period_class: str, char_cap: int) -> str:
                 hits = []
             ranked.append(hits)
 
-        selected: dict[int, list] = {}
+        # Kennzahlenseite zuerst — zählt aufs Jahresbudget, wird nicht verdrängt
+        pinned = [d for d in _key_figures_chunks(docs, period_class, year)
+                  if hash(d.page_content) not in seen]
         used = 0
+        for d in pinned:
+            seen.add(hash(d.page_content))
+            used += len(d.page_content) + 80
+
+        selected: dict[int, list] = {}
         for rank in range(_K_PER_QUERY):
             for qi, hits in enumerate(ranked):
                 if rank >= len(hits):
@@ -1910,9 +1976,14 @@ def _build_rag_context(vs, period_class: str, char_cap: int) -> str:
                 used += cost
                 selected.setdefault(qi, []).append(doc)
 
-        if not selected:
+        if not selected and not pinned:
             continue
         out.append(f"\n##### GESCHÄFTSJAHR {year if year is not None else '?'} #####")
+        if pinned:
+            out.append("\n=== KENNZAHLEN-ÜBERSICHT (vollständige Seite, höchste Priorität) ===")
+            for doc in pinned:
+                out.append(f"[Page {doc.metadata.get('page', 'N/A')} | {doc.metadata.get('source', 'N/A')} "
+                           f"| year={doc.metadata.get('fiscal_year', '')}]\n{doc.page_content}")
         for qi in sorted(selected):
             out.append(f"\n=== {STANDARD_QUERIES[qi].upper()} ===")
             for doc in selected[qi]:
@@ -2039,6 +2110,10 @@ sein ("89 490" = "89'490" = "89,490" = 89490). Viele Tabellen haben VOR den Wert
 "Notes"-Spalte mit Anmerkungsnummern: "Sales 3 89 490 91 354" = Anmerkung 3, 2025: 89490, \
 2024: 91354 — die Anmerkungsnummer NIE als Teil des Werts lesen. Klammern = negativ. \
 Spaltenreihenfolge aus der Kopfzeile ableiten (meist aktuelles Jahr zuerst).
+VORZEICHEN NETTOVERSCHULDUNG: net_debt_bn ist positiv bei Schulden, negativ bei Netto-Cash. \
+Bei der Zeile "Net debt (-) / net liquidity (+)" (bzw. "Nettoverschuldung (-) / Nettoliquidität (+)") \
+bedeutet ein NEGATIVER Tabellenwert Schulden und ein POSITIVER Netto-Cash → Vorzeichen je Jahr umdrehen: \
+"– 230.3" → net_debt_bn = +0.2303 ; "184.3" → net_debt_bn = -0.1843.
 HIERARCHIE: 1) Key Figures / Financial Highlights  2) Adjusted-Werte  3) Restated-Vorjahre
 
 Extrahiere Daten für JEDES im Context enthaltene Geschäftsjahr und gib eine Liste zurück (neuestes Jahr zuerst, max. 10 Jahre).
@@ -2063,6 +2138,10 @@ vom Kalenderjahr abweichendem GJ (z.B. 'Ende Januar'/'Ende September' im Bericht
       "free_cashflow_bn": <float or "not found">,
       "net_debt_bn": <float positiv=Schulden, negativ=Netto-Cash, or "not found">,
       "dividend_per_share": <float or "not found">,
+      "depreciation_amortization_bn": <float - Abschreibungen + Amortisation (+ Wertminderungen auf Sachanlagen/Immaterielles), aus Geldflussrechnung oder Anhang, or "not found">,
+      "capex_bn": <float - Investitionen in Sachanlagen (+ Immaterielles), positiv, or "not found">,
+      "total_equity_bn": <float - Total Eigenkapital (inkl. Minderheiten) aus der Bilanz, or "not found">,
+      "tax_rate_pct": <float - effektiver Steuersatz = Steueraufwand / Gewinn vor Steuern × 100, or "not found">,
       "data_quality": "<high/medium/low>"
     }}
   ],
@@ -2106,18 +2185,27 @@ sein ("89 490" = "89'490" = "89,490" = 89490). Viele Tabellen haben VOR den Wert
 "Notes"-Spalte mit Anmerkungsnummern: "Sales 3 89 490 91 354" = Anmerkung 3, 2025: 89490, \
 2024: 91354 — die Anmerkungsnummer NIE als Teil des Werts lesen. Klammern = negativ. \
 Spaltenreihenfolge aus der Kopfzeile ableiten (meist aktuelles Jahr zuerst).
+VORZEICHEN NETTOVERSCHULDUNG: net_debt_bn positiv = Schulden. Zeile "Net debt (-) / net liquidity (+)": \
+Vorzeichen umdrehen ("– 230.3" → +0.2303 ; "184.3" → -0.1843).
 HIERARCHIE: 1) Key Figures / Financial Highlights  2) Adjusted-Werte  3) kumulierte (YTD) Werte, falls das Quartal selbst nicht separat ausgewiesen ist.
 
 Der Context kann Auszüge aus MEHREREN Zwischenberichten enthalten (z.B. Q1 UND 9M desselben Jahres).
 Extrahiere für JEDEN im Context erkennbaren, distinkten Berichtszeitraum einen eigenen Eintrag \
-(neuestes Quartal zuerst). Gib KEINE Guidance- oder Consensus-Werte an (nur aus Jahresberichten).
+(neuestes Quartal zuerst). period_months = Länge des Zeitraums, auf den sich die Werte beziehen \
+(Q1 = 3, Halbjahr/H1/"January – June" = 6, 9M = 9). Keine Consensus-Werte.
+GUIDANCE: Der Ausblick im jüngsten Zwischenbericht ist die AKTUELLSTE Unternehmensprognose \
+(bestätigt/angehoben/gesenkt gegenüber dem Jahresbericht) — wörtlich zitieren, inkl. Zahlen/Spannen.
 
 Antworte NUR mit diesem JSON:
 {{
+  "guidance_fiscal_year": <int — Geschäftsjahr, auf das sich der Ausblick bezieht, or "not found">,
+  "guidance_current_fy": "<wörtliches Zitat des Ausblicks (Umsatz, Marge, …) or 'not found'>",
+  "guidance_change": "<confirmed/raised/lowered/new/not found>",
   "periods": [
     {{
       "fiscal_year": <int z.B. 2026>,
       "quarter": "<z.B. Q1 2026, H1 2026, 9M 2026>",
+      "period_months": <int 3/6/9>,
       "period_end": "<YYYY-MM-DD or 'not found'>",
       "revenue_bn": <float or "not found">,
       "revenue_currency": "<CHF/USD/EUR>",
@@ -2174,6 +2262,25 @@ _EMPTY_IR: dict = {
     "ir_quarterly_latest":       None, # dict with latest quarterly metrics, or None
     "ir_quarterly_periods":      [],   # list of dicts, one per interim period this fiscal year
 }
+
+
+def _interim_guidance(parsed_q: dict, periods: list[dict]) -> dict | None:
+    """Ausblick aus der Quartals-Extraktion → {fiscal_year, statement, change, source} oder None."""
+    statement = parsed_q.get("guidance_current_fy")
+    if not isinstance(statement, str) or not statement.strip() or statement.strip() == "not found":
+        return None
+    fy = parsed_q.get("guidance_fiscal_year")
+    if not isinstance(fy, int):
+        fy = next((p.get("fiscal_year") for p in periods if isinstance(p.get("fiscal_year"), int)), None)
+    if not isinstance(fy, int):
+        return None
+    label = str(periods[0].get("quarter") or "").strip() if periods else ""
+    return {
+        "fiscal_year": fy,
+        "statement":   statement.strip(),
+        "change":      parsed_q.get("guidance_change", "not found"),
+        "source":      f"Zwischenbericht {label}".strip(),
+    }
 
 
 @tool
@@ -2326,8 +2433,11 @@ def get_ir_analysis(ticker: str) -> dict:
     # ── Pass B: Quarterly extraction (all interim periods published this fiscal year) ──
     ir_quarterly_periods: list[dict] = []
     ir_quarterly_latest: dict | None = None
+    interim_guidance: dict | None = None
+    # Aus dem Vectorstore, nicht aus all_chunks — die sind bei einem Cache-Treffer
+    # leer, und jede Wiederholung innerhalb von 24h verlor so das laufende Jahr
     has_quarterly_chunks = any(
-        c.metadata.get("period_class") == "quarterly" for c in (all_chunks or [])
+        d.metadata.get("period_class") == "quarterly" for d in vs.docstore._dict.values()
     )
     if has_quarterly_chunks:
         quarterly_context = _build_context("quarterly", char_cap=_QUARTERLY_CONTEXT_CHARS)
@@ -2344,6 +2454,7 @@ def get_ir_analysis(ticker: str) -> dict:
             })
             parsed_q = _safe_parse(raw_q) or {}
             ir_quarterly_periods = parsed_q.get("periods", [])
+            interim_guidance = _interim_guidance(parsed_q, ir_quarterly_periods)
         except Exception as exc:
             print(f"      IR Quarterly-Extraktion fehlgeschlagen ({ticker}): {exc}")
 
@@ -2389,6 +2500,13 @@ def get_ir_analysis(ticker: str) -> dict:
         except Exception as exc:
             result = {**_EMPTY_IR, "error": str(exc)}
 
+    if interim_guidance:
+        # Der Ausblick im jüngsten Zwischenbericht ersetzt den (älteren) aus dem
+        # Jahresbericht — Rieter: Guidance 2026 steht erst im H1-Bericht.
+        key = f"guidance_{interim_guidance['fiscal_year']}"
+        if key in _EMPTY_IR:
+            result[key] = f"{interim_guidance['statement']} [{interim_guidance['source']}]"
+    result["guidance_latest"]      = interim_guidance
     result["ir_annual_years"]      = ir_annual_years
     result["ir_quarterly_latest"]  = ir_quarterly_latest
     result["ir_quarterly_periods"] = ir_quarterly_periods

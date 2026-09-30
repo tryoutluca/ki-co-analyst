@@ -276,9 +276,12 @@ def _upsert_one(conn, row: dict) -> int:
 
     if existing:
         existing_prio = _SOURCE_PRIORITY.get(existing["source"] or "yfinance", 2)
-        if source == "ir_pdf":
-            # ir_pdf only fills NULLs — das Label der bereits gespeicherten
-            # (i.d.R. höher priorisierten) Zeile bleibt unangetastet.
+        if source == "ir_pdf" or new_prio < existing_prio:
+            # ir_pdf und niedriger priorisierte Quellen füllen nur NULLs — das
+            # Label der gespeicherten Zeile bleibt unangetastet. Vorher wurde eine
+            # niedriger priorisierte Zeile (z.B. yfinance nach ir_pdf) komplett
+            # verworfen, auch für Felder, die der Geschäftsbericht nicht liefert
+            # (D&A, Eigenkapital, Invested Capital, ROIC → Lücken "seit Tag 1").
             updates = []
             params  = []
             for col in _FINANCIAL_COLS:

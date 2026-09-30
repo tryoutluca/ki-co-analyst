@@ -662,6 +662,29 @@ def get_historical_multiples(ticker: str) -> dict:
         return {**empty_result, "error": str(e)}
 
 
+# Felder, die yfinance für die jüngsten ~4 Jahre liefern kann, IR-PDFs aber oft nicht
+_YF_FILLABLE = ("ebitda_bn", "da_bn", "total_equity_bn", "roic_pct")
+_YF_GAP_FILL_TTL_S = 24 * 3600
+_yf_gap_fill_attempts: dict[str, float] = {}
+
+
+def _yf_gap_fill_due(ticker: str, rows: list[dict]) -> bool:
+    """True, wenn in den jüngsten 4 Jahren Felder fehlen, die yfinance liefern
+    kann, und für diesen Ticker in den letzten 24 h noch nicht nachgeladen wurde
+    (sonst würde jeder Aufruf yfinance erneut abfragen, auch wenn yfinance die
+    Lücke selbst nicht schliessen kann)."""
+    import time as _time
+    annual = sorted((r for r in rows if r.get("fiscal_year")), key=lambda r: r["fiscal_year"])[-4:]
+    has_gaps = any(r.get(f) is None for r in annual for f in _YF_FILLABLE)
+    if not has_gaps:
+        return False
+    last = _yf_gap_fill_attempts.get(ticker.upper(), 0)
+    if _time.time() - last < _YF_GAP_FILL_TTL_S:
+        return False
+    _yf_gap_fill_attempts[ticker.upper()] = _time.time()
+    return True
+
+
 def _db_rows_to_hist_dict(rows: list[dict]) -> dict:
     """Convert financial_db annual rows to the get_historical_financials() dict shape."""
     result = {}
@@ -686,6 +709,15 @@ def _db_rows_to_hist_dict(rows: list[dict]) -> dict:
         shares = r.get("shares_bn")
         eps_a = r.get("eps_adj")
         dps_v = r.get("dps")
+
+        # Exakt ableitbare Werte ergänzen (keine Schätzung): IR-Zeilen haben oft
+        # nur die EBIT-Marge (kein EBIT absolut) und kein EBITDA, weil viele
+        # Firmen (z.B. Nestlé) kein EBITDA ausweisen → EBIT + D&A.
+        ebit_m = r.get("ebit_margin_pct")
+        if ebit is None and rev and ebit_m is not None:
+            ebit = round(rev * ebit_m / 100, 4)
+        if eb is None and ebit is not None and da is not None:
+            eb = round(ebit + abs(da), 4)
 
         def sd(num, den, pct=False):
             try:
@@ -817,8 +849,14 @@ def get_historical_financials(ticker: str) -> dict:
     # ── 1. DB-Cache prüfen (Menge + Aktualität) ──────────────────────────────
     if is_cache_fresh(ticker, min_annual_years=4):
         rows = get_annual_history(ticker, n_years=10)
-        print(f"      ✅ Cache-Hit (frisch): {len(rows)} Jahre für {ticker}")
-        return _db_rows_to_hist_dict(rows)
+        # Frischer Cache mit Lücken, die yfinance füllen könnte (z.B. Zeilen nur
+        # aus Geschäftsberichten ohne D&A/Eigenkapital) → einmal pro Prozess und
+        # Tag yfinance nachladen; der Upsert füllt nur leere Felder auf.
+        if _yf_gap_fill_due(ticker, rows):
+            print(f"      ♻️ Cache frisch, aber Lücken (EBITDA/D&A/Eigenkapital/ROIC) — ergänze aus yfinance...")
+        else:
+            print(f"      ✅ Cache-Hit (frisch): {len(rows)} Jahre für {ticker}")
+            return _db_rows_to_hist_dict(rows)
 
     if has_sufficient_data(ticker, min_annual_years=4):
         print(f"      ♻️ Cache-Refresh (stale): DB-Daten für {ticker} veraltet — hole aktuelle Daten...")
@@ -966,7 +1004,6 @@ def get_historical_financials(ticker: str) -> dict:
                                  "Stockholders Equity",
                                  "Total Equity Gross Minority Interest")
             assets_raw = get_val(bs, year, "Total Assets")
-            ic_raw     = get_val(bs, year, "Invested Capital", "Net PPE")
 
             revenue      = to_bn(revenue_raw)
             gross_profit = to_bn(gross_profit_raw)
@@ -986,7 +1023,6 @@ def get_historical_financials(ticker: str) -> dict:
             total_cash   = to_bn(cash_raw)
             equity       = to_bn(equity_raw)
             assets       = to_bn(assets_raw)
-            ic           = to_bn(ic_raw)
 
             ebitda = None
             if ebit is not None and da is not None:
@@ -999,6 +1035,14 @@ def get_historical_financials(ticker: str) -> dict:
             net_debt = None
             if total_debt is not None and total_cash is not None:
                 net_debt = round(total_debt - total_cash, 4)
+
+            # Invested Capital = Eigenkapital + Nettoverschuldung (wie im IR-Pfad).
+            # Yahoos "Invested Capital" ist z.B. bei Nestlé identisch mit dem
+            # Eigenkapital (ohne Schulden) → ROIC war faktisch eine EK-Rendite
+            # (~29 % statt ~13 %); der Fallback "Net PPE" ist gar kein Kapital-Mass.
+            ic = None
+            if equity is not None and net_debt is not None and equity + net_debt > 0:
+                ic = round(equity + net_debt, 4)
 
             eps = None
             if net_income is not None and shares_bn and shares_bn > 0:

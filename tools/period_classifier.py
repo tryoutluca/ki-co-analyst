@@ -72,6 +72,8 @@ def classify_pdf_period(title: str) -> Optional[PeriodType]:
     if stripped in ("10-Q", "6-K", "10-Q/A"):
         return "quarterly"
 
+    # "Semi-Annual Report" enthält "annual report" → vorab auf half-year normalisieren
+    title = re.sub(r"semi[\s_\-]?annual", "half-year", title, flags=re.I)
     is_annual  = bool(_ANNUAL_RX.search(title))
     is_interim = bool(_INTERIM_RX.search(title))
 

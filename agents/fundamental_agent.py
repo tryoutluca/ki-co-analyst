@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -191,19 +192,24 @@ def run_fundamental_agent(
         try:
             rev_q = ir_quarterly_latest.get("revenue_bn")
             yoy   = ir_quarterly_latest.get("yoy_comparable_growth_pct")
-            # QoQ from the next-most-recent extracted period, if available
+            months = _interim_months(ir_quarterly_latest)
+            # QoQ nur zwischen gleich langen Perioden (H1 vs. Q1 wäre kein Wachstum)
             qoq = None
-            if len(ir_quarterly_periods) > 1:
+            if len(ir_quarterly_periods) > 1 and _interim_months(ir_quarterly_periods[1]) == months:
                 rev_prev = ir_quarterly_periods[1].get("revenue_bn")
                 if isinstance(rev_q, (int, float)) and isinstance(rev_prev, (int, float)) and rev_prev:
                     qoq = round((rev_q / rev_prev - 1) * 100, 2)
             _ir_qs = {
                 "ticker":                  ticker,
+                "period_label":            ir_quarterly_latest.get("quarter"),
                 "source_metric":           "revenue",
                 "raw_q_value":             rev_q if isinstance(rev_q, (int, float)) else None,
+                "period_months":           months,
                 "yoy_comparable_growth":   yoy if isinstance(yoy, (int, float)) else None,
                 "qoq_growth":              qoq,
-                "run_rate_ttm":            round(rev_q * 4, 3) if isinstance(rev_q, (int, float)) else None,
+                # Annualisiert nach Periodenlänge — vorher pauschal ×4, bei einem
+                # Halbjahr (Rieter H1 2026: 0.577) also 2.3 statt 1.15 Mrd
+                "run_rate_ttm":            round(rev_q * 12 / months, 3) if isinstance(rev_q, (int, float)) else None,
                 "prior_year_comp_depressed": False,
                 "period_end":              ir_quarterly_latest.get("period_end"),
                 "quarter":                 ir_quarterly_latest.get("quarter"),
@@ -255,6 +261,11 @@ def run_fundamental_agent(
                     "net_debt_bn":        yr.get("net_debt_bn"),
                     "eps_adj":            yr.get("adjusted_eps"),
                     "dps":                yr.get("dividend_per_share"),
+                    # Für EBITDA (= EBIT + D&A, falls nicht ausgewiesen) und ROIC
+                    "da_bn":              yr.get("depreciation_amortization_bn"),
+                    "capex_bn":           yr.get("capex_bn"),
+                    "total_equity_bn":    yr.get("total_equity_bn"),
+                    "roic_pct":           _roic_from_ir_year(yr),
                 })
             saved = upsert_financials(ir_rows)
             print(f"      DB: {saved} IR-Jahreszeilen gespeichert")
@@ -283,7 +294,12 @@ def run_fundamental_agent(
                     # dieselbe Periode).
                     assigned_year, assigned_q = assign_fiscal_label(ticker, period_end, "quarterly")
                     fiscal_year = assigned_year if assigned_year is not None else fiscal_year
-                    quarter     = assigned_q if assigned_q is not None else quarter
+                    # Kumulierte Perioden (H1/9M) NICHT als Einzelquartal Q2/Q3
+                    # labeln — sonst stünde ein 6-Monats-Umsatz als Quartal in der DB
+                    if _interim_months(p) == 3:
+                        quarter = assigned_q if assigned_q is not None else quarter
+                    else:
+                        quarter = "H1" if _interim_months(p) == 6 else "9M"
                 ir_q_rows.append({
                     "ticker":             ticker,
                     "fiscal_year":        fiscal_year,
@@ -598,6 +614,38 @@ def run_fundamental_agent(
 
 # ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 
+def _interim_months(period: dict) -> int:
+    """Länge einer Zwischenperiode in Monaten (3/6/9) aus period_months oder dem Label."""
+    m = period.get("period_months")
+    if isinstance(m, (int, float)) and int(m) in (3, 6, 9):
+        return int(m)
+    label = str(period.get("quarter") or "").upper()
+    if re.search(r"\bH1\b|6M|HALF|HALBJAHR|SEMI", label):
+        return 6
+    if re.search(r"9M|NINE", label):
+        return 9
+    return 3
+
+
+def _roic_from_ir_year(yr: dict) -> float | None:
+    """ROIC = EBIT × (1 − Steuersatz) / (Eigenkapital + Nettoverschuldung) aus
+    einem IR-Jahr — gleiche Definition wie im yfinance-Pfad (NOPAT / Invested
+    Capital). None, wenn eine Komponente fehlt; nie mit Annahmen aufgefüllt."""
+    def f(v):
+        try:
+            return float(v) if v not in (None, "", "-", "n/v", "not found") else None
+        except (TypeError, ValueError):
+            return None
+    ebit, tax = f(yr.get("ebit_bn")), f(yr.get("tax_rate_pct"))
+    eq, nd = f(yr.get("total_equity_bn")), f(yr.get("net_debt_bn"))
+    if ebit is None or tax is None or eq is None or nd is None or not (0 <= tax < 60):
+        return None
+    ic = eq + nd
+    if ic <= 0:
+        return None
+    return round(ebit * (1 - tax / 100) / ic * 100, 1)
+
+
 def _recent_years(hist_data: dict, n: int = 5) -> dict:
     """Beschränkt hist_data auf die n jüngsten Jahre (für Sub-Agent-Prompts)."""
     if not hist_data:
@@ -808,7 +856,9 @@ def build_full_financials(
             "source":            d.get("source", "yfinance"),
         })
     result.extend(forward_estimates or [])
-    return result
+    # E-Zeilen deterministisch vervollständigen (KGV, EBIT-%, FCF, ROIC … aus Ist-Quoten)
+    from tools.estimate_revision import complete_forward_rows
+    return complete_forward_rows(result, current_price)
 
 
 def _build_valuation_table(all_multiples: dict, sector: str, ticker: str, hist_avgs: dict | None = None) -> list:

@@ -102,6 +102,140 @@ def detect_oneoff_effects(full_financials: list) -> list:
     return flags
 
 
+def _as_dict(row) -> dict:
+    return row if isinstance(row, dict) else (row.model_dump() if hasattr(row, "model_dump") else {})
+
+
+def _reference_ratios(full_fin: list) -> dict:
+    """Referenz-Quoten aus dem 3-Jahres-Median der Ist-Jahre.
+
+    Median statt "letztes Ist" glättet Sondereffekte (z.B. Veräusserungs-
+    gewinne, die EPS/ROIC eines einzelnen Jahres verzerren). Bei <3
+    Ist-Jahren wird genommen, was verfügbar ist.
+    """
+    actual_rows = [r for r in (_as_dict(x) for x in full_fin or []) if r.get("type") == "A"]
+    last_actual = actual_rows[-1] if actual_rows else None
+    recent = actual_rows[-3:]
+
+    def _median(vals):
+        vals = sorted(v for v in vals if isinstance(v, (int, float)))
+        if not vals:
+            return None
+        n, mid = len(vals), len(vals) // 2
+        return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+    def _median_ratio(key, per_revenue=False):
+        out = []
+        for r in recent:
+            v = _num(r.get(key))
+            if v is None:
+                continue
+            if per_revenue:
+                rev = _num(r.get("revenue_bn"))
+                if not rev or rev <= 0:
+                    continue
+                v = v / rev
+            out.append(v)
+        return _median(out)
+
+    return {
+        "last_actual":  last_actual,
+        "fcf_margin":   _median_ratio("fcf_bn", per_revenue=True),
+        "capex_margin": _median_ratio("capex_bn", per_revenue=True),
+        "ebit_margin":  _median_ratio("ebit_margin_pct"),
+        "nd_ebitda":    _median_ratio("nd_ebitda"),
+        "roic":         _median_ratio("roic_pct"),
+        # DPS: jüngster Wert (Dividenden sind sticky, kein Median nötig)
+        "dps":          _num(last_actual.get("dps")) if last_actual else None,
+        "basis": (f"3-Jahres-Median ({recent[0].get('year', '?')}–{recent[-1].get('year', '?')})"
+                  if len(recent) >= 2 else "letztes Ist"),
+    }
+
+
+def _fill_derived_fields(new_row: dict, rev, ebitda_val, refs: dict) -> list:
+    """Füllt fehlende E-Kennzahlen aus Ist-Quoten. Überschreibt nie vorhandene
+    Werte. Returns: Notizen zur Methodentransparenz (für die source-Spalte)."""
+    notes = []
+    basis = refs["basis"]
+    last_actual = refs["last_actual"]
+
+    # EBIT-Marge: vorhanden lassen, sonst aus Referenz fortschreiben
+    if _num(new_row.get("ebit_margin_pct")) is None and refs["ebit_margin"] is not None:
+        new_row["ebit_margin_pct"] = round(refs["ebit_margin"], 2)
+        notes.append(f"EBIT-%≈{basis}")
+    ebit_m = _num(new_row.get("ebit_margin_pct"))
+    if rev is not None and ebit_m is not None and _num(new_row.get("ebit_bn")) is None:
+        new_row["ebit_bn"] = round(rev * ebit_m / 100.0, 4)
+
+    # FCF und Capex: Median-Marge × Umsatz
+    if _num(new_row.get("fcf_bn")) is None and refs["fcf_margin"] is not None and rev is not None:
+        new_row["fcf_bn"] = round(rev * refs["fcf_margin"], 4)
+        notes.append(f"FCF≈FCF-Marge {basis}")
+    if _num(new_row.get("capex_bn")) is None and refs["capex_margin"] is not None and rev is not None:
+        new_row["capex_bn"] = round(rev * refs["capex_margin"], 4)
+
+    # DPS: konstant fortschreiben (konservativ, kein Wachstum unterstellt)
+    if _num(new_row.get("dps")) is None and refs["dps"] is not None:
+        new_row["dps"] = refs["dps"]
+        notes.append("DPS≈letztes Ist")
+
+    # ND/EBITDA: Net Debt konstant halten, durch EBITDA teilen
+    if _num(new_row.get("nd_ebitda")) is None:
+        la_nd = _num(last_actual.get("net_debt_bn")) if last_actual else None
+        if la_nd is not None and ebitda_val and ebitda_val > 0:
+            new_row["net_debt_bn"] = la_nd
+            new_row["nd_ebitda"] = round(la_nd / ebitda_val, 2)
+            notes.append("ND/EBITDA≈Net Debt konstant")
+        elif refs["nd_ebitda"] is not None:
+            new_row["nd_ebitda"] = round(refs["nd_ebitda"], 2)
+            notes.append(f"ND/EBITDA≈{basis}")
+
+    # ROIC: aus Ist fortschreiben (konservativ)
+    if _num(new_row.get("roic_pct")) is None and refs["roic"] is not None:
+        new_row["roic_pct"] = round(refs["roic"], 2)
+        notes.append(f"ROIC≈{basis}")
+
+    # Net Income aus EPS × implizite Aktienzahl (NI/EPS des letzten Ist)
+    if _num(new_row.get("net_income_bn")) is None and last_actual is not None:
+        la_ni, la_eps = _num(last_actual.get("net_income_bn")), _num(last_actual.get("eps_adj"))
+        new_eps = _num(new_row.get("eps_adj"))
+        if la_ni and la_eps and new_eps is not None:
+            new_row["net_income_bn"] = round(la_ni / la_eps * new_eps, 4)
+            notes.append("NI≈implizite Aktienzahl")
+    return notes
+
+
+def complete_forward_rows(full_fin: list, current_price: float | None = None) -> list:
+    """Vervollständigt die E-Zeilen einer Finanzübersicht deterministisch:
+    fehlende Kennzahlen aus Ist-Quoten (EBIT-%, FCF, Capex, DPS, ND/EBITDA,
+    ROIC, Reingewinn) und KGV = Kurs / EPS. A-Zeilen bleiben unverändert.
+    Abgeleitete Werte werden in der source-Spalte als "abgeleitet: …" markiert.
+    """
+    rows = [_as_dict(r) for r in full_fin or []]
+    refs = _reference_ratios(rows)
+    out = []
+    for r in rows:
+        if r.get("type") != "E":
+            out.append(r)
+            continue
+        new_row = copy.deepcopy(r)
+        rev = _num(new_row.get("revenue_bn"))
+        ebitda_val = _num(new_row.get("ebitda_bn"))
+        if ebitda_val is None and rev is not None and _num(new_row.get("ebitda_margin_pct")) is not None:
+            ebitda_val = round(rev * _num(new_row["ebitda_margin_pct"]) / 100.0, 4)
+            new_row["ebitda_bn"] = ebitda_val
+        notes = _fill_derived_fields(new_row, rev, ebitda_val, refs)
+
+        eps = _num(new_row.get("eps_adj"))
+        if _num(new_row.get("pe_ratio")) is None and current_price and eps and eps > 0:
+            new_row["pe_ratio"] = round(current_price / eps, 1)
+
+        if notes and "abgeleitet:" not in str(new_row.get("source", "")):
+            new_row["source"] = f"{new_row.get('source', '')} | abgeleitet: {', '.join(notes)}".lstrip(" |")
+        out.append(new_row)
+    return out
+
+
 def apply_estimate_adjustments(
     fundamental_output: dict,
     adjustments: list,
@@ -213,62 +347,8 @@ def apply_estimate_adjustments(
         _MAX_TOTAL_DELTA_PCT,
     )
 
-    # ── Referenz-Ratios aus 3-Jahres-Median der Actuals ────────────────────
-    # Median statt "letztes Ist" glättet Sondereffekte (z.B. Veräußerungs-
-    # gewinne, die EPS/ROIC eines einzelnen Jahres verzerren). Bei <3
-    # Actual-Jahren wird genommen, was verfügbar ist.
-    actual_rows = []
-    for row in full_fin:
-        r = row if isinstance(row, dict) else (
-            row.model_dump() if hasattr(row, "model_dump") else {})
-        if r.get("type") == "A":
-            actual_rows.append(r)
-
-    # Letzte Actual-Zeile (für Net-Debt-Level, Aktienzahl-Ableitung)
-    last_actual = actual_rows[-1] if actual_rows else None
-
-    # Die jüngsten bis zu 3 Actual-Jahre für die Median-Bildung
-    recent_actuals = actual_rows[-3:] if actual_rows else []
-
-    def _median(vals):
-        vals = sorted(v for v in vals if isinstance(v, (int, float)))
-        if not vals:
-            return None
-        n = len(vals)
-        mid = n // 2
-        return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
-
-    def _median_ratio(key, transform=None):
-        out = []
-        for r in recent_actuals:
-            v = _num(r.get(key))
-            if v is None:
-                continue
-            if transform:
-                v = transform(r, v)
-                if v is None:
-                    continue
-            out.append(v)
-        return _median(out)
-
-    # FCF-Marge und Capex-Marge brauchen Umsatz-Bezug → transform
-    def _to_margin(r, v):
-        rev = _num(r.get("revenue_bn"))
-        return (v / rev) if (rev and rev > 0) else None
-
-    ref_fcf_margin = _median_ratio("fcf_bn", _to_margin)
-    ref_capex_margin = _median_ratio("capex_bn", _to_margin)
-    ref_ebit_margin = _median_ratio("ebit_margin_pct")
-    ref_nd_ebitda = _median_ratio("nd_ebitda")
-    ref_roic = _median_ratio("roic_pct")
-    # DPS: jüngster Wert (Dividenden sind sticky, kein Median nötig)
-    ref_dps = _num(last_actual.get("dps")) if last_actual else None
-
-    _ratio_basis = (
-        f"3-Jahres-Median ({recent_actuals[0].get('year','?')}–"
-        f"{recent_actuals[-1].get('year','?')})"
-        if len(recent_actuals) >= 2 else "letztes Ist"
-    )
+    refs = _reference_ratios(full_fin)
+    last_actual = refs["last_actual"]
 
     # ── Revidierte Forward-Zeilen bauen (ALLE Kennzahlen befüllen) ──────────
     revised_rows = []
@@ -304,54 +384,8 @@ def apply_estimate_adjustments(
         if eps is not None and eps_delta:
             new_row["eps_adj"] = round(eps * (1 + eps_delta / 100.0), 3)
 
-        # 5) EBIT-Marge: vorhanden lassen, sonst aus Referenz fortschreiben
-        if _num(new_row.get("ebit_margin_pct")) is None and ref_ebit_margin is not None:
-            new_row["ebit_margin_pct"] = round(ref_ebit_margin, 2)
-            derived_notes.append(f"EBIT-%≈{_ratio_basis}")
-        # EBIT absolut aus Umsatz × EBIT-Marge
-        ebit_m = _num(new_row.get("ebit_margin_pct"))
-        if rev is not None and ebit_m is not None and _num(new_row.get("ebit_bn")) is None:
-            new_row["ebit_bn"] = round(rev * ebit_m / 100.0, 4)
-
-        # 6) FCF: aus FCF-Marge des letzten Ist-Jahres × revidiertem Umsatz
-        if _num(new_row.get("fcf_bn")) is None and ref_fcf_margin is not None and rev is not None:
-            new_row["fcf_bn"] = round(rev * ref_fcf_margin, 4)
-            derived_notes.append(f"FCF≈FCF-Marge {_ratio_basis}")
-
-        # 7) Capex analog
-        if _num(new_row.get("capex_bn")) is None and ref_capex_margin is not None and rev is not None:
-            new_row["capex_bn"] = round(rev * ref_capex_margin, 4)
-
-        # 8) DPS: konstant fortschreiben (konservativ, kein Wachstum unterstellt)
-        if _num(new_row.get("dps")) is None and ref_dps is not None:
-            new_row["dps"] = ref_dps
-            derived_notes.append("DPS≈letztes Ist")
-
-        # 9) ND/EBITDA: Net Debt konstant halten, durch revidiertes EBITDA teilen
-        if _num(new_row.get("nd_ebitda")) is None:
-            la_nd = _num(last_actual.get("net_debt_bn")) if last_actual else None
-            if la_nd is not None and ebitda_val and ebitda_val > 0:
-                new_row["net_debt_bn"] = la_nd
-                new_row["nd_ebitda"] = round(la_nd / ebitda_val, 2)
-                derived_notes.append("ND/EBITDA≈Net Debt konstant")
-            elif ref_nd_ebitda is not None:
-                new_row["nd_ebitda"] = round(ref_nd_ebitda, 2)
-                derived_notes.append(f"ND/EBITDA≈{_ratio_basis}")
-
-        # 10) ROIC: aus letztem Ist fortschreiben (konservativ)
-        if _num(new_row.get("roic_pct")) is None and ref_roic is not None:
-            new_row["roic_pct"] = round(ref_roic, 2)
-            derived_notes.append(f"ROIC≈{_ratio_basis}")
-
-        # 11) Net Income aus EPS ableiten falls möglich (Shares ≈ NI/EPS aus Ist)
-        if _num(new_row.get("net_income_bn")) is None and last_actual is not None:
-            la_ni = _num(last_actual.get("net_income_bn"))
-            la_eps = _num(last_actual.get("eps_adj"))
-            new_eps = _num(new_row.get("eps_adj"))
-            if la_ni and la_eps and la_eps != 0 and new_eps is not None:
-                implied_shares = la_ni / la_eps
-                new_row["net_income_bn"] = round(implied_shares * new_eps, 4)
-                derived_notes.append("NI≈implizite Aktienzahl")
+        # 5–11) Fehlende Kennzahlen aus Ist-Quoten ableiten (gemeinsame Logik)
+        derived_notes += _fill_derived_fields(new_row, rev, ebitda_val, refs)
 
         # Quelle + Methoden-Transparenz
         base_src = str(r.get("source", ""))

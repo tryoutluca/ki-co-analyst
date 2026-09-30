@@ -78,13 +78,10 @@ INVESTMENT CASE Regeln:
 - Kein Punkt ohne Zahl — "günstige Bewertung" ist NICHT ausreichend
 - Letzter Punkt immer: Katalysator der die These auslöst
 
-VOLLSTÄNDIGE FINANZÜBERSICHT (full_financials) — EINZIGE Finanztabelle im Memo:
-- Übernehme die Jahres-Tabelle (historische A-Jahre + 3 E-Jahre) exakt aus dem
-  Fundamental-Agent Output — keine zweite, separat konstruierte Schätz-Tabelle.
-- Kennzeichne Schätzjahre explizit als (E) im year-Feld
-- Die Felder source müssen den Disclaimer enthalten:
-  "A = Istzahlen | E = Schätzung (Quelle: [source]) | "
-- Falls full_financials fehlen: leere Liste zurückgeben
+VOLLSTÄNDIGE FINANZÜBERSICHT (full_financials):
+- Wird vom System deterministisch eingesetzt. Gib für full_financials eine
+  LEERE Liste [] zurück — die Tabelle im Kontext dient dir nur als Grundlage
+  für deine Begründung.
 
 PEER-VERGLEICH (peer_comparison):
 - Übernehme die Peer-Tabelle exakt aus dem Fundamental-Agent Output
@@ -568,9 +565,8 @@ def _format_aggregation_block(
         ifv = revised_estimates.get("indicative_fair_value_adjusted")
         re_block += (
             "\nANWEISUNGEN:\n"
-            "  1. Nutze in full_financials die REVIDIERTEN Werte für "
-            "die Forward-Jahre (E) und markiere sie in der source-Spalte als "
-            "'Makro-revidiert'.\n"
+            "  1. Die Finanztabelle (full_financials) setzt das System "
+            "deterministisch ein — du gibst sie nicht aus.\n"
             "  2. Erwähne die wichtigsten Treiber + Transmission-Chains explizit "
             "im final_reasoning unter 'Makro:'.\n"
         )
@@ -812,7 +808,7 @@ def synthesize_memo(
 
     fin_context = ""
     if full_financials:
-        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (einzige Finanztabelle, direkt übernehmen):\n"
+        fin_context = "\n### VOLLSTÄNDIGE FINANZÜBERSICHT (Kontext für die Begründung — nicht ausgeben):\n"
         fin_context += json.dumps(full_financials, ensure_ascii=False) + "\n"
 
     peer_context = ""
@@ -888,9 +884,7 @@ AUFGABEN:
 5. Übernimm conviction_killers aus dem Risk-Agent
 6. Treffe finale Empfehlung mit dynamisch gewichtetem Conviction Level
 7. final_reasoning im Format: "Fundamental: [X] | Makro: [Y] | Risk: [Z] | Gewichtetes Fazit: [W]"
-8. Übernimm full_financials EXAKT aus dem Kontext oben (keine Änderungen) — dies
-   ist die EINZIGE Finanz-/Schätz-Tabelle im Memo, baue KEINE zweite eigene
-   Konsens-Tabelle daneben.
+8. full_financials: leere Liste [] — die Finanztabelle setzt das System ein.
 9. Übernimm peer_comparison EXAKT aus dem Kontext oben (keine Änderungen)
 10. Erwähne in final_reasoning ob Peer-Bewertung Empfehlung stützt oder widerspricht
 11. ⚠️ NUTZE die AGGREGATIONS-DIREKTIVE oben — die finalen Gewichte und (falls
@@ -948,7 +942,10 @@ Gib das Ergebnis als JSON zurück."""),
 
     # Neue Felder direkt aus fundamental_output übernehmen wenn LLM sie weglässt
     if isinstance(result, dict):
-        if not result.get("full_financials") and full_financials:
+        # Finanzübersicht IMMER deterministisch (Fundamental-Agent + Thesen-
+        # Zeilen + complete_forward_rows). Vorher schrieb das LLM die Tabelle
+        # ab und liess dabei Werte fallen (z.B. KGV der E-Jahre trotz EPS+Kurs).
+        if full_financials:
             result["full_financials"] = full_financials
         if not result.get("peer_comparison") and peer_comparison:
             result["peer_comparison"] = peer_comparison

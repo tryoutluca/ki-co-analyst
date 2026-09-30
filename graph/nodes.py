@@ -125,6 +125,33 @@ def thematic_node(state: AnalysisState) -> dict:
         }
 
 
+def _apply_thesis_rows(f_out: dict, fe: dict | None) -> dict:
+    """Ersetzt die E-Zeilen der Finanzübersicht durch die Wachstumsthese des
+    Forward-Estimate-Agenten und vervollständigt sie deterministisch (KGV,
+    EBIT-%, FCF, ROIC … aus Ist-Quoten).
+
+    Wird vom forward_estimate-Knoten UND nach einer Fundamental-Kritik-Runde
+    aufgerufen — die Kritik-Runde baut den Fundamental-Output neu und hätte die
+    Thesen-Zeilen sonst durch die schwächere IR-Konsens-Heuristik ersetzt.
+    """
+    from tools.estimate_revision import complete_forward_rows
+
+    full_fin = f_out.get("_full_financials")
+    if not (isinstance(full_fin, list) and fe and fe.get("projections")):
+        return f_out
+    data_cache = f_out.get("_data_cache") or {}
+    new_e_rows = build_forward_rows_from_thesis(
+        projections   = fe["projections"],
+        all_multiples = f_out.get("all_multiples") or data_cache.get("all_multiples"),
+        ir_analysis   = f_out.get("_ir_analysis"),
+        stock_info    = data_cache.get("stock_info"),
+        current_price = f_out.get("current_price"),
+    )
+    actual_rows = [r for r in full_fin if r.get("type") != "E"]
+    completed = complete_forward_rows(actual_rows + new_e_rows, f_out.get("current_price"))
+    return {**f_out, "_full_financials": completed}
+
+
 def forward_estimate_node(state: AnalysisState) -> dict:
     """
     Forward-Estimate-Agent: leitet die Forward-Estimates aus einer
@@ -176,19 +203,7 @@ def forward_estimate_node(state: AnalysisState) -> dict:
         # diesem Knoten). Jetzt, wo die echte Wachstumsthese vorliegt, werden
         # die E-Zeilen dadurch ersetzt — sonst zeigt das Memo zwei
         # widersprüchliche Forward-Projektionen für dieselben Jahre.
-        updated_f_out = f_out
-        full_fin = f_out.get("_full_financials")
-        if isinstance(full_fin, list) and fe.get("projections"):
-            data_cache = f_out.get("_data_cache") or {}
-            new_e_rows = build_forward_rows_from_thesis(
-                projections   = fe["projections"],
-                all_multiples = f_out.get("all_multiples") or data_cache.get("all_multiples"),
-                ir_analysis   = f_out.get("_ir_analysis"),
-                stock_info    = data_cache.get("stock_info"),
-                current_price = f_out.get("current_price"),
-            )
-            actual_rows = [r for r in full_fin if r.get("type") != "E"]
-            updated_f_out = {**f_out, "_full_financials": actual_rows + new_e_rows}
+        updated_f_out = _apply_thesis_rows(f_out, fe)
 
         return {
             "forward_estimates":  fe,
@@ -749,6 +764,9 @@ def fundamental_critique_node(state: AnalysisState) -> dict:
             output = output.model_dump()
         elif not isinstance(output, dict):
             output = dict(output)
+        # Die Re-Analyse baut die Finanzübersicht neu (E-Zeilen aus der IR-
+        # Konsens-Heuristik) — die bereits vorliegende Wachstumsthese wieder anwenden
+        output = _apply_thesis_rows(output, state.get("forward_estimates"))
 
         agent_conf = state.get("agent_confidence_scores") or {}
         agent_conf = {**agent_conf, "fundamental": float(output.get("self_confidence", 0.70))}
